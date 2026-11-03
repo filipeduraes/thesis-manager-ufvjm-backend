@@ -10,6 +10,7 @@ Antes de começar, instale os seguintes componentes:
 - pip
 - venv
 - Git
+- PostgreSQL
 
 Em distribuições baseadas em Ubuntu ou Linux Mint, execute:
 
@@ -74,13 +75,50 @@ O projeto depende de um arquivo `.env` localizado na raiz do repositório, no me
 
 Esse arquivo é necessário para executar a aplicação e deve conter as variáveis de ambiente exigidas pelo projeto, incluindo as credenciais utilizadas pela aplicação e pela autenticação Google.
 
+Crie o arquivo `.env` e configure os valores para seu ambiente. `DATABASE_URL` deve apontar para um banco PostgreSQL existente; por exemplo:
+
+```dotenv
+DJANGO_SECRET_KEY=gere-uma-chave-secreta
+DEBUG=True
+DATABASE_URL=postgresql://usuario:senha@localhost:5432/thesis_manager
+```
+
+Mantenha a chave Django e as credenciais do banco apenas no `.env`; esse arquivo é ignorado pelo Git.
+
 Cada desenvolvedor deve configurar seu próprio arquivo `.env`, utilizando as variáveis esperadas pelo `settings.py`.
 
 Não compartilhe credenciais reais nem envie o arquivo `.env` para o repositório. Verifique também se ele está listado no `.gitignore`.
 
 ## 6. Preparar as migrações
 
-Com o ambiente virtual ativado e o arquivo `.env` configurado, execute:
+Antes das migrações, crie um usuário e um banco PostgreSQL para a aplicação. Os comandos abaixo devem ser executados em um terminal com acesso ao PostgreSQL. Eles usam `sudo -u postgres` (comum em Linux); se sua instalação não usar `sudo`, conecte-se como administrador com `psql -U postgres`.
+
+Abra o console administrativo do PostgreSQL:
+
+```bash
+sudo -u postgres psql
+```
+
+No prompt do `psql`, crie o usuário da aplicação e o banco, substituindo a senha de exemplo por uma senha forte. O nome do banco, do usuário e a senha devem corresponder à URL configurada em `DATABASE_URL`:
+
+```sql
+CREATE ROLE thesis_manager_user WITH LOGIN PASSWORD 'substitua-por-uma-senha-forte';
+CREATE DATABASE thesis_manager OWNER thesis_manager_user;
+```
+
+Saia do console:
+
+```sql
+\q
+```
+
+Por exemplo, usando os nomes acima, configure `DATABASE_URL` no `.env` como:
+
+```dotenv
+DATABASE_URL=postgresql://thesis_manager_user:substitua-por-uma-senha-forte@localhost:5432/thesis_manager
+```
+
+Com o ambiente virtual ativado, o PostgreSQL em execução e o `.env` configurado, aplique as migrações:
 
 ```bash
 python manage.py migrate
