@@ -30,8 +30,13 @@ Before changing code, read the settings and modules related to the task. Respect
 ### Python and readability
 
 - Use type hints for new or changed functions and methods, including parameters and return values. Prefer precise types and explicit structures; avoid `Any` when a concrete type is possible.
-- Write all docstrings in English and follow the Google style (`Args`, `Returns`, `Raises`, and `Examples` where applicable). Document purpose, non-obvious behavior, side effects, and relevant exceptions; do not merely repeat the signature.
+- Add type hints for local variables when the type is not obvious or to improve clarity.
+- Keep function and method parameter declarations on a single line whenever practical. Never break function/method/constructor parameter declarations across multiple lines. If a declaration becomes excessively long, group related parameters into a small object and pass that object instead of breaking parameter lists across multiple lines. Line breaks are allowed in function/method/constructor calls only when there are many arguments.
+- Do not chain multiple function calls on the same line or split a single function call across multiple lines unnecessarily. Avoid patterns like `func1(func2(x))` in a single complex statement when clarity suffers, and do not break calls like `parse_datetime(str(x))` across lines. Cache intermediate results in clearly named variables on separate lines.
+- Do not chain method calls across multiple lines (e.g., avoid breaking `.filter(...).first()` across lines). Keep method chains on a single line when possible, or assign intermediate objects to variables.
+- Write all docstrings in English and follow the Google style (`Args`, `Returns`, `Raises`, and `Examples` where applicable). Document purpose, non-obvious behavior, side effects, and relevant exceptions; do not merely repeat the signature. Docstrings must follow this exact format: opening triple quotes on its own line, documentation on the next line with indentation matching the triple quotes, closing triple quotes on its own line at the same indentation level as opening. Do NOT add blank lines between triple quotes and documentation.
 - Write developer-facing documentation and code comments in Portuguese. Add comments only to explain why a particular approach was chosen or to clarify something that is not obvious from the code. The code itself should make clear what it does; do not add comments that merely narrate operations.
+- Logging messages may be written in English to keep them consistent across the codebase.
 - Use descriptive and consistent names: `PascalCase` for classes, `snake_case` for functions, methods, variables, and modules, and `UPPER_SNAKE_CASE` for constants. In Django, choose clear names for models, fields, serializers, views, permissions, services, and URLs; avoid obscure abbreviations and generic names such as `data`, `obj`, or `helper` when a specific name is practical.
 - Prefer small functions, single responsibilities, and explicit business rules. Avoid duplication, mutable global state, domain logic hidden in views/serializers, and abstractions without a concrete use.
 - Use `Decimal` for grades or other values that require decimal precision when appropriate. Use timezone-aware dates and keep `USE_TZ` enabled.
@@ -66,3 +71,17 @@ Before changing code, read the settings and modules related to the task. Respect
 - Create or update tests for domain rules, permissions, file validation, state transitions, and API contracts when the task involves those behaviors.
 - Before finishing, run checks appropriate to the change (for example, `python manage.py check` and targeted tests) when the environment allows. Clearly report any check that could not be run and why.
 - Do not commit `.env`, local databases, user uploads, secrets, caches, or generated artifacts.
+
+
+## Authentication (implemented rules)
+
+- Use Django custom user `accounts.User` with UUID PK, `AbstractBaseUser + PermissionsMixin`, `email` unique, `name`, `is_staff`, `is_active`, `date_joined`, `is_superuser`; `USERNAME_FIELD="email"`, `REQUIRED_FIELDS=["name"]`. No `username`, `first_name`, `last_name`. Table `users_user`.
+- Business roles stored in `user_profile_role` with history (no deletion on revoke, `revoked_at`). Only one active role per (user, role). Active roles tracked; session stores `active_profile_role`.
+- Login only via Google Workspace institutional accounts (`@ufvjm.edu.br`). Use django-allauth in headless/social mode (`SOCIALACCOUNT_ONLY=True`). Validate domain, `email_verified` and `hd`. Provision user on first login and assign default `STUDENT` role. No local signup/password recovery.
+- API façade versioned `/api/v1`. `GET /api/v1/session` returns `authenticated`, `authType`, `user`, `role`, `profile`, `roles`, `permissions`, `externalInvitation` (200 for anonymous). `DELETE /api/v1/session` logs out. `GET /api/v1/auth/google/start?next=` returns `{url}` to start Google auth. `PATCH /api/v1/session/active-profile` switches active role.
+- External committee members use temporary invitations (`external_invitation`): generate human token `UFVJM-XXXX-XXXX-XXXX-XXXX` (base32-like), store only `SHA-256` in `token_hash` (`BinaryField(max_length=32)`). `POST /api/v1/auth/external-token` exchanges token for session, flushes previous session, rotates keys, sets `external_invitation_id`/expiration. Sessions authenticated via `ExternalInvitationSessionAuthentication` (no permanent User). TTL configurable.
+- Sessions use `SESSION_ENGINE="django.contrib.sessions.backends.cached_db"` with Redis cache. Cookies HttpOnly, CSRF handled. CORS/CSRF configured for frontend.
+- Audit: `session_audit` tracks sessions (IP, user agent, origin INSTITUTIONAL_NETWORK/VPN/EXTERNAL, login/logout/activity). `audit_log` is append-only with SHA-256 hash chain (`previous_hash`, `row_hash`). Actions include LOGIN, LOGOUT, LOGIN_FAILED, TOKEN_ACCESS, etc.
+- Administrative areas (`/admin/`, `/api/v1/admin/`) restricted by IP/VPN via `ADMIN_ALLOWED_CIDRS`; never trust `X-Forwarded-For` without `TRUSTED_PROXY_COUNT>0`. Empty list denies all in production; return 404 on denial. DEBUG allows localhost.
+- Users: soft delete only (`is_active=False`, revoke roles). Protect last active admin. Email immutable after creation. Admin endpoints: `GET/POST/PATCH/DELETE /api/v1/admin/users`, `GET /api/v1/admin/audit-logs`.
+- Allauth headless configured with browser client; frontend sends `credentials: 'include'`, reads `csrftoken`, sends `X-CSRFToken`.

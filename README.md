@@ -87,6 +87,10 @@ Mantenha a chave Django e as credenciais do banco apenas no `.env`; esse arquivo
 
 Cada desenvolvedor deve configurar seu próprio arquivo `.env`, utilizando as variáveis esperadas pelo `settings.py`.
 
+Para autenticação, configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` e o domínio institucional. Cadastre no Google OAuth a URL de retorno `/accounts/google/login/callback/` no domínio do backend. Em produção, use HTTPS e defina `SESSION_COOKIE_SECURE=True`, `CSRF_COOKIE_SECURE=True`, `SECURE_SSL_REDIRECT=True`, `DJANGO_ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS` e as redes `ADMIN_ALLOWED_CIDRS`. Configure `TRUSTED_PROXY_COUNT` somente quando o backend estiver atrás de proxies confiáveis.
+
+O fluxo da API começa em `GET /api/v1/auth/google/start`; a resposta contém a URL OAuth. A sessão é consultada em `GET /api/v1/session` e encerrada em `DELETE /api/v1/session`. O frontend deve enviar cookies (`credentials: 'include'`) e o cabeçalho `X-CSRFToken` nas requisições de escrita autenticadas. Administradores em rede permitida podem emitir convites em `POST /api/v1/admin/external-invitations`; o token aparece somente nessa resposta e deve ser entregue ao membro externo por canal apropriado. O mesmo recurso lista convites; `DELETE /api/v1/admin/external-invitations/<id>` revoga o convite e invalida a sessão externa.
+
 Não compartilhe credenciais reais nem envie o arquivo `.env` para o repositório. Verifique também se ele está listado no `.gitignore`.
 
 ## 6. Preparar as migrações

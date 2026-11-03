@@ -1,0 +1,651 @@
+"""
+Domain services for authentication, roles, invitations and auditing.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import secrets
+from datetime import timedelta
+from typing import Iterable
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
+from django.db import transaction
+from django.db.models import Q
+from django.http import HttpRequest
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+
+from accounts.models import (
+    AuditAction,
+    AuditLog,
+    ExternalInvitation,
+    InvitationStatus,
+    NetworkOrigin,
+    ProfileRole,
+    SessionAudit,
+    User,
+    UserProfileRole,
+)
+from accounts.network import (
+    classify_ip,
+    get_client_ip,
+    request_origin,
+)
+
+logger = logging.getLogger(__name__)
+
+ROLE_PRIORITY = (
+    ProfileRole.ADMIN,
+    ProfileRole.COORDINATOR,
+    ProfileRole.ADVISOR,
+    ProfileRole.STUDENT,
+)
+TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+TOKEN_PREFIX = "UFVJM"
+TOKEN_GROUPS = 4
+TOKEN_GROUP_SIZE = 4
+
+
+class ExternalTokenError(Exception):
+    """
+    Raised when an external invitation token cannot be exchanged.
+    """
+class LastAdminError(Exception):
+    """
+    Raised when an operation would leave the system without an admin.
+    """
+class UserAlreadyExistsError(Exception):
+    """
+    Raised when an institutional e-mail is already registered.
+    """
+def role_label(role: str | None) -> str:
+    """
+    Return the Portuguese label for a role code.
+    """
+    if not role:
+        return ""
+    try:
+        return ProfileRole(role).label
+    except ValueError:
+        return role
+
+
+def normalize_role(value: str | None) -> str | None:
+    """
+    Accept either a role code or its label and return the code.
+    """
+    if not value:
+        return None
+    candidate = str(value).strip()
+    if candidate.upper() in ProfileRole.values:
+        return candidate.upper()
+    for role in ProfileRole:
+        if role.label.lower() == candidate.lower():
+            return role.value
+    return None
+
+
+def active_role_codes(user: User) -> list[str]:
+    """
+    Return active role codes ordered by business priority.
+    """
+    assigned = set(
+        user.active_profile_roles().values_list("role", flat=True)
+    )
+    return [role for role in ROLE_PRIORITY if role in assigned]
+
+
+def get_active_role(user: User, request: HttpRequest | None = None) -> str | None:
+    """
+    Return the session-selected role or the highest-priority active role.
+    """
+    roles = active_role_codes(user)
+    if not roles:
+        return None
+    selected = request.session.get("active_profile_role") if request else None
+    if selected in roles:
+        return selected
+    return roles[0]
+
+
+def set_active_role(user: User, role: str, request: HttpRequest) -> str:
+    """
+    Persist the active role in the session after validating assignment.
+    """
+    normalized = normalize_role(role)
+    if not normalized or normalized not in active_role_codes(user):
+        raise ValidationError("O usuário não possui o perfil informado.")
+    request.session["active_profile_role"] = normalized
+    return normalized
+
+
+def _initials(name: str, email: str) -> str:
+    parts = [part for part in name.split() if part]
+    if parts:
+        return "".join(part[0].upper() for part in parts[:2])
+    return email[:2].upper()
+
+
+def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None,) -> dict:
+    """
+    Serialize the public user shape expected by the frontend.
+    """
+    role = active_role or get_active_role(user)
+    return {
+        "id": str(user.pk),
+        "name": user.name or user.email,
+        "email": user.email,
+        "role": role_label(role),
+        "roleCode": role,
+        "profile": role_label(role),
+        "affiliation": "",
+        "status": "Ativo" if user.is_active else "Inativo",
+        "initials": _initials(user.name, user.email),
+        "course": None,
+        "lastAccess": last_access.isoformat() if last_access else None,
+    }
+
+
+def build_session_payload(request: HttpRequest) -> dict:
+    """
+    Build the authenticated session contract for the frontend.
+    """
+    from accounts.authentication import ExternalInvitationPrincipal
+
+    if isinstance(request.user, ExternalInvitationPrincipal):
+        invitation = request.external_invitation
+        return {
+            "authenticated": True,
+            "authType": "external",
+            "user": {
+                "id": str(invitation.pk),
+                "name": invitation.name,
+                "email": invitation.email,
+                "role": "Membro externo",
+                "roleCode": "EXTERNAL",
+                "profile": "Membro externo",
+                "affiliation": invitation.institution,
+                "status": "Ativo",
+                "initials": _initials(invitation.name, invitation.email),
+                "course": None,
+                "lastAccess": None,
+            },
+            "role": "EXTERNAL",
+            "profile": "Membro externo",
+            "roles": [],
+            "permissions": [],
+            "externalInvitation": {
+                "id": str(invitation.pk),
+                "name": invitation.name,
+                "email": invitation.email,
+                "institution": invitation.institution,
+                "expiresAt": invitation.expires_at.isoformat(),
+            },
+        }
+
+    user = request.user
+    if not user or not user.is_authenticated:
+        return {
+            "authenticated": False,
+            "authType": None,
+            "user": None,
+            "role": None,
+            "profile": None,
+            "roles": [],
+            "permissions": [],
+            "externalInvitation": None,
+        }
+
+    roles = active_role_codes(user)
+    active_role = get_active_role(user, request)
+    last_access = (
+        user.session_audits.order_by("-last_activity_at")
+        .values_list("last_activity_at", flat=True)
+        .first()
+    )
+    auth_type = (
+        "google"
+        if user.socialaccount_set.filter(provider="google").exists()
+        else "institutional"
+    )
+    return {
+        "authenticated": True,
+        "authType": auth_type,
+        "user": build_user_payload(user, active_role, last_access),
+        "role": active_role,
+        "profile": role_label(active_role),
+        "roles": [{"code": role, "label": role_label(role)} for role in roles],
+        "permissions": roles,
+        "externalInvitation": None,
+    }
+
+
+def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_label: str, actor_user_id: str | None, actor_external_invitation_id: str | None, actor_role: str | None, origin: str, ip_address: str | None, user_agent: str, changes: dict, metadata: dict, occurred_at: timezone.datetime, previous_hash_hex: str | None,) -> dict:
+    return {
+        "actor_user_id": actor_user_id,
+        "actor_external_invitation_id": actor_external_invitation_id,
+        "actor_role": actor_role,
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "entity_app_label": entity_app_label,
+        "origin": origin,
+        "ip_address": ip_address,
+        "user_agent": user_agent,
+        "changes": changes,
+        "metadata": metadata,
+        "occurred_at": occurred_at.isoformat(),
+        "previous_hash": previous_hash_hex,
+    }
+
+
+def record_audit(*, action: str, entity_type: str, entity_id: str, request: HttpRequest | None = None, actor_user: User | None = None, actor_external_invitation: ExternalInvitation | None = None, actor_role: str | None = None, origin: str | None = None, ip_address: str | None = None, user_agent: str | None = None, changes: dict | None = None, metadata: dict | None = None, entity_app_label: str = "accounts",) -> AuditLog:
+    """
+    Append a hash-chained audit entry.
+    """
+    occurred_at = timezone.now()
+    changes = changes or {}
+    metadata = metadata or {}
+
+    if actor_user is None and request is not None:
+        candidate = getattr(request, "user", None)
+        if candidate is not None and candidate.is_authenticated and isinstance(candidate, User):
+            actor_user = candidate
+
+    if actor_role is None and actor_user is not None:
+        actor_role = get_active_role(actor_user, request)
+
+    if request is not None:
+        ip_address = ip_address or get_client_ip(request)
+        user_agent = user_agent or request.META.get("HTTP_USER_AGENT", "")
+        origin = origin or request_origin(request)
+    else:
+        origin = origin or classify_ip(ip_address)
+    user_agent = (user_agent or "")[:512]
+    origin = str(origin)
+
+    with transaction.atomic():
+        previous = (
+            AuditLog.objects.select_for_update()
+            .order_by("-occurred_at", "-id")
+            .first()
+        )
+        previous_hash = previous.row_hash if previous else None
+        previous_hash_hex = (
+            bytes(previous_hash).hex() if previous_hash is not None else None
+        )
+        payload = _audit_payload(
+            action=str(action),
+            entity_type=entity_type,
+            entity_id=str(entity_id),
+            entity_app_label=entity_app_label,
+            actor_user_id=str(actor_user.pk) if actor_user else None,
+            actor_external_invitation_id=(
+                str(actor_external_invitation.pk)
+                if actor_external_invitation
+                else None
+            ),
+            actor_role=str(actor_role) if actor_role else None,
+            origin=origin,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            changes=changes,
+            metadata=metadata,
+            occurred_at=occurred_at,
+            previous_hash_hex=previous_hash_hex,
+        )
+        row_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).digest()
+
+        return AuditLog.objects.create(
+            actor_user=actor_user,
+            actor_external_invitation=actor_external_invitation,
+            actor_role=actor_role,
+            action=action,
+            entity_type=entity_type,
+            entity_id=str(entity_id),
+            entity_app_label=entity_app_label,
+            origin=origin,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            changes=changes,
+            metadata=metadata,
+            previous_hash=previous_hash,
+            row_hash=row_hash,
+            occurred_at=occurred_at,
+        )
+
+
+def count_active_admins(exclude_user: User | None = None) -> int:
+    """
+    Count active users that still hold administrative capabilities.
+    """
+    queryset = User.objects.filter(is_active=True).filter(
+        Q(is_staff=True)
+        | Q(is_superuser=True)
+        | Q(
+            profile_roles__role=ProfileRole.ADMIN,
+            profile_roles__revoked_at__isnull=True,
+        )
+    )
+    if exclude_user is not None:
+        queryset = queryset.exclude(pk=exclude_user.pk)
+    return queryset.distinct().count()
+
+
+def _is_admin_user(user: User) -> bool:
+    return bool(
+        user.is_staff
+        or user.is_superuser
+        or user.has_active_role(ProfileRole.ADMIN)
+    )
+
+
+def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = None,) -> list[str]:
+    """
+    Replace the active roles of a user while preserving history.
+    """
+    normalized_roles = []
+    for role in roles:
+        normalized = normalize_role(role)
+        if not normalized:
+            raise ValidationError("Perfil inválido.")
+        if normalized not in normalized_roles:
+            normalized_roles.append(normalized)
+    if not normalized_roles:
+        raise ValidationError("Informe ao menos um perfil.")
+
+    if (
+        _is_admin_user(user)
+        and ProfileRole.ADMIN not in normalized_roles
+        and count_active_admins(exclude_user=user) == 0
+    ):
+        raise LastAdminError("Não é possível remover o último administrador.")
+
+    current = set(user.active_profile_roles().values_list("role", flat=True))
+    requested = set(normalized_roles)
+    now = timezone.now()
+
+    user.profile_roles.filter(
+        role__in=current - requested,
+        revoked_at__isnull=True,
+    ).update(revoked_at=now)
+
+    for role in requested - current:
+        UserProfileRole.objects.create(
+            user=user,
+            role=role,
+            assigned_by=assigned_by,
+        )
+
+    if ProfileRole.ADMIN in requested and not user.is_staff:
+        user.is_staff = True
+        user.save(update_fields=["is_staff"])
+    elif (
+        ProfileRole.ADMIN not in requested
+        and user.is_staff
+        and not user.is_superuser
+    ):
+        user.is_staff = False
+        user.save(update_fields=["is_staff"])
+
+    return normalized_roles
+
+
+def create_institutional_user(*, email: str, name: str, roles: Iterable[str], assigned_by: User | None = None, request: HttpRequest | None = None,) -> User:
+    """
+    Pre-provision an institutional user without a local password.
+    """
+    normalized_email = (email or "").strip().lower()
+    validate_email(normalized_email)
+    domain = getattr(settings, "INSTITUTIONAL_EMAIL_DOMAIN", "ufvjm.edu.br")
+    if normalized_email.rsplit("@", 1)[-1] != domain:
+        raise ValidationError("Informe um e-mail institucional.")
+    if User.objects.filter(email__iexact=normalized_email).exists():
+        raise UserAlreadyExistsError("Já existe um usuário com este e-mail.")
+
+    with transaction.atomic():
+        user = User.objects.create_user(email=normalized_email, name=name.strip())
+        set_user_roles(user, roles, assigned_by=assigned_by)
+        record_audit(
+            action=AuditAction.CREATE,
+            entity_type="User",
+            entity_id=str(user.pk),
+            entity_app_label="accounts",
+            request=request,
+            actor_user=assigned_by,
+            changes={"email": user.email, "roles": list(roles)},
+        )
+    logger.info("Institutional user created: user_id=%s", user.pk)
+    return user
+
+
+def deactivate_user(user: User, *, actor: User | None = None, request: HttpRequest | None = None,) -> User:
+    """
+    Soft-delete a user, protecting the last administrative account.
+    """
+    if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
+        raise LastAdminError("Não é possível desativar o último administrador.")
+    if actor is not None and actor.pk == user.pk:
+        raise ValidationError("O administrador não pode desativar a própria conta.")
+
+    with transaction.atomic():
+        User.objects.deactivate(user)
+        record_audit(
+            action=AuditAction.DELETE,
+            entity_type="User",
+            entity_id=str(user.pk),
+            entity_app_label="accounts",
+            request=request,
+            actor_user=actor,
+            changes={"is_active": False},
+        )
+    logger.info("User deactivated: user_id=%s", user.pk)
+    return user
+
+
+def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: User | None = None, request: HttpRequest | None = None,) -> User:
+    """
+    Reactivate a previously soft-deleted user.
+    """
+    with transaction.atomic():
+        if not user.is_active:
+            user.is_active = True
+            user.save(update_fields=["is_active"])
+        if roles is not None:
+            set_user_roles(user, roles, assigned_by=actor)
+        record_audit(
+            action=AuditAction.UPDATE,
+            entity_type="User",
+            entity_id=str(user.pk),
+            entity_app_label="accounts",
+            request=request,
+            actor_user=actor,
+            changes={"is_active": True},
+        )
+    return user
+
+
+def _normalize_external_token(token: str) -> str:
+    return (token or "").strip().upper()
+
+
+def hash_external_token(token: str) -> bytes:
+    """
+    Return the SHA-256 digest stored for an external invitation token.
+    """
+    return hashlib.sha256(_normalize_external_token(token).encode("utf-8")).digest()
+
+
+def generate_external_token() -> str:
+    """
+    Generate a human-friendly high-entropy external access token.
+    """
+    groups = [
+        "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(TOKEN_GROUP_SIZE))
+        for _ in range(TOKEN_GROUPS)
+    ]
+    return f"{TOKEN_PREFIX}-{'-'.join(groups)}"
+
+
+def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None,) -> tuple[ExternalInvitation, str]:
+    """
+    Create an external invitation and return its one-time readable token.
+    """
+    normalized_email = (email or "").strip().lower()
+    validate_email(normalized_email)
+    token = generate_external_token()
+    if expires_at is None:
+        expires_at = timezone.now() + timedelta(
+            hours=getattr(settings, "EXTERNAL_INVITATION_TOKEN_TTL_HOURS", 72)
+        )
+
+    with transaction.atomic():
+        invitation = ExternalInvitation.objects.create(
+            invited_by=invited_by,
+            name=name.strip(),
+            email=normalized_email,
+            institution=(institution or "").strip(),
+            token_hash=hash_external_token(token),
+            expires_at=expires_at,
+        )
+        record_audit(
+            action=AuditAction.INVITE,
+            entity_type="ExternalInvitation",
+            entity_id=str(invitation.pk),
+            entity_app_label="accounts",
+            request=request,
+            actor_user=invited_by,
+            metadata={"email": invitation.email},
+        )
+    logger.info("External invitation created: invitation_id=%s", invitation.pk)
+    return invitation, token
+
+
+def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitation:
+    """
+    Exchange a valid invitation token for a temporary external session.
+    """
+    digest = hash_external_token(token)
+    now = timezone.now()
+
+    with transaction.atomic():
+        try:
+            invitation = ExternalInvitation.objects.select_for_update().get(
+                token_hash=digest
+            )
+        except ExternalInvitation.DoesNotExist as exc:
+            logger.warning("External token exchange failed: unknown token.")
+            raise ExternalTokenError("Token inválido ou expirado.") from exc
+
+        if invitation.revoked_at is not None or invitation.status in {
+            InvitationStatus.REVOKED,
+            InvitationStatus.USED,
+            InvitationStatus.DECLINED,
+            InvitationStatus.EXPIRED,
+        }:
+            logger.warning(
+                "External token exchange rejected: invitation_id=%s status=%s",
+                invitation.pk,
+                invitation.status,
+            )
+            raise ExternalTokenError("Token inválido ou expirado.")
+
+        if invitation.expires_at <= now:
+            invitation.status = InvitationStatus.EXPIRED
+            invitation.save(update_fields=["status"])
+            raise ExternalTokenError("Token inválido ou expirado.")
+
+        if invitation.accepted_at is None:
+            invitation.accepted_at = now
+        invitation.used_at = now
+        invitation.status = InvitationStatus.USED
+        invitation.save(
+            update_fields=["accepted_at", "used_at", "status"]
+        )
+
+        ttl_minutes = getattr(settings, "EXTERNAL_SESSION_TTL_MINUTES", 240)
+        session_expires_at = min(
+            now + timedelta(minutes=ttl_minutes),
+            invitation.expires_at,
+        )
+        request.session.flush()
+        request.session["external_invitation_id"] = str(invitation.pk)
+        request.session["external_session_expires_at"] = (
+            session_expires_at.isoformat()
+        )
+        request.session.set_expiry(
+            max(1, int((session_expires_at - now).total_seconds()))
+        )
+
+        record_audit(
+            action=AuditAction.TOKEN_ACCESS,
+            entity_type="ExternalInvitation",
+            entity_id=str(invitation.pk),
+            entity_app_label="accounts",
+            request=request,
+            actor_external_invitation=invitation,
+            metadata={"session_expires_at": session_expires_at.isoformat()},
+        )
+
+    logger.info("External token exchanged: invitation_id=%s", invitation.pk)
+    return invitation
+
+
+def revoke_external_invitation(invitation: ExternalInvitation, *, revoked_by: User | None = None, request: HttpRequest | None = None,) -> ExternalInvitation:
+    """
+    Revoke an invitation, preventing further token exchanges.
+    """
+    if invitation.revoked_at is None:
+        invitation.revoked_at = timezone.now()
+    invitation.status = InvitationStatus.REVOKED
+    invitation.revoked_by = revoked_by
+    invitation.save(update_fields=["revoked_at", "status", "revoked_by"])
+    record_audit(
+        action=AuditAction.DELETE,
+        entity_type="ExternalInvitation",
+        entity_id=str(invitation.pk),
+        entity_app_label="accounts",
+        request=request,
+        actor_user=revoked_by,
+        changes={"status": InvitationStatus.REVOKED},
+    )
+    return invitation
+
+
+def external_session_expiration(request: HttpRequest) -> timezone.datetime | None:
+    """
+    Return the expiration timestamp stored in the external session.
+    """
+    raw_value = request.session.get("external_session_expires_at")
+    if not raw_value:
+        return None
+    raw_value_str = str(raw_value)
+    return parse_datetime(raw_value_str)
+
+
+def origin_for_session(request: HttpRequest) -> NetworkOrigin:
+    """
+    Return and cache the request network origin.
+    """
+    origin = request_origin(request)
+    request.network_origin = origin
+    return origin
+
+
+def session_audit_for_request(request: HttpRequest, user: User,) -> SessionAudit | None:
+    """
+    Return the current session audit row, if any.
+    """
+    audit_id = request.session.get("session_audit_id")
+    if audit_id:
+        return SessionAudit.objects.filter(pk=audit_id, user=user).first()
+    session_key = request.session.session_key
+    if not session_key:
+        return None
+    return SessionAudit.objects.filter(session_key=session_key, user=user).first()
