@@ -120,6 +120,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.allauth.org/
 
 AUTH_USER_MODEL = "accounts.User"
+FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
+LOGIN_REDIRECT_URL = FRONTEND_URL
+LOGOUT_REDIRECT_URL = FRONTEND_URL
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
@@ -172,7 +175,7 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
 HEADLESS_ONLY = True
 HEADLESS_CLIENTS = ("browser",)
 HEADLESS_FRONTEND_URLS = {
-    "socialaccount_login_error": f"{env('FRONTEND_URL', default='http://localhost:3000')}/login?erro=social",
+    "socialaccount_login_error": f"{FRONTEND_URL}/login?erro=social",
 }
 
 ALLAUTH_TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
@@ -207,7 +210,6 @@ REST_FRAMEWORK = {
 # Frontend e CORS
 # https://github.com/adamchainz/django-cors-headers
 
-FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
 CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
     default=[FRONTEND_URL],
