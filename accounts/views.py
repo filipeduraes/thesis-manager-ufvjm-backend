@@ -18,7 +18,7 @@ from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -33,7 +33,6 @@ from accounts.models import (
 )
 from accounts.permissions import IsInstitutionalAdmin
 from accounts.serializers import (
-    ActiveProfileSerializer,
     AdminUserCreateSerializer,
     AdminUserReadSerializer,
     AdminUserUpdateSerializer,
@@ -45,7 +44,6 @@ from accounts.services import (
     ExternalTokenError,
     LastAdminError,
     UserAlreadyExistsError,
-    active_role_codes,
     build_session_payload,
     create_external_invitation,
     create_institutional_user,
@@ -53,8 +51,6 @@ from accounts.services import (
     exchange_external_token,
     record_audit,
     revoke_external_invitation,
-    role_label,
-    set_active_role,
     set_user_roles,
 )
 
@@ -69,71 +65,53 @@ class SessionView(APIView):
     throttle_scope = "session"
 
     def get(self, request) -> Response:
-        get_token(request._request)
-        return Response(build_session_payload(request), status=status.HTTP_200_OK)
+        csrf_token = get_token(request._request)
+        payload = build_session_payload(request)
+        payload["csrfToken"] = csrf_token
+        return Response(payload, status=status.HTTP_200_OK)
 
     def delete(self, request) -> Response:
         user = getattr(request, "user", None)
         if isinstance(user, ExternalInvitationPrincipal):
             invitation = getattr(request, "external_invitation", None)
             request.session.flush()
-            record_audit(
-                action=AuditAction.LOGOUT,
-                entity_type="ExternalInvitation",
-                entity_id=str(invitation.pk) if invitation else "unknown",
-                entity_app_label="accounts",
-                request=request,
-                actor_external_invitation=invitation,
-            )
-            return Response(status=status.HTTP_204_NO_CONTENT)
-
-        if user and user.is_authenticated:
-            record_audit(
-                action=AuditAction.LOGOUT,
-                entity_type="User",
-                entity_id=str(user.pk),
-                entity_app_label="accounts",
-                request=request,
-                actor_user=user,
-            )
-            logout(request)
+            try:
+                record_audit(
+                    action=AuditAction.LOGOUT,
+                    entity_type="ExternalInvitation",
+                    entity_id=str(invitation.pk) if invitation else "unknown",
+                    entity_app_label="accounts",
+                    request=request,
+                    actor_external_invitation=invitation,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record external logout audit: invitation_id=%s",
+                    getattr(invitation, "pk", None),
+                )
         else:
-            request.session.flush()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+            if user and user.is_authenticated:
+                try:
+                    record_audit(
+                        action=AuditAction.LOGOUT,
+                        entity_type="User",
+                        entity_id=str(user.pk),
+                        entity_app_label="accounts",
+                        request=request,
+                        actor_user=user,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to record logout audit: user_id=%s",
+                        getattr(user, "pk", None),
+                    )
+                logout(request)
+            else:
+                request.session.flush()
 
-
-class ActiveProfileView(APIView):
-    """
-    Switch the active business profile stored in the session.
-    """
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "session"
-
-    def patch(self, request) -> Response:
-        if isinstance(request.user, ExternalInvitationPrincipal):
-            return Response(
-                {"detail": "Não é possível alternar o perfil nesta sessão."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        serializer = ActiveProfileSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            active_role = set_active_role(
-                request.user, serializer.validated_data["role"], request
-            )
-        except ValidationError as exc:
-            return Response(
-                {"detail": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return Response(
-            {
-                "profile": role_label(active_role),
-                "role": active_role,
-                "roleCode": active_role,
-            },
-            status=status.HTTP_200_OK,
-        )
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie(settings.SESSION_COOKIE_NAME)
+        return response
 
 
 class GoogleStartView(APIView):

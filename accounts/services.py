@@ -9,7 +9,9 @@ import logging
 import secrets
 from datetime import timedelta
 from typing import Iterable
+from urllib.parse import urlsplit
 
+from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
@@ -99,28 +101,14 @@ def active_role_codes(user: User) -> list[str]:
     return [role for role in ROLE_PRIORITY if role in assigned]
 
 
-def get_active_role(user: User, request: HttpRequest | None = None) -> str | None:
+def get_active_role(user: User) -> str | None:
     """
-    Return the session-selected role or the highest-priority active role.
+    Return the highest-priority role currently assigned in the database.
     """
     roles = active_role_codes(user)
     if not roles:
         return None
-    selected = request.session.get("active_profile_role") if request else None
-    if selected in roles:
-        return selected
     return roles[0]
-
-
-def set_active_role(user: User, role: str, request: HttpRequest) -> str:
-    """
-    Persist the active role in the session after validating assignment.
-    """
-    normalized = normalize_role(role)
-    if not normalized or normalized not in active_role_codes(user):
-        raise ValidationError("O usuário não possui o perfil informado.")
-    request.session["active_profile_role"] = normalized
-    return normalized
 
 
 def _initials(name: str, email: str) -> str:
@@ -130,7 +118,23 @@ def _initials(name: str, email: str) -> str:
     return email[:2].upper()
 
 
-def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None,) -> dict:
+def _avatar_url(social_account: SocialAccount | None) -> str | None:
+    """
+    Return a safe profile picture URL stored by the social provider.
+    """
+    if social_account is None:
+        return None
+    candidate = (social_account.extra_data or {}).get("picture")
+    if not isinstance(candidate, str):
+        return None
+    candidate = candidate.strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return candidate
+
+
+def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None, avatar_url: str | None = None,) -> dict:
     """
     Serialize the public user shape expected by the frontend.
     """
@@ -145,6 +149,7 @@ def build_user_payload(user: User, active_role: str | None = None, last_access: 
         "affiliation": "",
         "status": "Ativo" if user.is_active else "Inativo",
         "initials": _initials(user.name, user.email),
+        "avatarUrl": avatar_url,
         "course": None,
         "lastAccess": last_access.isoformat() if last_access else None,
     }
@@ -171,6 +176,7 @@ def build_session_payload(request: HttpRequest) -> dict:
                 "affiliation": invitation.institution,
                 "status": "Ativo",
                 "initials": _initials(invitation.name, invitation.email),
+                "avatarUrl": None,
                 "course": None,
                 "lastAccess": None,
             },
@@ -201,21 +207,19 @@ def build_session_payload(request: HttpRequest) -> dict:
         }
 
     roles = active_role_codes(user)
-    active_role = get_active_role(user, request)
+    active_role = get_active_role(user)
     last_access = (
         user.session_audits.order_by("-last_activity_at")
         .values_list("last_activity_at", flat=True)
         .first()
     )
-    auth_type = (
-        "google"
-        if user.socialaccount_set.filter(provider="google").exists()
-        else "institutional"
-    )
+    google_account = user.socialaccount_set.filter(provider="google").first()
+    auth_type = "google" if google_account else "institutional"
+    avatar_url = _avatar_url(google_account)
     return {
         "authenticated": True,
         "authType": auth_type,
-        "user": build_user_payload(user, active_role, last_access),
+        "user": build_user_payload(user, active_role, last_access, avatar_url),
         "role": active_role,
         "profile": role_label(active_role),
         "roles": [{"code": role, "label": role_label(role)} for role in roles],
@@ -257,7 +261,7 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
             actor_user = candidate
 
     if actor_role is None and actor_user is not None:
-        actor_role = get_active_role(actor_user, request)
+        actor_role = get_active_role(actor_user)
 
     if request is not None:
         ip_address = ip_address or get_client_ip(request)

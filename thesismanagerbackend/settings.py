@@ -169,6 +169,7 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
         "AUTH_PARAMS": {
             "access_type": "online",
             "hd": INSTITUTIONAL_EMAIL_DOMAIN,
+            "prompt": "select_account",
         },
     }
 

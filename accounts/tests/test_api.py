@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest import mock
 
+from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -47,6 +48,61 @@ class SessionApiTests(TestCase):
         self.assertTrue(data["authenticated"])
         self.assertEqual(data["role"], ProfileRole.ADVISOR)
         self.assertEqual(len(data["roles"]), 2)
+
+    def test_authenticated_session_returns_google_avatar(self) -> None:
+        user = User.objects.create_user(
+            email="aluno@ufvjm.edu.br", name="Aluno Teste"
+        )
+        UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        SocialAccount.objects.create(
+            user=user,
+            provider="google",
+            uid="google-123",
+            extra_data={"picture": "https://lh3.googleusercontent.com/a/test"},
+        )
+        self.client.force_authenticate(user=user)
+        response = self.client.get("/api/v1/session")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["authType"], "google")
+        self.assertEqual(
+            data["user"]["avatarUrl"],
+            "https://lh3.googleusercontent.com/a/test",
+        )
+
+    def test_logout_clears_session_and_accepts_csrf_from_payload(self) -> None:
+        user = User.objects.create_user(
+            email="aluno@ufvjm.edu.br", name="Aluno Teste"
+        )
+        UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        client = APIClient(enforce_csrf_checks=True)
+        client.force_login(user)
+
+        session_response = client.get("/api/v1/session")
+        csrf_token = session_response.json()["csrfToken"]
+        self.assertTrue(csrf_token)
+
+        response = client.delete(
+            "/api/v1/session",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(response.status_code, 204)
+
+        after_logout = client.get("/api/v1/session")
+        self.assertFalse(after_logout.json()["authenticated"])
+
+    def test_active_profile_switching_is_not_available(self) -> None:
+        user = User.objects.create_user(
+            email="aluno@ufvjm.edu.br", name="Aluno Teste"
+        )
+        UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        self.client.force_authenticate(user=user)
+        response = self.client.patch(
+            "/api/v1/session/active-profile",
+            {"role": ProfileRole.ADMIN},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 404)
 
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")

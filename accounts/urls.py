@@ -7,11 +7,6 @@ from accounts import views
 
 urlpatterns = [
     path("api/v1/session", views.SessionView.as_view(), name="api_session"),
-    path(
-        "api/v1/session/active-profile",
-        views.ActiveProfileView.as_view(),
-        name="api_session_active_profile",
-    ),
     path("api/v1/auth/google/start", views.GoogleStartView.as_view(), name="api_google_start"),
     path(
         "api/v1/auth/external-token",

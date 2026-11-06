@@ -32,14 +32,16 @@ class InstitutionalSocialAccountAdapter(DefaultSocialAccountAdapter):
     """
     def pre_social_login(self, request: HttpRequest, sociallogin: SocialLogin) -> None:
         self._validate_social_login(sociallogin)
+        self._sync_existing_user_name(sociallogin)
 
     def populate_user(self, request: HttpRequest, sociallogin: SocialLogin, data: dict,):
         user = super().populate_user(request, sociallogin, data)
-        full_name = (data.get("name") or "").strip()
+        full_name = self._extract_full_name(data, sociallogin)
+        current_name = (user.name or "").strip()
         if full_name:
             user.name = full_name
-        elif not user.name:
-            user.name = user.email
+        elif not current_name or current_name.lower() == user.email.strip().lower():
+            user.name = self._fallback_name(user.email)
         return user
 
     def save_user(self, request: HttpRequest, sociallogin: SocialLogin, form=None,):
@@ -57,6 +59,54 @@ class InstitutionalSocialAccountAdapter(DefaultSocialAccountAdapter):
     def is_open_for_signup(self, request: HttpRequest, sociallogin: SocialLogin) -> bool:
         self._validate_social_login(sociallogin)
         return True
+
+    def _sync_existing_user_name(self, sociallogin: SocialLogin) -> None:
+        """
+        Keep an existing user's display name aligned with the Google profile.
+        """
+        user = sociallogin.user
+        if user is None or user.pk is None:
+            return
+        extra_data = sociallogin.account.extra_data or {}
+        full_name = self._extract_full_name(extra_data, sociallogin)
+        current_name = (user.name or "").strip()
+        if full_name:
+            desired_name = full_name
+        elif not current_name or current_name.lower() == user.email.lower():
+            desired_name = self._fallback_name(user.email)
+        else:
+            desired_name = current_name
+        if desired_name and desired_name != user.name:
+            user.name = desired_name
+            user.save(update_fields=["name"])
+
+    def _extract_full_name(self, data: dict, sociallogin: SocialLogin) -> str:
+        extra_data = sociallogin.account.extra_data or {}
+        candidates = [
+            data.get("name"),
+            extra_data.get("name"),
+            " ".join(
+                part
+                for part in [data.get("first_name"), data.get("last_name")]
+                if isinstance(part, str) and part.strip()
+            ),
+            " ".join(
+                part
+                for part in [extra_data.get("given_name"), extra_data.get("family_name")]
+                if isinstance(part, str) and part.strip()
+            ),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, str):
+                normalized = " ".join(candidate.split())
+                if normalized:
+                    return normalized
+        return ""
+
+    def _fallback_name(self, email: str) -> str:
+        local_part = (email or "").split("@", 1)[0]
+        words = local_part.replace(".", " ").replace("_", " ").replace("-", " ").split()
+        return " ".join(word.capitalize() for word in words) or email
 
     def _validate_social_login(self, sociallogin: SocialLogin) -> None:
         if sociallogin.account.provider != "google":

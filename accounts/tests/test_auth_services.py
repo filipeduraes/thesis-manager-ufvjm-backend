@@ -6,7 +6,6 @@ from __future__ import annotations
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
@@ -18,7 +17,6 @@ from accounts.services import (
     create_external_invitation,
     exchange_external_token,
     get_active_role,
-    set_active_role,
     set_user_roles,
 )
 
@@ -36,10 +34,9 @@ class TestSession(dict):
 
 class RoleServicesTests(TestCase):
     """
-    Test role assignment and session selection.
+    Test role assignment and database-derived role resolution.
     """
     def setUp(self) -> None:
-        self.factory = RequestFactory()
         self.user = User.objects.create_user(
             email="aluno@ufvjm.edu.br", name="Aluno"
         )
@@ -53,17 +50,11 @@ class RoleServicesTests(TestCase):
             [ProfileRole.ADMIN, ProfileRole.ADVISOR, ProfileRole.STUDENT],
         )
 
-    def test_set_active_role_validates_assignment(self) -> None:
-        request = self.factory.get("/")
-        request.session = TestSession()
-        with self.assertRaises(ValidationError):
-            set_active_role(self.user, ProfileRole.ADMIN, request)
-        self.user.is_staff = True
-        self.user.save()
-        set_user_roles(self.user, [ProfileRole.ADMIN], assigned_by=self.user)
-        active_role = set_active_role(self.user, ProfileRole.ADMIN, request)
-        self.assertEqual(active_role, ProfileRole.ADMIN)
-        self.assertEqual(get_active_role(self.user, request), ProfileRole.ADMIN)
+    def test_get_active_role_uses_highest_priority_role(self) -> None:
+        UserProfileRole.objects.create(user=self.user, role=ProfileRole.ADVISOR)
+        self.assertEqual(get_active_role(self.user), ProfileRole.ADVISOR)
+        set_user_roles(self.user, [ProfileRole.STUDENT], assigned_by=self.user)
+        self.assertEqual(get_active_role(self.user), ProfileRole.STUDENT)
 
 
 class AdminProtectionTests(TestCase):

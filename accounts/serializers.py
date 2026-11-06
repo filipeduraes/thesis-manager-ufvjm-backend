@@ -210,24 +210,6 @@ class AdminUserUpdateSerializer(serializers.Serializer):
         return attrs
 
 
-class ActiveProfileSerializer(serializers.Serializer):
-    """
-    Validate active profile switching requests.
-    """
-    profile = serializers.CharField(required=False, allow_blank=True)
-    role = serializers.CharField(required=False, allow_blank=True)
-
-    def validate(self, attrs: dict) -> dict:
-        raw_role = attrs.get("role") or attrs.get("profile")
-        normalized = normalize_role(raw_role)
-        if not normalized:
-            raise serializers.ValidationError(
-                {"profile": "Perfil inválido."}
-            )
-        attrs["role"] = normalized
-        return attrs
-
-
 class ExternalTokenSerializer(serializers.Serializer):
     """
     Validate external invitation token exchanges.
