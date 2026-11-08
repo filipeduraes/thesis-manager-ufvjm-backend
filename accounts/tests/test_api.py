@@ -46,8 +46,12 @@ class SessionApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["authenticated"])
-        self.assertEqual(data["role"], ProfileRole.ADVISOR)
-        self.assertEqual(len(data["roles"]), 2)
+        self.assertEqual(data["user"]["roleCode"], ProfileRole.ADVISOR)
+        self.assertEqual(data["user"]["roleLabel"], "Orientador")
+        self.assertEqual(len(data["user"]["roles"]), 2)
+        self.assertNotIn("role", data)
+        self.assertNotIn("profile", data)
+        self.assertNotIn("permissions", data)
 
     def test_authenticated_session_returns_google_avatar(self) -> None:
         user = User.objects.create_user(

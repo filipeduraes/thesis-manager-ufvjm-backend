@@ -134,30 +134,47 @@ def _avatar_url(social_account: SocialAccount | None) -> str | None:
     return candidate
 
 
-def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None, avatar_url: str | None = None,) -> dict:
+def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None, avatar_url: str | None = None, roles: list[str] | None = None,) -> dict:
     """
     Serialize the public user shape expected by the frontend.
+
+    Args:
+        user: Authenticated user instance.
+        active_role: Effective role code, when already resolved.
+        last_access: Last recorded activity timestamp.
+        avatar_url: Optional profile image URL.
+        roles: Active role codes, when already resolved.
+
+    Returns:
+        dict: Serialized user payload.
     """
+    resolved_roles = roles if roles is not None else active_role_codes(user)
     role = active_role or get_active_role(user)
     return {
         "id": str(user.pk),
         "name": user.name or user.email,
         "email": user.email,
-        "role": role_label(role),
-        "roleCode": role,
-        "profile": role_label(role),
         "affiliation": "",
         "status": "Ativo" if user.is_active else "Inativo",
         "initials": _initials(user.name, user.email),
         "avatarUrl": avatar_url,
         "course": None,
         "lastAccess": last_access.isoformat() if last_access else None,
+        "roleCode": role,
+        "roleLabel": role_label(role),
+        "roles": [{"code": code, "label": role_label(code)} for code in resolved_roles],
     }
 
 
 def build_session_payload(request: HttpRequest) -> dict:
     """
     Build the authenticated session contract for the frontend.
+
+    Args:
+        request: Current HTTP request.
+
+    Returns:
+        dict: Session payload consumed by the frontend.
     """
     from accounts.authentication import ExternalInvitationPrincipal
 
@@ -170,20 +187,16 @@ def build_session_payload(request: HttpRequest) -> dict:
                 "id": str(invitation.pk),
                 "name": invitation.name,
                 "email": invitation.email,
-                "role": "Membro externo",
-                "roleCode": "EXTERNAL",
-                "profile": "Membro externo",
                 "affiliation": invitation.institution,
                 "status": "Ativo",
                 "initials": _initials(invitation.name, invitation.email),
                 "avatarUrl": None,
                 "course": None,
                 "lastAccess": None,
+                "roleCode": "EXTERNAL",
+                "roleLabel": "Membro externo",
+                "roles": [],
             },
-            "role": "EXTERNAL",
-            "profile": "Membro externo",
-            "roles": [],
-            "permissions": [],
             "externalInvitation": {
                 "id": str(invitation.pk),
                 "name": invitation.name,
@@ -199,10 +212,6 @@ def build_session_payload(request: HttpRequest) -> dict:
             "authenticated": False,
             "authType": None,
             "user": None,
-            "role": None,
-            "profile": None,
-            "roles": [],
-            "permissions": [],
             "externalInvitation": None,
         }
 
@@ -219,11 +228,7 @@ def build_session_payload(request: HttpRequest) -> dict:
     return {
         "authenticated": True,
         "authType": auth_type,
-        "user": build_user_payload(user, active_role, last_access, avatar_url),
-        "role": active_role,
-        "profile": role_label(active_role),
-        "roles": [{"code": role, "label": role_label(role)} for role in roles],
-        "permissions": roles,
+        "user": build_user_payload(user, active_role, last_access, avatar_url, roles),
         "externalInvitation": None,
     }
 
@@ -363,6 +368,8 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
             normalized_roles.append(normalized)
     if not normalized_roles:
         raise ValidationError("Informe ao menos um perfil.")
+    if ProfileRole.STUDENT in normalized_roles and len(normalized_roles) > 1:
+        raise ValidationError("O perfil Aluno não pode ser combinado com outros perfis.")
 
     if (
         _is_admin_user(user)
@@ -416,6 +423,15 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
     with transaction.atomic():
         user = User.objects.create_user(email=normalized_email, name=name.strip())
         set_user_roles(user, roles, assigned_by=assigned_by)
+        # Resolve coordenações pendentes vinculadas ao e-mail institucional.
+        try:
+            from academic.services import resolve_pending_coordinators_for_user
+
+            resolve_pending_coordinators_for_user(user, request=request)
+        except Exception:
+            logger.exception(
+                "Failed to resolve pending coordinators: user_id=%s", user.pk
+            )
         record_audit(
             action=AuditAction.CREATE,
             entity_type="User",

@@ -25,6 +25,11 @@ urlpatterns = [
         name="api_admin_audit_logs",
     ),
     path(
+        "api/v1/admin/audit-logs/export",
+        views.AdminAuditLogsExportView.as_view(),
+        name="api_admin_audit_logs_export",
+    ),
+    path(
         "api/v1/admin/external-invitations",
         views.AdminExternalInvitationsView.as_view(),
         name="api_admin_external_invitations",

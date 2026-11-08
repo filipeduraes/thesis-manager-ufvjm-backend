@@ -33,6 +33,17 @@ class InstitutionalSocialAccountAdapter(DefaultSocialAccountAdapter):
     def pre_social_login(self, request: HttpRequest, sociallogin: SocialLogin) -> None:
         self._validate_social_login(sociallogin)
         self._sync_existing_user_name(sociallogin)
+        user = sociallogin.user
+        if user is not None and user.pk is not None:
+            try:
+                from academic.services import resolve_pending_coordinators_for_user
+
+                resolve_pending_coordinators_for_user(user, request=request)
+            except Exception:
+                logger.exception(
+                    "Failed to resolve pending coordinators on social login: user_id=%s",
+                    user.pk,
+                )
 
     def populate_user(self, request: HttpRequest, sociallogin: SocialLogin, data: dict,):
         user = super().populate_user(request, sociallogin, data)
@@ -53,6 +64,16 @@ class InstitutionalSocialAccountAdapter(DefaultSocialAccountAdapter):
         ).exists()
         if not has_student_role:
             UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        # Concede acesso de coordenador quando o e-mail já estiver vinculado a cursos.
+        try:
+            from academic.services import resolve_pending_coordinators_for_user
+
+            resolve_pending_coordinators_for_user(user, request=request)
+        except Exception:
+            logger.exception(
+                "Failed to resolve pending coordinators on social signup: user_id=%s",
+                user.pk,
+            )
         logger.info("Institutional user provisioned: user_id=%s", user.pk)
         return user
 

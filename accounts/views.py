@@ -18,6 +18,7 @@ from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -55,6 +56,57 @@ from accounts.services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AdminPagination(PageNumberPagination):
+    """Paginação administrativa com metadados explícitos."""
+
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        page_size = self.get_page_size(self.request) or self.page_size
+        count = self.page.paginator.count
+        total_pages = self.page.paginator.num_pages
+        page = self.page.number
+        last_page_count = count % page_size
+        if last_page_count == 0 and count > 0:
+            last_page_count = page_size
+        return Response(
+            {
+                "count": count,
+                "page": page,
+                "pageSize": page_size,
+                "totalPages": total_pages,
+                "lastPageCount": last_page_count,
+                "next": self.get_next_link(),
+                "previous": self.get_previous_link(),
+                "results": data,
+            }
+        )
+
+
+class HealthView(APIView):
+    """
+    Return a minimal service health response.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "session"
+
+    def get(self, request) -> Response:
+        """
+        Handle health-check requests.
+
+        Args:
+            request: HTTP request.
+
+        Returns:
+            Response: Health status payload.
+        """
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 class SessionView(APIView):
@@ -206,14 +258,44 @@ class AdminUsersView(APIView):
     permission_classes = [IsInstitutionalAdmin]
     throttle_scope = "session"
 
-    def get(self, request) -> Response:
-        queryset = User.objects.prefetch_related(
+    def _queryset(self):
+        prefetches = [
             Prefetch(
                 "profile_roles",
                 queryset=UserProfileRole.objects.filter(revoked_at__isnull=True),
                 to_attr="active_role_records",
+            ),
+        ]
+        try:
+            from academic.models import UserCourseAssignment
+
+            prefetches.append(
+                Prefetch(
+                    "course_assignments",
+                    queryset=UserCourseAssignment.objects.filter(
+                        is_active=True, revoked_at__isnull=True
+                    ).select_related("course"),
+                    to_attr="active_course_assignment_records",
+                )
             )
-        ).order_by("email")
+        except Exception:
+            pass
+        try:
+            from allauth.socialaccount.models import SocialAccount
+
+            prefetches.append(
+                Prefetch(
+                    "socialaccount_set",
+                    queryset=SocialAccount.objects.filter(provider="google"),
+                    to_attr="google_social_accounts",
+                )
+            )
+        except Exception:
+            pass
+        return User.objects.prefetch_related(*prefetches).order_by("email")
+
+    def get(self, request) -> Response:
+        queryset = self._queryset()
         role_filter = request.query_params.get("role")
         status_filter = request.query_params.get("status")
         search = request.query_params.get("search") or request.query_params.get(
@@ -249,53 +331,48 @@ class AdminUsersView(APIView):
                 Q(name__icontains=term) | Q(email__icontains=term)
             )
 
-        page = self._paginate(request, queryset)
+        paginator = AdminPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
         serializer = AdminUserReadSerializer(page, many=True)
-        return self._paginated_response(request, serializer.data, page, queryset)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request) -> Response:
         serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            user = create_institutional_user(
-                email=serializer.validated_data["email"],
-                name=serializer.validated_data["name"],
-                roles=serializer.validated_data["roles"],
-                assigned_by=request.user if request.user.is_authenticated else None,
-                request=request,
-            )
+            with transaction.atomic():
+                user = create_institutional_user(
+                    email=serializer.validated_data["email"],
+                    name=serializer.validated_data["name"],
+                    roles=serializer.validated_data["roles"],
+                    assigned_by=request.user if request.user.is_authenticated else None,
+                    request=request,
+                )
+                course_id = serializer.validated_data.get("courseId")
+                if course_id:
+                    from academic.models import Course
+                    from academic.services import set_user_course_assignment
+
+                    course = Course.objects.filter(pk=course_id).first()
+                    if course:
+                        set_user_course_assignment(
+                            user,
+                            course,
+                            assigned_by=request.user if request.user.is_authenticated else None,
+                            request=request,
+                        )
         except UserAlreadyExistsError as exc:
             return Response(
                 {"detail": str(exc)},
                 status=status.HTTP_409_CONFLICT,
             )
         except ValidationError as exc:
-            return Response(
-                {"detail": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": str(exc)}
+            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.prefetch_related(
-            Prefetch(
-                "profile_roles",
-                queryset=UserProfileRole.objects.filter(revoked_at__isnull=True),
-                to_attr="active_role_records",
-            )
-        ).get(pk=user.pk)
+        user = self._queryset().get(pk=user.pk)
         serializer = AdminUserReadSerializer(user)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-    def _paginate(self, request, queryset):
-        from rest_framework.pagination import PageNumberPagination
-
-        paginator = PageNumberPagination()
-        paginator.page_size = 20
-        paginator.page_size_query_param = "page_size"
-        self.paginator = paginator
-        return paginator.paginate_queryset(queryset, request, view=self)
-
-    def _paginated_response(self, request, data, page, queryset):
-        return self.paginator.get_paginated_response(data)
 
 
 class AdminUserDetailView(APIView):
@@ -306,14 +383,41 @@ class AdminUserDetailView(APIView):
     throttle_scope = "session"
 
     def get_object(self, user_id):
-        return get_object_or_404(
-            User.objects.prefetch_related(
-                Prefetch(
-                    "profile_roles",
-                    queryset=UserProfileRole.objects.filter(revoked_at__isnull=True),
-                    to_attr="active_role_records",
-                )
+        prefetches = [
+            Prefetch(
+                "profile_roles",
+                queryset=UserProfileRole.objects.filter(revoked_at__isnull=True),
+                to_attr="active_role_records",
             ),
+        ]
+        try:
+            from academic.models import UserCourseAssignment
+
+            prefetches.append(
+                Prefetch(
+                    "course_assignments",
+                    queryset=UserCourseAssignment.objects.filter(
+                        is_active=True, revoked_at__isnull=True
+                    ).select_related("course"),
+                    to_attr="active_course_assignment_records",
+                )
+            )
+        except Exception:
+            pass
+        try:
+            from allauth.socialaccount.models import SocialAccount
+
+            prefetches.append(
+                Prefetch(
+                    "socialaccount_set",
+                    queryset=SocialAccount.objects.filter(provider="google"),
+                    to_attr="google_social_accounts",
+                )
+            )
+        except Exception:
+            pass
+        return get_object_or_404(
+            User.objects.prefetch_related(*prefetches),
             pk=user_id,
         )
 
@@ -322,40 +426,81 @@ class AdminUserDetailView(APIView):
         serializer = AdminUserUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         validated = serializer.validated_data
+        audit_changes: dict[str, object] = {}
+        previous_roles = [
+            record.role
+            for record in getattr(user, "active_role_records", []) or []
+        ]
+        previous_course_records = getattr(user, "active_course_assignment_records", []) or []
+        previous_course = previous_course_records[0].course if previous_course_records else None
+        previous_is_active = user.is_active
 
         try:
             with transaction.atomic():
-                if "name" in validated:
-                    user.name = validated["name"]
-                    user.save(update_fields=["name"])
                 if "roles" in validated:
                     set_user_roles(
                         user,
                         validated["roles"],
                         assigned_by=request.user if request.user.is_authenticated else None,
                     )
+                    audit_changes["roles"] = {
+                        "from": previous_roles,
+                        "to": validated["roles"],
+                    }
+                if "courseId" in request.data:
+                    from academic.models import Course
+                    from academic.services import set_user_course_assignment
+
+                    raw_course = request.data.get("courseId")
+                    course = None
+                    if raw_course:
+                        course = Course.objects.filter(pk=raw_course).first()
+                        if not course:
+                            return Response(
+                                {"detail": "Curso inválido."},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                    set_user_course_assignment(
+                        user,
+                        course,
+                        assigned_by=request.user if request.user.is_authenticated else None,
+                        request=request,
+                    )
+                    audit_changes["course"] = {
+                        "from": previous_course.name if previous_course else None,
+                        "to": course.name if course else None,
+                    }
                 if "is_active" in validated:
                     if validated["is_active"] and not user.is_active:
                         user.is_active = True
                         user.save(update_fields=["is_active"])
-                        record_audit(
-                            action=AuditAction.UPDATE,
-                            entity_type="User",
-                            entity_id=str(user.pk),
-                            entity_app_label="accounts",
-                            request=request,
-                            actor_user=request.user,
-                            changes={"is_active": True},
-                        )
+                        audit_changes["is_active"] = {
+                            "from": previous_is_active,
+                            "to": True,
+                        }
                     elif not validated["is_active"] and user.is_active:
                         deactivate_user(
                             user,
                             actor=request.user if request.user.is_authenticated else None,
                             request=request,
                         )
+                        # deactivate_user já registra a exclusão lógica.
+                        audit_changes = {}
+                if audit_changes:
+                    record_audit(
+                        action=AuditAction.UPDATE,
+                        entity_type="User",
+                        entity_id=str(user.pk),
+                        entity_app_label="accounts",
+                        request=request,
+                        actor_user=request.user if request.user.is_authenticated else None,
+                        changes=audit_changes,
+                        metadata={"name": user.name, "email": user.email},
+                    )
         except (LastAdminError, ValidationError) as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": str(exc)}
             return Response(
-                {"detail": str(exc)},
+                detail,
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -372,8 +517,9 @@ class AdminUserDetailView(APIView):
                 request=request,
             )
         except (LastAdminError, ValidationError) as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": str(exc)}
             return Response(
-                {"detail": str(exc)},
+                detail,
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -438,6 +584,59 @@ class AdminExternalInvitationDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _filtered_audit_logs(request):
+    queryset = AuditLog.objects.select_related(
+        "actor_user",
+        "actor_external_invitation",
+    ).all()
+    from_date = request.query_params.get("from")
+    to_date = request.query_params.get("to")
+    role_filter = request.query_params.get("role")
+    query = request.query_params.get("q")
+
+    if from_date:
+        if parse_date(from_date) is None:
+            return None, Response(
+                {"from": "Use a data no formato YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        queryset = queryset.filter(occurred_at__date__gte=from_date)
+    if to_date:
+        if parse_date(to_date) is None:
+            return None, Response(
+                {"to": "Use a data no formato YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        queryset = queryset.filter(occurred_at__date__lte=to_date)
+    if role_filter:
+        normalized_role = role_filter.strip().lower()
+        if normalized_role == "sistema":
+            queryset = queryset.filter(actor_user__isnull=True, actor_external_invitation__isnull=True)
+        else:
+            role_code = None
+            for role in ProfileRole:
+                if (
+                    role.value.lower() == normalized_role
+                    or role.label.lower() == normalized_role
+                ):
+                    role_code = role.value
+                    break
+            if role_code:
+                queryset = queryset.filter(actor_role=role_code)
+
+    if query:
+        term = query.strip()
+        queryset = queryset.filter(
+            Q(action__icontains=term)
+            | Q(entity_id__icontains=term)
+            | Q(entity_type__icontains=term)
+            | Q(actor_user__name__icontains=term)
+            | Q(actor_user__email__icontains=term)
+            | Q(actor_external_invitation__name__icontains=term)
+        )
+    return queryset, None
+
+
 class AdminAuditLogsView(APIView):
     """
     List audit logs in the administrative area.
@@ -446,46 +645,11 @@ class AdminAuditLogsView(APIView):
     throttle_scope = "session"
 
     def get(self, request) -> Response:
-        queryset = AuditLog.objects.select_related(
-            "actor_user",
-            "actor_external_invitation",
-        ).all()
-        from_date = request.query_params.get("from")
-        to_date = request.query_params.get("to")
-        role_filter = request.query_params.get("role")
-        query = request.query_params.get("q")
-
-        if from_date:
-            if parse_date(from_date) is None:
-                return Response({"from": "Use a data no formato YYYY-MM-DD."}, status=400)
-            queryset = queryset.filter(occurred_at__date__gte=from_date)
-        if to_date:
-            if parse_date(to_date) is None:
-                return Response({"to": "Use a data no formato YYYY-MM-DD."}, status=400)
-            queryset = queryset.filter(occurred_at__date__lte=to_date)
-        if role_filter:
-            normalized_role = role_filter.strip().lower()
-            if normalized_role == "sistema":
-                queryset = queryset.filter(actor_user__isnull=True)
-            else:
-                role_code = None
-                for role in ProfileRole:
-                    if role.value.lower() == normalized_role or role.label.lower() == normalized_role:
-                        role_code = role.value
-                        break
-                if role_code:
-                    queryset = queryset.filter(actor_role=role_code)
-
-        if query:
-            term = query.strip()
-            queryset = queryset.filter(
-                Q(action__icontains=term)
-                | Q(entity_id__icontains=term)
-                | Q(actor_user__name__icontains=term)
-                | Q(actor_user__email__icontains=term)
-                | Q(actor_external_invitation__name__icontains=term)
-            )
-
+        if (request.query_params.get("export") or "").strip().lower() in {"csv", "json"}:
+            return AdminAuditLogsExportView().get(request)
+        queryset, error_response = _filtered_audit_logs(request)
+        if error_response:
+            return error_response
         page = self._paginate(request, queryset)
         serializer = AuditLogSerializer(page, many=True)
         return self._paginated_response(request, serializer.data, page, queryset)
@@ -501,3 +665,69 @@ class AdminAuditLogsView(APIView):
 
     def _paginated_response(self, request, data, page, queryset):
         return self.paginator.get_paginated_response(data)
+
+
+class AdminAuditLogsExportView(APIView):
+    """
+    Export filtered audit logs as a downloadable file.
+    """
+    permission_classes = [IsInstitutionalAdmin]
+    throttle_scope = "session"
+
+    def get(self, request) -> Response:
+        import csv
+        import io
+        import json
+        from django.http import HttpResponse
+
+        queryset, error_response = _filtered_audit_logs(request)
+        if error_response:
+            return error_response
+        logs = list(queryset[:10000])
+        data = AuditLogSerializer(logs, many=True).data
+        export_format = (
+            request.query_params.get("export")
+            or request.query_params.get("format")
+            or "csv"
+        ).strip().lower()
+
+        if export_format == "json":
+            response = HttpResponse(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                content_type="application/json; charset=utf-8",
+            )
+            response["Content-Disposition"] = 'attachment; filename="audit-logs.json"'
+            return response
+
+        output = io.StringIO()
+        fieldnames = [
+            "timestamp",
+            "actor",
+            "role",
+            "action",
+            "actionCode",
+            "entityType",
+            "entityAppLabel",
+            "entityId",
+            "origin",
+            "hash",
+            "summary",
+            "changes",
+            "metadata",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in data:
+            writer.writerow(
+                {
+                    **{key: row.get(key, "") for key in fieldnames},
+                    "changes": json.dumps(row.get("changes") or {}, ensure_ascii=False),
+                    "metadata": json.dumps(row.get("metadata") or {}, ensure_ascii=False),
+                }
+            )
+        response = HttpResponse(
+            "\ufeff" + output.getvalue(),
+            content_type="text/csv; charset=utf-8",
+        )
+        response["Content-Disposition"] = 'attachment; filename="audit-logs.csv"'
+        return response
