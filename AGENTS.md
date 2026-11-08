@@ -68,6 +68,7 @@ Before changing code, read the settings and modules related to the task. Respect
 ### Changes and verification
 
 - When implementing or changing behavior, update affected documentation and configuration examples.
+- Keep `FUNCIONALIDADES.md` updated: when implementing, changing, or removing a feature, reflect its status (Implementado, Parcial, Pendente), affected area, and relevant observations/endpoints.
 - Create or update tests for domain rules, permissions, file validation, state transitions, and API contracts when the task involves those behaviors.
 - Before finishing, run checks appropriate to the change (for example, `python manage.py check` and targeted tests) when the environment allows. Clearly report any check that could not be run and why.
 - Do not commit `.env`, local databases, user uploads, secrets, caches, or generated artifacts.

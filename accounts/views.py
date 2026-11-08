@@ -32,7 +32,7 @@ from accounts.models import (
     User,
     UserProfileRole,
 )
-from accounts.permissions import IsInstitutionalAdmin
+from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin
 from accounts.serializers import (
     AdminUserCreateSerializer,
     AdminUserReadSerializer,
@@ -526,9 +526,13 @@ class AdminUserDetailView(APIView):
 
 
 class AdminExternalInvitationsView(APIView):
-    """List active invitations and issue new committee access tokens."""
-    permission_classes = [IsInstitutionalAdmin]
+    """List invitations and issue new committee access tokens."""
     throttle_scope = "session"
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [CanInviteExternalCommitteeMember()]
+        return [IsInstitutionalAdmin()]
 
     def get(self, request) -> Response:
         invitations = ExternalInvitation.objects.order_by("-created_at")[:100]
