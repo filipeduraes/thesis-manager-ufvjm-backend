@@ -2,7 +2,7 @@
 
 Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
 
-> Atualizado em: 2026-11-08. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em: 2026-11-09. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
 
 ## Legenda
 - **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).
@@ -107,11 +107,12 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 | Item | Status | Observações |
 |---|---|---|
-| Modelos de defesa/banca/membro/avaliação | **Pendente** | Sem modelos de agendamento, composição da banca e avaliações individuais. |
-| Agendamento após aprovação do orientador | **Pendente** | Regra de negócio não implementada; o status `ADVISOR_APPROVED` já habilita a etapa de banca. |
-| Disponibilidade e conflitos de horário | **Pendente** | Validação não implementada. |
-| Avaliação individual por membro | **Pendente** | Membro externo/interno deve registrar própria avaliação/nota; endpoints e escopo por convite/defesa faltam. |
-| Registro do resultado final | **Parcial** | `POST /api/v1/theses/<id>/defense-result` (coordenação/admin) registra `APPROVED`, `APPROVED_WITH_REMARKS` ou `REJECTED`, com histórico; cálculo automático a partir de todas as avaliações ainda pendente. |
+| Modelos de defesa/banca/membro/avaliação | **Implementado** | `Defense`, `DefenseMember`, `DefenseMemberEvaluation` com `DefenseStatus`, `CommitteeRole`, `DefenseResult`, `DefenseModality`; migration 0002 + 0003 (`duration_minutes`). |
+| Agendamento após aprovação do orientador | **Implementado** | `POST /api/v1/theses/<id>/defenses` exige `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`; admin/coordenador/orientador da própria tese podem agendar; transições de `ThesisStatus` e histórico registrados. Nota: orientador agenda diretamente (sem "solicitação") — pendente decisão do Filipe. |
+| Disponibilidade e conflitos de horário | **Implementado** | Verificação de sobreposição de horário por membro antes de adicionar à banca (intervalo Python: `A.start < B.end AND B.start < A.end`); membro pode fornecer `conflictReason` para registrar ciência do conflito. |
+| Avaliação individual por membro | **Implementado** | `PUT /api/v1/defenses/<id>/members/<memberId>/evaluation` — cada membro (institucional ou externo via convite válido) registra decisão, nota (0–10) e notas; suplentes não podem avaliar (403); membro não vê nota/notas de outro membro. |
+| Encerramento automático com cálculo de resultado | **Implementado** | `POST /api/v1/defenses/<id>/close` (admin/coordenador) verifica quórum, calcula resultado por maioria, transita `ThesisStatus` e chama `purge_thesis_versions` para aprovados. |
+| Registro do resultado final (manual) | **Implementado** | `POST /api/v1/theses/<id>/defense-result` (coordenação/admin) ainda disponível para lançamento manual retroativo. |
 | Eventos de banca/avaliação | **Pendente** | Submissão, agendamento, avaliação registrada, publicação — disparo assíncrono não implementado; histórico e auditoria síncronos já registram as transições. |
 
 ## 9. Repositório público e publicação
@@ -161,16 +162,27 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `GET` | `/api/v1/public/theses` | Anônimo | Repositório público com busca/filtros e paginação. |
 | `GET` | `/api/v1/public/theses/<id>` | Anônimo | Detalhe público de monografia publicada. |
 | `GET` | `/api/v1/public/theses/<id>/download` | Anônimo | Download da versão publicada. |
+| `GET` | `/api/v1/theses/<id>/defenses` | Institucional | Lista defesas da tese (escopo por papel). |
+| `POST` | `/api/v1/theses/<id>/defenses` | Admin/coord/orientador | Agenda nova defesa; exige status `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`. |
+| `GET` | `/api/v1/defenses/<id>` | Institucional ou membro da banca | Detalhe da defesa com membros e avaliações. |
+| `PATCH` | `/api/v1/defenses/<id>` | Admin/coord/orientador | Atualiza data, duração, modalidade, local ou notas. |
+| `POST` | `/api/v1/defenses/<id>/cancel` | Institucional | Cancela a defesa e restaura status da tese. |
+| `POST` | `/api/v1/defenses/<id>/start` | Admin/coord | Inicia a defesa (transição para `IN_PROGRESS`). |
+| `POST` | `/api/v1/defenses/<id>/close` | Admin/coord | Encerra a defesa, calcula resultado e transita status da tese. |
+| `POST` | `/api/v1/defenses/<id>/members` | Institucional | Adiciona membro institucional à banca. |
+| `POST` | `/api/v1/defenses/<id>/members/external` | Institucional | Cria convite externo e adiciona membro externo à banca. |
+| `DELETE` | `/api/v1/defenses/<id>/members/<memberId>` | Institucional | Remove membro da banca (exige status `SCHEDULED` e sem avaliação). |
+| `GET` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Institucional ou membro da banca | Lê avaliação; nota/notas visíveis somente ao próprio membro. |
+| `PUT` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Membro da banca | Registra ou atualiza avaliação individual (decisão, nota 0–10, notas). |
 
 ## 13. Prioridades sugeridas (próximos passos)
 
-1. **Modelar banca/defesa/avaliação** (agendamento, membros, disponibilidade/conflitos, notas individuais e cálculo do resultado).
-2. **Escopar convites externos** à defesa/membro da banca e implementar avaliação do membro externo com nota.
-3. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
-4. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
-5. **Relatórios** calculados no backend (por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa).
-6. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
-7. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
+1. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
+2. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
+3. **Relatórios** calculados no backend (por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa).
+4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
+5. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
+6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); `start_defense`/`close_defense` restritos a admin/coord (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
 
 ---
 
