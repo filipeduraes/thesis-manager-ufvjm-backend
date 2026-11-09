@@ -769,6 +769,7 @@ class Defense(models.Model):
         related_name="defenses",
     )
     scheduled_datetime = models.DateTimeField()
+    duration_minutes = models.PositiveSmallIntegerField(default=120)
     modality = models.CharField(
         max_length=20,
         choices=DefenseModality.choices,
