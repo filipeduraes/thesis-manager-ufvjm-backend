@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.middleware.csrf import get_token
 from allauth.socialaccount.providers import registry
 from django.conf import settings
-from django.contrib.auth import logout
+from django.contrib.auth import login as auth_login, logout
 from django.db import transaction
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
@@ -50,8 +50,11 @@ from accounts.services import (
     create_institutional_user,
     deactivate_user,
     exchange_external_token,
+    get_active_role,
+    normalize_role,
     record_audit,
     revoke_external_invitation,
+    role_label,
     set_user_roles,
 )
 
@@ -735,3 +738,200 @@ class AdminAuditLogsExportView(APIView):
         )
         response["Content-Disposition"] = 'attachment; filename="audit-logs.csv"'
         return response
+
+
+def _dev_login_roles(payload: dict) -> list[str]:
+    """
+    Resolve os perfis solicitados no login de teste (somente desenvolvimento).
+
+    Args:
+        payload: Dados enviados pelo frontend.
+
+    Returns:
+        list[str]: Códigos de perfil válidos.
+    """
+    raw_roles = payload.get("roles")
+    candidates = []
+    if isinstance(raw_roles, (list, tuple)):
+        candidates = list(raw_roles)
+    elif raw_roles is not None:
+        candidates = [raw_roles]
+    if not candidates:
+        raw = (
+            payload.get("role")
+            or payload.get("roleCode")
+            or payload.get("profile")
+            or payload.get("type")
+            or ""
+        )
+        if raw:
+            candidates = [raw]
+
+    resolved: list[str] = []
+    for raw in candidates:
+        code = normalize_role(str(raw))
+        if code in ProfileRole.values and code not in resolved:
+            resolved.append(code)
+            continue
+        candidate = str(raw).strip().upper()
+        if candidate in ProfileRole.values and candidate not in resolved:
+            resolved.append(candidate)
+    return resolved or [ProfileRole.STUDENT]
+
+
+def _dev_login_user(email: str, name: str, roles: list[str], request) -> User:
+    """
+    Cria ou atualiza um usuário de teste e garante os perfis, sem validações extras.
+
+    Args:
+        email: E-mail informado.
+        name: Nome informado.
+        roles: Códigos de perfil a garantir.
+        request: Requisição HTTP.
+
+    Returns:
+        User: Usuário autenticável para desenvolvimento.
+    """
+    from django.utils import timezone
+
+    normalized_email = (email or "").strip().lower() or f"teste-{timezone.now().timestamp():.0f}@dev.local"
+    display_name = (name or "").strip() or normalized_email.split("@", 1)[0]
+    with transaction.atomic():
+        user = User.objects.filter(email__iexact=normalized_email).first()
+        if user is None:
+            user = User(email=normalized_email, name=display_name, is_active=True)
+            user.set_unusable_password()
+            user.save()
+            logger.info("Dev test user created: user_id=%s email=%s", user.pk, user.email)
+        else:
+            updates: list[str] = []
+            if display_name and user.name != display_name:
+                user.name = display_name
+                updates.append("name")
+            if not user.is_active:
+                user.is_active = True
+                updates.append("is_active")
+            if updates:
+                user.save(update_fields=updates)
+
+        # Modo dev: garante os papéis solicitados, respeitando a exclusividade de Aluno.
+        now = timezone.now()
+        if ProfileRole.STUDENT in roles:
+            user.profile_roles.filter(revoked_at__isnull=True).exclude(
+                role=ProfileRole.STUDENT
+            ).update(revoked_at=now)
+            if not user.profile_roles.filter(role=ProfileRole.STUDENT, revoked_at__isnull=True).exists():
+                UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        else:
+            user.profile_roles.filter(
+                role=ProfileRole.STUDENT, revoked_at__isnull=True
+            ).update(revoked_at=now)
+            for role in roles:
+                if not user.profile_roles.filter(role=role, revoked_at__isnull=True).exists():
+                    UserProfileRole.objects.create(user=user, role=role)
+        has_admin_role = user.profile_roles.filter(
+            role=ProfileRole.ADMIN, revoked_at__isnull=True
+        ).exists()
+        if has_admin_role and not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=["is_staff"])
+        elif not has_admin_role and user.is_staff and not user.is_superuser:
+            user.is_staff = False
+            user.save(update_fields=["is_staff"])
+    return user
+
+
+class DevLoginView(APIView):
+    """
+    Autentica como usuário de teste em ambiente de desenvolvimento.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = "session"
+
+    def post(self, request) -> Response:
+        """
+        Cria/atualiza e autentica um usuário de teste.
+
+        Args:
+            request: Requisição com ``name``, ``email`` e ``roles``.
+
+        Returns:
+            Response: Sessão autenticada.
+        """
+        if not settings.DEBUG:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        payload = request.data if isinstance(request.data, dict) else {}
+        roles = _dev_login_roles(payload)
+        if ProfileRole.STUDENT in roles and len(roles) > 1:
+            return Response(
+                {"detail": "O perfil Aluno não pode ser combinado com outros perfis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        email = str(payload.get("email") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        try:
+            user = _dev_login_user(email, name, roles, request)
+            auth_login(
+                request._request,
+                user,
+                backend="django.contrib.auth.backends.ModelBackend",
+            )
+            request.user = user
+            request._request.user = user
+        except Exception:
+            logger.exception("Dev login failed: email=%s roles=%s", email, roles)
+            return Response(
+                {"detail": "Não foi possível autenticar o usuário de teste."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        csrf_token = get_token(request._request)
+        session_payload = build_session_payload(request)
+        session_payload["csrfToken"] = csrf_token
+        return Response(session_payload, status=status.HTTP_200_OK)
+
+
+class DevUsersView(APIView):
+    """
+    Lista usuários disponíveis para login de teste em desenvolvimento.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = "session"
+
+    def get(self, request) -> Response:
+        """
+        Retorna usuários ativos com seus perfis.
+
+        Args:
+            request: Requisição HTTP.
+
+        Returns:
+            Response: Lista de usuários de teste.
+        """
+        if not settings.DEBUG:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        users = (
+            User.objects.filter(is_active=True)
+            .prefetch_related("profile_roles")
+            .order_by("name", "email")
+        )
+        results = []
+        for user in users:
+            role = get_active_role(user)
+            role_codes = [
+                assignment.role
+                for assignment in user.profile_roles.all()
+                if assignment.revoked_at is None
+            ]
+            results.append(
+                {
+                    "id": str(user.pk),
+                    "name": user.name or user.email,
+                    "email": user.email,
+                    "roleCode": role,
+                    "roleLabel": role_label(role),
+                    "roles": role_codes,
+                }
+            )
+        return Response({"results": results}, status=status.HTTP_200_OK)

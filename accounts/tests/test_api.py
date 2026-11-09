@@ -221,3 +221,67 @@ class ExternalTokenApiTests(TestCase):
             format="json",
         )
         self.assertEqual(replay_response.status_code, 401)
+
+
+@override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db", DEBUG=True)
+class DevLoginApiTests(TestCase):
+    """
+    Testa o login de usuário de teste, disponível apenas em desenvolvimento.
+    """
+
+    def setUp(self) -> None:
+        self.client = APIClient()
+
+    @override_settings(DEBUG=False)
+    def test_dev_login_is_unavailable_when_debug_is_false(self) -> None:
+        response = self.client.post(
+            "/api/v1/auth/dev-login",
+            {"name": "Teste", "email": "teste@local", "role": "STUDENT"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @override_settings(DEBUG=False)
+    def test_dev_users_is_unavailable_when_debug_is_false(self) -> None:
+        response = self.client.get("/api/v1/auth/dev-users")
+        self.assertEqual(response.status_code, 404)
+
+    def test_dev_login_creates_user_and_authenticated_session(self) -> None:
+        response = self.client.post(
+            "/api/v1/auth/dev-login",
+            {"name": "Aluno Teste", "email": "aluno.teste@local", "role": "STUDENT"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["user"]["email"], "aluno.teste@local")
+        self.assertEqual(data["user"]["roleCode"], ProfileRole.STUDENT)
+        user = User.objects.get(email="aluno.teste@local")
+        self.assertTrue(user.has_active_role(ProfileRole.STUDENT))
+
+        session_response = self.client.get("/api/v1/session")
+        self.assertTrue(session_response.json()["authenticated"])
+
+    def test_dev_login_reuses_existing_user_and_adds_role(self) -> None:
+        user = User.objects.create_user(email="orientador@local", name="Antigo")
+        UserProfileRole.objects.create(user=user, role=ProfileRole.STUDENT)
+        response = self.client.post(
+            "/api/v1/auth/dev-login",
+            {"name": "Orientador Teste", "email": "orientador@local", "role": "ADVISOR"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["roleCode"], ProfileRole.ADVISOR)
+        user.refresh_from_db()
+        self.assertEqual(user.name, "Orientador Teste")
+        self.assertTrue(user.has_active_role(ProfileRole.ADVISOR))
+        self.assertFalse(user.has_active_role(ProfileRole.STUDENT))
+
+    def test_dev_users_lists_active_users(self) -> None:
+        user = User.objects.create_user(email="lista@local", name="Lista Teste")
+        UserProfileRole.objects.create(user=user, role=ProfileRole.COORDINATOR)
+        response = self.client.get("/api/v1/auth/dev-users")
+        self.assertEqual(response.status_code, 200)
+        emails = [item["email"] for item in response.json()["results"]]
+        self.assertIn("lista@local", emails)

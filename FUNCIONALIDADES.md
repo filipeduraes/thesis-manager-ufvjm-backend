@@ -18,11 +18,11 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Django + DRF + Python | **Implementado** | Projeto `thesismanagerbackend`; apps `accounts` e `academic`. |
 | PostgreSQL | **Implementado** | Configuração via `DATABASE_URL`; Docker Compose com serviço `db`. |
 | Redis | **Parcial** | `REDIS_URL`/cache configurados (`CACHES`, sessão `cached_db`); falta validar/implementar todos os usos previstos (cache de busca/sessão, rastreamento de upload em andamento, rate limiting completo conforme requisitos). |
-| Fila de eventos (RabbitMQ/Kafka) | **Pendente** | Não há worker/broker/event bus implementado. Tarefas assíncronas (extração/indexação/notificações/envio de token) não implementadas. |
-| Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios. |
+| Fila de eventos (RabbitMQ/Kafka) | **Pendente** | Não há worker/broker/event bus implementado. Upload marca `processing_status=PENDING` e existe o comando `extract_thesis_text` para extração sob demanda; extração/indexação/notificações automáticas e envio de token/e-mail seguem pendentes. |
+| Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios (inclui `THESIS_MAX_PDF_SIZE_MB`, `THESIS_MAX_DOCUMENT_SIZE_MB`, `THESIS_MAX_KEYWORDS`). |
 | Health check | **Implementado** | `GET /health` (`HealthView`). |
 | Docker Compose | **Implementado** | Backend + Postgres + Redis; perfil opcional para frontend. |
-| Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py`, `academic/migrations/0001_initial.py`. |
+| Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py`, `academic/migrations/0001_initial.py`, `theses/migrations/0001_initial.py`. |
 
 ## 2. Autenticação e sessão
 
@@ -92,39 +92,43 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 | Item | Status | Observações |
 |---|---|---|
-| Modelos de monografia/TCC | **Pendente** | Sem app/modelos para TCC, versões, metadados, palavras-chave, status de submissão. |
-| Rascunho, submissão e acompanhamento | **Pendente** | Fluxo de estados não implementado no backend. |
-| Upload de PDF com validação | **Pendente** | Aceitar apenas PDF, limite configurável (ref. 50 MB), nome seguro, sem confiar em filename/MIME do cliente. |
-| SHA-256 do arquivo | **Pendente** | Cálculo para integridade/deduplicação e rechecagem em aprovações/publicação. |
-| CRUD de monografias com permissões/estado | **Pendente** | Endpoints autenticados/autorizados por papel e estado. |
-| Busca/filtros de TCC | **Pendente** | Por título, autor/aluno, orientador, curso, ano de defesa, palavras-chave; filtros com permissão. |
+| Modelos de monografia/TCC | **Implementado** | App `theses`: `Thesis`, `ThesisAuthor`, `StoredFile`, `ThesisFile` (versões), `ThesisReview`, `ThesisStatusHistory`, `Keyword`/`ThesisKeyword`, `ThesisDocument`. Status conforme `MODELO_BANCO_DADOS.puml`. |
+| Rascunho, submissão e acompanhamento | **Implementado** | `GET/PUT /api/v1/theses/me` cria/atualiza rascunho com metadados, curso, orientador e palavras-chave; `POST /api/v1/theses/me/submit` envia ao orientador; `GET /api/v1/theses/<id>` retorna versões, pareceres, documentos e linha do tempo. |
+| Upload de PDF com validação | **Implementado** | `POST /api/v1/theses/me/files` aceita somente PDF (magic bytes `%PDF-`), limite configurável (`THESIS_MAX_PDF_SIZE_MB`, padrão 50 MB), nome de armazenamento gerado, sem confiar em filename/MIME do cliente. |
+| SHA-256 do arquivo | **Implementado** | Hash calculado no upload para integridade/deduplicação; rechecagem antes de submissão, parecer e publicação. Metadados expostos sem caminho interno de armazenamento. |
+| CRUD de monografias com permissões/estado | **Implementado** | `GET /api/v1/theses` (escopos `advised`, `authored`, `coordinated`, filtros e paginação), `GET /api/v1/theses/<id>`, `POST /api/v1/theses/<id>/reviews` (orientador), `POST /api/v1/theses/<id>/defense-result` e `POST /api/v1/theses/<id>/publish` (coordenação/admin). Permissões e estados validados no backend. |
+| Busca/filtros de TCC | **Implementado** | Busca por título, resumo, referência, autor, orientador e palavra-chave; filtros por status, curso, orientador, ano e `pendingReview`; paginação com metadados. |
+| Histórico de versões | **Implementado** | Versões mantidas durante a orientação; `purge_thesis_versions` remove versões antigas após aprovação final da banca e na publicação, mantendo apenas o arquivo atual. |
+| Documentos complementares | **Implementado** | Upload e validação de ata, autorização de publicação, comprovante de revisão ortográfica e outros documentos; publicação exige autorização validada. |
+| UI de submissão/acompanhamento (frontend) | **Implementado** | `StudentSubmission` integra metadados, upload, envio, acompanhamento, linha do tempo, pareceres, versões, leitor de PDF e documentos. Dashboard do aluno usa dados reais. |
+| UI de orientação/aprovação (frontend) | **Implementado** | `AdvisorApproval` lista orientandos com filtros/paginação, abre detalhe, lê o PDF com zoom/download, aprova, solicita ajustes, reprova, registra resultado da banca, valida documentos e publica. |
 
 ## 8. Banca, avaliação e defesa
 
 | Item | Status | Observações |
 |---|---|---|
 | Modelos de defesa/banca/membro/avaliação | **Pendente** | Sem modelos de agendamento, composição da banca e avaliações individuais. |
-| Agendamento após aprovação do orientador | **Pendente** | Regra de negócio não implementada. |
+| Agendamento após aprovação do orientador | **Pendente** | Regra de negócio não implementada; o status `ADVISOR_APPROVED` já habilita a etapa de banca. |
 | Disponibilidade e conflitos de horário | **Pendente** | Validação não implementada. |
 | Avaliação individual por membro | **Pendente** | Membro externo/interno deve registrar própria avaliação/nota; endpoints e escopo por convite/defesa faltam. |
-| Cálculo do resultado final | **Pendente** | Só após todas as avaliações requeridas; cálculo no backend. |
-| Eventos de banca/avaliação | **Pendente** | Submissão, agendamento, avaliação registrada, publicação — disparo assíncrono não implementado. |
+| Registro do resultado final | **Parcial** | `POST /api/v1/theses/<id>/defense-result` (coordenação/admin) registra `APPROVED`, `APPROVED_WITH_REMARKS` ou `REJECTED`, com histórico; cálculo automático a partir de todas as avaliações ainda pendente. |
+| Eventos de banca/avaliação | **Pendente** | Submissão, agendamento, avaliação registrada, publicação — disparo assíncrono não implementado; histórico e auditoria síncronos já registram as transições. |
 
 ## 9. Repositório público e publicação
 
 | Item | Status | Observações |
 |---|---|---|
-| Repositório público de TCCs publicados | **Pendente** | Sem endpoint público de busca/listagem de publicações. |
-| Publicação condicionada | **Pendente** | Exige aprovação final, versão corrigida quando aplicável e termo de autorização assinado. |
-| Proteção contra exclusão de publicado | **Pendente** | CRUD comum não pode excluir TCC publicado. |
-| Recursos públicos (TCCs, cursos, orientadores) | **Parcial/Pendente** | Cursos possuem API administrativa; faltam recursos públicos/read models e TCCs/orientadores públicos conforme contrato. |
+| Repositório público de TCCs publicados | **Implementado** | `GET /api/v1/public/theses` (busca por título/resumo/autor/orientador/palavra-chave e filtros de curso/orientador/ano) e `GET /api/v1/public/theses/<id>` com payload público; acesso anônimo somente a publicados. |
+| Publicação condicionada | **Implementado** | `POST /api/v1/theses/<id>/publish` exige aprovação final, autorização de publicação validada e arquivo atual íntegro; remove versões antigas e publica apenas a versão atual. |
+| Proteção contra exclusão de publicado | **Implementado** | Não há endpoint de exclusão de monografia; publicação/arquivamento são transições controladas e o histórico/auditoria é preservado. |
+| Recursos públicos (TCCs, cursos, orientadores) | **Parcial** | TCCs publicados e download estão disponíveis publicamente; faltam endpoints públicos dedicados de cursos e orientadores para filtros do repositório. |
 
 ## 10. Relatórios e dashboards
 
 | Item | Status | Observações |
 |---|---|---|
 | Relatórios administrativos | **Pendente** | TCCs por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa. Cálculo deve ser no backend. |
-| Dashboards frontend | **Parcial** | Telas/rotas existem no frontend (parte com dados mock/integração incompleta, dependendo da área). |
+| Dashboards frontend | **Parcial** | Dashboard do aluno (status, progresso, próxima ação, pareceres e atividades) e do orientador (fila de revisão e orientandos) usam dados reais de TCC. Demais áreas (coordenação/admin) ainda usam dados mock em parte. |
 
 ## 11. Frontend (repositório separado, resumo de integração)
 
@@ -134,17 +138,39 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Login por token externo | **Implementado** | Troca de token e rota para avaliação externa. |
 | Área admin: usuários/cursos/auditoria | **Implementado** | Integrada aos endpoints administrativos; multi-papéis e navegação combinada. |
 | Criação de convite externo | **Implementado** | Admin e tela de bancas (integração parcial; escopo de banca pendente). |
-| Fluxos de TCC/banca/avaliação/repositório/relatórios | **Parcial/Pendente** | Estruturas de UI existem em várias áreas, mas dependem de domínio/backend de TCC, banca, avaliação e publicação. |
+| Fluxos de TCC/orientação | **Implementado** | Submissão do aluno, acompanhamento, upload de PDF/versões/documentos, parecer do orientador (aprovar/ajustes/reprovar), leitor de PDF com zoom/download, resultado da banca e publicação. |
+| Fluxos de banca/avaliação/repositório/relatórios | **Parcial/Pendente** | Agendamento de banca, avaliação individual e relatórios dependem de domínio/backend pendente; repositório público possui endpoint, mas a tela do frontend ainda usa dados mock. |
 
-## 12. Prioridades sugeridas (próximos passos)
+## 12. Endpoints de TCC implementados
 
-1. **Modelar domínio de TCC/defesa/banca/avaliação** (migrations, regras de estado, permissões).
+| Método | Rota | Acesso | Observação |
+|---|---|---|---|
+| `GET` | `/api/v1/theses/me` | Aluno | Contexto da monografia, opções de curso/orientador e limites. |
+| `PUT` | `/api/v1/theses/me` | Aluno | Cria/atualiza rascunho e metadados. |
+| `POST` | `/api/v1/theses/me/files` | Aluno | Upload de nova versão em PDF com SHA-256. |
+| `POST` | `/api/v1/theses/me/submit` | Aluno | Envia a versão atual ao orientador. |
+| `GET` | `/api/v1/theses` | Autenticado | Lista com escopo por papel e filtros (`scope`, `q`, `status`, `courseId`, `advisorId`, `year`, `pendingReview`). |
+| `GET` | `/api/v1/theses/<id>` | Autor/orientador/coordenação/admin | Detalhe com versões, pareceres, documentos e histórico. |
+| `POST` | `/api/v1/theses/<id>/reviews` | Orientador | Parecer: aprovar, solicitar ajustes ou reprovar. |
+| `POST` | `/api/v1/theses/<id>/defense-result` | Coordenação/admin | Registra resultado final da banca. |
+| `POST` | `/api/v1/theses/<id>/publish` | Coordenação/admin | Publica no repositório após validações. |
+| `GET` | `/api/v1/theses/<id>/files/<fileId>/download` | Autorizado | Download/preview do PDF (`disposition=inline|attachment`). |
+| `POST` | `/api/v1/theses/<id>/documents` | Autorizado | Upload de documento complementar. |
+| `POST` | `/api/v1/theses/<id>/documents/<documentId>/validate` | Coordenação/admin | Valida documento complementar. |
+| `GET` | `/api/v1/theses/<id>/documents/<documentId>/download` | Autorizado | Download de documento complementar. |
+| `GET` | `/api/v1/public/theses` | Anônimo | Repositório público com busca/filtros e paginação. |
+| `GET` | `/api/v1/public/theses/<id>` | Anônimo | Detalhe público de monografia publicada. |
+| `GET` | `/api/v1/public/theses/<id>/download` | Anônimo | Download da versão publicada. |
+
+## 13. Prioridades sugeridas (próximos passos)
+
+1. **Modelar banca/defesa/avaliação** (agendamento, membros, disponibilidade/conflitos, notas individuais e cálculo do resultado).
 2. **Escopar convites externos** à defesa/membro da banca e implementar avaliação do membro externo com nota.
-3. **Upload seguro de PDF** (validação, armazenamento, SHA-256, autorização de download).
-4. **Fila assíncrona** (eventos, extração/indexação, notificações, envio de token/e-mail).
-5. **Repositório público e publicação** com regras de elegibilidade e busca.
-6. **Relatórios** calculados no backend.
-7. **Cobertura de testes** para domínios novos (regras, transições, permissões, contratos API).
+3. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
+4. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
+5. **Relatórios** calculados no backend (por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa).
+6. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
+7. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
 
 ---
 

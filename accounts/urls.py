@@ -13,6 +13,8 @@ urlpatterns = [
         views.ExternalTokenExchangeView.as_view(),
         name="api_external_token",
     ),
+    path("api/v1/auth/dev-login", views.DevLoginView.as_view(), name="api_dev_login"),
+    path("api/v1/auth/dev-users", views.DevUsersView.as_view(), name="api_dev_users"),
     path("api/v1/admin/users", views.AdminUsersView.as_view(), name="api_admin_users"),
     path(
         "api/v1/admin/users/<uuid:user_id>",

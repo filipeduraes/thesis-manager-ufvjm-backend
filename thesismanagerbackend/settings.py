@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "accounts",
     "academic",
+    "theses",
 ]
 
 MIDDLEWARE = [
@@ -205,6 +206,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
         "session": "120/min",
+        "thesis": "120/min",
+        "thesis_upload": "30/hour",
     },
 }
 
@@ -312,6 +315,15 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = "static/"
+
+# Uploaded thesis files are private by default and served through permission-checked views.
+MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
+MEDIA_URL = "/media/"
+
+THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
+THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
+THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
+THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
