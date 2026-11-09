@@ -7,7 +7,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.http import HttpRequest
 
@@ -64,7 +64,7 @@ def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
         raise ValidationError("Avaliações só podem ser submetidas durante a sessão de defesa.")
 
     if member.role == CommitteeRole.ALTERNATE:
-        raise ValidationError("Membros suplentes não podem submeter avaliações.")
+        raise PermissionDenied("Membros suplentes não podem submeter avaliações.")
 
     if member.defense_id != defense.pk:
         raise ValidationError("Membro não pertence a esta banca.")

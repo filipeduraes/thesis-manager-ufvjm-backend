@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -235,7 +235,7 @@ class EvaluationServiceTests(TestCase):
     # --- evaluation blocks ---
 
     def test_alternate_cannot_evaluate(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(PermissionDenied):
             submit_committee_evaluation(self.defense, self.alternate, decision=DefenseResult.APPROVED, actor=self.alternate_user)
 
     def test_cannot_evaluate_as_other_member(self) -> None:

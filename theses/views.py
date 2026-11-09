@@ -8,10 +8,11 @@ import logging
 from typing import Any
 
 from django.conf import settings
-from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError as DjangoValidationError
 from django.core.files.storage import default_storage
 from django.db.models import Q, QuerySet
 from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -20,6 +21,7 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalUser
 from accounts.services import record_audit
@@ -846,3 +848,379 @@ class PublicThesisDownloadView(APIView):
         if disposition not in {"inline", "attachment"}:
             disposition = "attachment"
         return _download_response(thesis_file.stored_file, thesis, disposition, thesis_file.version_number)
+
+
+# ─── Defense API helpers ──────────────────────────────────────────────────────
+
+from theses.defense_committee import add_external_member, add_institutional_member, remove_member, resolve_committee_member  # noqa: E402
+from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
+from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, schedule_defense, start_defense, update_defense  # noqa: E402
+from theses.models import Defense, DefenseMember  # noqa: E402
+from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
+from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
+from theses.services import user_is_admin, user_is_advisor, user_is_coordinator  # noqa: E402
+
+
+def _scoped_defense_qs(user) -> QuerySet:
+    """
+    Return a Defense queryset restricted to what the given principal may access.
+
+    - Admin / coordinator: unrestricted.
+    - Advisor: only defenses for their own advised theses.
+    - Student: only defenses for the thesis they authored (main author).
+    - ExternalInvitationPrincipal: only defenses they are a committee member of.
+    """
+    base = Defense.objects.select_related("thesis").prefetch_related("members__institutional_member", "members__external_invitation")
+    if isinstance(user, ExternalInvitationPrincipal):
+        return base.filter(members__external_invitation=user.invitation).distinct()
+    if user_is_admin(user) or user_is_coordinator(user):
+        return base
+    if user_is_advisor(user):
+        return base.filter(Q(thesis__advisor_id=user.pk) | Q(members__institutional_member=user)).distinct()
+    # Aluno: só a própria tese principal
+    return base.filter(Q(thesis__authors__author=user, thesis__authors__is_main_author=True) | Q(members__institutional_member=user)).distinct()
+
+
+def _scoped_thesis(user, thesis_id) -> Thesis:
+    """
+    Return the Thesis accessible to the user, raising Http404 otherwise.
+
+    - Admin / coordinator: any thesis.
+    - Advisor: only theses they advise.
+    - Student: only their authored (main) thesis.
+    """
+    if user_is_admin(user) or user_is_coordinator(user):
+        return get_object_or_404(Thesis, pk=thesis_id)
+    if user_is_advisor(user):
+        return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
+    return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)
+
+
+# ─── Defense views ────────────────────────────────────────────────────────────
+
+
+class DefenseListCreateView(APIView):
+    """
+    List defenses for a thesis or schedule a new one.
+    """
+
+    throttle_scope = "thesis"
+
+    def get_permissions(self):
+        """
+        Return stricter permissions for POST (schedule requires advisor or manager role).
+
+        Returns:
+            list: Permission instances.
+        """
+        from theses.permissions import IsAdvisorUser
+        if self.request.method == "POST":
+            return [(IsAcademicManager | IsAdvisorUser)()]
+        return [IsInstitutionalUser()]
+
+    def get(self, request, thesis_id) -> Response:
+        """
+        List all defenses for a thesis accessible to the authenticated user.
+
+        Args:
+            request: HTTP request.
+            thesis_id: Thesis primary key from URL.
+
+        Returns:
+            Response: List of defense payloads.
+        """
+        thesis = _scoped_thesis(request.user, thesis_id)
+        defenses = Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation").order_by("-scheduled_datetime")
+        return Response({"defenses": [defense_payload(d, viewer=request.user) for d in defenses]})
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Schedule a defense for the specified thesis.
+
+        Args:
+            request: HTTP request with scheduling data.
+            thesis_id: Thesis primary key from URL.
+
+        Returns:
+            Response: Created defense payload (201).
+        """
+        thesis = _scoped_thesis(request.user, thesis_id)
+        serializer = ScheduleDefenseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            defense = schedule_defense(thesis, actor=request.user, request=request, **serializer.validated_data)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+class DefenseDetailView(APIView):
+    """
+    Retrieve or update a specific defense session.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser | IsDefenseCommitteeMember]
+
+    def get(self, request, defense_id) -> Response:
+        """
+        Return the defense with its committee members.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+    def patch(self, request, defense_id) -> Response:
+        """
+        Update scheduling details for a not-yet-started defense.
+
+        Args:
+            request: HTTP request with updated fields.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        serializer = UpdateDefenseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            defense = update_defense(defense, actor=request.user, request=request, **serializer.validated_data)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseCancelView(APIView):
+    """
+    Cancel a scheduled defense and restore the thesis status.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Cancel the defense.
+
+        Args:
+            request: HTTP request with optional ``reason`` field.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        try:
+            defense = cancel_defense(defense, reason=(request.data.get("reason") or ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseStartView(APIView):
+    """
+    Transition a defense from SCHEDULED to IN_PROGRESS.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Start the defense session.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        try:
+            defense = start_defense(defense, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseCloseView(APIView):
+    """
+    Close an in-progress defense and compute the final result.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Close the defense, compute the committee result, and update the thesis.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        try:
+            defense = close_defense(defense, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseMemberCreateView(APIView):
+    """
+    Add an institutional user as a committee member.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Add an institutional committee member to the defense.
+
+        Args:
+            request: HTTP request with member data.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Created member payload (201).
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        serializer = AddInstitutionalMemberSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member = add_institutional_member(defense, data["role"], data["user"], conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        from theses.defense_committee import defense_member_payload
+        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+class DefenseExternalMemberCreateView(APIView):
+    """
+    Add an external (non-institutional) user as a committee member via invitation.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Add an external committee member and create their invitation.
+
+        Args:
+            request: HTTP request with external member data.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Created member payload (201).
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        serializer = AddExternalMemberSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        from theses.defense_committee import defense_member_payload
+        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+class DefenseMemberDeleteView(APIView):
+    """
+    Remove a committee member from a scheduled defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def delete(self, request, defense_id, member_id) -> Response:
+        """
+        Remove a committee member.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Empty 204 response on success.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        try:
+            remove_member(defense, member, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DefenseEvaluationView(APIView):
+    """
+    Retrieve or submit a committee member's evaluation.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser | IsDefenseCommitteeMember]
+
+    def get(self, request, defense_id, member_id) -> Response:
+        """
+        Return the evaluation for a committee member.
+
+        Full details (score, notes) are only shown to the member themselves or an admin.
+        Other viewers receive decision and timestamp only.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Evaluation payload, or 404 when not yet submitted.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        viewer_member = resolve_committee_member(defense, request.user)
+        is_own = (viewer_member is not None and viewer_member.pk == member.pk) or (not isinstance(request.user, ExternalInvitationPrincipal) and user_is_admin(request.user))
+        try:
+            evaluation = member.evaluation
+        except ObjectDoesNotExist:
+            return Response({"detail": "Avaliação não submetida."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=is_own)})
+
+    def put(self, request, defense_id, member_id) -> Response:
+        """
+        Submit or update a committee member's evaluation.
+
+        Args:
+            request: HTTP request with evaluation data.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Submitted evaluation payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        serializer = SubmitEvaluationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            evaluation = submit_committee_evaluation(defense, member, decision=data["decision"], score=data.get("score"), notes=data.get("notes", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=True)})

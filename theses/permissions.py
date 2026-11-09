@@ -89,6 +89,42 @@ class IsAdvisorUser(BasePermission):
         return _institutional_user(user) and _has_role(user, ProfileRole.ADVISOR)
 
 
+class IsDefenseCommitteeMember(BasePermission):
+    """
+    Allow access to committee members (institutional or external invitation).
+
+    For external principals the invitation must still be valid
+    (not expired and not revoked). The ``defense_id`` URL kwarg must be present.
+    """
+
+    message = "Acesso restrito a membros desta banca."
+
+    def has_permission(self, request, view) -> bool:
+        """
+        Check committee membership for the request principal.
+
+        Args:
+            request: HTTP request.
+            view: Target view.
+
+        Returns:
+            bool: Whether the request may proceed.
+        """
+        from theses.models import DefenseMember
+
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        defense_id = view.kwargs.get("defense_id")
+        if defense_id is None:
+            return False
+        if isinstance(user, ExternalInvitationPrincipal):
+            if not user.invitation.has_valid_external_session:
+                return False
+            return DefenseMember.objects.filter(defense_id=defense_id, external_invitation=user.invitation).exists()
+        return DefenseMember.objects.filter(defense_id=defense_id, institutional_member=user).exists()
+
+
 class IsAcademicManager(BasePermission):
     """
     Allow access to administrators and course coordinators.
