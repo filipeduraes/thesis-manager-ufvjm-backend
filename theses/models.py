@@ -101,6 +101,36 @@ class DefenseResult(models.TextChoices):
     REJECTED = "REJECTED", "Reprovada"
 
 
+class DefenseStatus(models.TextChoices):
+    """
+    Lifecycle of a thesis defense session.
+    """
+
+    SCHEDULED = "SCHEDULED", "Agendada"
+    IN_PROGRESS = "IN_PROGRESS", "Em andamento"
+    COMPLETED = "COMPLETED", "Realizada"
+    CANCELLED = "CANCELLED", "Cancelada"
+
+
+class DefenseModality(models.TextChoices):
+    """
+    Format of a thesis defense: in-person or remote.
+    """
+
+    IN_PERSON = "IN_PERSON", "Presencial"
+    REMOTE = "REMOTE", "Remota"
+
+
+class CommitteeRole(models.TextChoices):
+    """
+    Role of a member in a defense committee.
+    """
+
+    PRESIDENT = "PRESIDENT", "Presidente"
+    MEMBER = "MEMBER", "Membro"
+    ALTERNATE = "ALTERNATE", "Suplente"
+
+
 EDITABLE_STATUSES = (
     ThesisStatus.DRAFT,
     ThesisStatus.CHANGES_REQUESTED,
@@ -127,6 +157,16 @@ PUBLISHABLE_STATUSES = (
 APPROVED_DEFENSE_STATUSES = (
     ThesisStatus.APPROVED,
     ThesisStatus.APPROVED_WITH_REMARKS,
+)
+
+SCHEDULABLE_STATUSES = (
+    ThesisStatus.ADVISOR_APPROVED,
+    ThesisStatus.READY_FOR_DEFENSE,
+)
+
+ACTIVE_DEFENSE_STATUSES = (
+    DefenseStatus.SCHEDULED,
+    DefenseStatus.IN_PROGRESS,
 )
 
 
@@ -715,3 +755,189 @@ class ThesisDocument(models.Model):
             str: Document representation.
         """
         return f"{self.type}:{self.thesis_id}"
+
+
+class Defense(models.Model):
+    """
+    Scheduled defense session for an advisor-approved thesis.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thesis = models.ForeignKey(
+        Thesis,
+        on_delete=models.PROTECT,
+        related_name="defenses",
+    )
+    scheduled_datetime = models.DateTimeField()
+    modality = models.CharField(
+        max_length=20,
+        choices=DefenseModality.choices,
+        default=DefenseModality.IN_PERSON,
+    )
+    location = models.CharField(max_length=500, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=DefenseStatus.choices,
+        default=DefenseStatus.SCHEDULED,
+        db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scheduled_defenses",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        """
+        Database table, constraints and indexes for defense sessions.
+        """
+
+        db_table = "defense"
+        verbose_name = "Defesa"
+        verbose_name_plural = "Defesas"
+        ordering = ["-scheduled_datetime"]
+        constraints = [
+            # Apenas uma defesa ativa (agendada ou em andamento) por monografia.
+            models.UniqueConstraint(
+                fields=["thesis"],
+                condition=Q(status__in=["SCHEDULED", "IN_PROGRESS"]),
+                name="uniq_active_defense_per_thesis",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["thesis", "status"], name="defense_thesis_status_idx"),
+            models.Index(fields=["scheduled_datetime", "status"], name="defense_datetime_idx"),
+        ]
+
+    def __str__(self) -> str:
+        """
+        Return the defense thesis and scheduled date.
+
+        Returns:
+            str: Thesis identifier and scheduled date.
+        """
+        return f"{self.thesis_id}@{self.scheduled_datetime.date()}"
+
+
+class DefenseMember(models.Model):
+    """
+    Committee member assigned to a thesis defense.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    defense = models.ForeignKey(
+        Defense,
+        on_delete=models.CASCADE,
+        related_name="members",
+    )
+    role = models.CharField(max_length=20, choices=CommitteeRole.choices)
+    institutional_member = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="committee_memberships",
+    )
+    external_invitation = models.OneToOneField(
+        "accounts.ExternalInvitation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="defense_membership",
+    )
+    name = models.CharField(max_length=200)
+    email = models.EmailField(max_length=254)
+    institution = models.CharField(max_length=200, blank=True, default="")
+    has_conflict = models.BooleanField(default=False)
+    conflict_reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        """
+        Database table, constraints and indexes for committee members.
+        """
+
+        db_table = "defense_member"
+        verbose_name = "Membro da banca"
+        verbose_name_plural = "Membros da banca"
+        ordering = ["role", "name"]
+        constraints = [
+            # Apenas um presidente por banca.
+            models.UniqueConstraint(
+                fields=["defense", "role"],
+                condition=Q(role="PRESIDENT"),
+                name="uniq_president_per_defense",
+            ),
+            # Exatamente uma identidade por membro: institucional XOR externo.
+            models.CheckConstraint(
+                condition=(
+                    Q(institutional_member__isnull=True, external_invitation__isnull=False)
+                    | Q(institutional_member__isnull=False, external_invitation__isnull=True)
+                ),
+                name="defense_member_one_identity",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["defense", "role"], name="defense_member_role_idx"),
+        ]
+
+    def __str__(self) -> str:
+        """
+        Return the member name and role.
+
+        Returns:
+            str: Name and role code.
+        """
+        return f"{self.name} ({self.role})"
+
+
+class DefenseMemberEvaluation(models.Model):
+    """
+    Individual evaluation submitted by a non-alternate committee member.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    member = models.OneToOneField(
+        DefenseMember,
+        on_delete=models.CASCADE,
+        related_name="evaluation",
+    )
+    decision = models.CharField(max_length=30, choices=DefenseResult.choices)
+    score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        """
+        Database table, constraints and indexes for committee evaluations.
+        """
+
+        db_table = "defense_member_evaluation"
+        verbose_name = "Avaliação da banca"
+        verbose_name_plural = "Avaliações da banca"
+        ordering = ["-submitted_at"]
+        constraints = [
+            # Nota deve estar entre 0,00 e 10,00, se informada.
+            models.CheckConstraint(
+                condition=Q(score__isnull=True) | (Q(score__gte=0) & Q(score__lte=10)),
+                name="defense_evaluation_score_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["member"], name="defense_evaluation_member_idx"),
+        ]
+
+    def __str__(self) -> str:
+        """
+        Return the member and decision identifiers.
+
+        Returns:
+            str: Member identifier and decision code.
+        """
+        return f"{self.member_id}:{self.decision}"
