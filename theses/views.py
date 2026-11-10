@@ -854,7 +854,7 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, remove_member, resolve_committee_member  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
-from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, schedule_defense, start_defense, update_defense  # noqa: E402
+from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
 from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
@@ -974,6 +974,7 @@ class DefenseDetailView(APIView):
             Response: Defense payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         return Response({"defense": defense_payload(defense, viewer=request.user)})
 
     def patch(self, request, defense_id) -> Response:
@@ -988,6 +989,7 @@ class DefenseDetailView(APIView):
             Response: Updated defense payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         serializer = UpdateDefenseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -1017,6 +1019,7 @@ class DefenseCancelView(APIView):
             Response: Updated defense payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         try:
             defense = cancel_defense(defense, reason=(request.data.get("reason") or ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
@@ -1044,6 +1047,7 @@ class DefenseStartView(APIView):
             Response: Updated defense payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         try:
             defense = start_defense(defense, actor=request.user, request=request)
         except DjangoValidationError as exc:
@@ -1071,6 +1075,7 @@ class DefenseCloseView(APIView):
             Response: Updated defense payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         try:
             defense = close_defense(defense, actor=request.user, request=request)
         except DjangoValidationError as exc:
@@ -1098,6 +1103,7 @@ class DefenseMemberCreateView(APIView):
             Response: Created member payload (201).
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         serializer = AddInstitutionalMemberSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -1129,6 +1135,7 @@ class DefenseExternalMemberCreateView(APIView):
             Response: Created member payload (201).
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         serializer = AddExternalMemberSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -1161,6 +1168,7 @@ class DefenseMemberDeleteView(APIView):
             Response: Empty 204 response on success.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
         try:
             remove_member(defense, member, actor=request.user, request=request)
@@ -1193,6 +1201,7 @@ class DefenseEvaluationView(APIView):
             Response: Evaluation payload, or 404 when not yet submitted.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
         viewer_member = resolve_committee_member(defense, request.user)
         is_own = (viewer_member is not None and viewer_member.pk == member.pk) or (not isinstance(request.user, ExternalInvitationPrincipal) and user_is_admin(request.user))
@@ -1215,6 +1224,7 @@ class DefenseEvaluationView(APIView):
             Response: Submitted evaluation payload.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
         member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
         serializer = SubmitEvaluationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1224,3 +1234,30 @@ class DefenseEvaluationView(APIView):
         except DjangoValidationError as exc:
             return _validation_response(exc)
         return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=True)})
+
+
+class DefenseRevertStatusView(APIView):
+    """
+    Revert a defense to its previous status (admin only).
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalAdmin]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Revert an IN_PROGRESS or CANCELLED defense to its previous status.
+
+        Args:
+            request: HTTP request with mandatory ``reason`` field.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        try:
+            defense = revert_defense_status(defense, reason=(request.data.get("reason") or ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})

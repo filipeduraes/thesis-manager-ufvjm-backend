@@ -10,8 +10,9 @@ from typing import Any
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.http import HttpRequest
+from django.utils import timezone
 
-from accounts.models import AuditAction, User
+from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
 from theses.defense_committee import _can_manage_defense, defense_member_payload
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
@@ -85,6 +86,73 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
     return defense
 
 
+def _transition_defense_to_in_progress(defense: Defense, thesis: Thesis, *, changed_by: User | None, reason: str) -> None:
+    """
+    Apply the SCHEDULED → IN_PROGRESS transition in-place for defense and thesis.
+
+    Both objects must already be locked with select_for_update. Saves both records
+    and creates a ThesisStatusHistory entry. Does NOT write an audit log entry;
+    the caller is responsible for that.
+
+    Args:
+        defense: Locked Defense instance (status must be SCHEDULED).
+        thesis: Locked Thesis instance belonging to the defense.
+        changed_by: User who triggered the transition, or None for system actions.
+        reason: Text stored in ThesisStatusHistory.
+    """
+    previous_thesis_status = thesis.status
+    thesis.status = ThesisStatus.UNDER_EVALUATION
+    thesis.save(update_fields=["status", "updated_at"])
+    ThesisStatusHistory.objects.create(
+        thesis=thesis,
+        previous_status=previous_thesis_status,
+        new_status=ThesisStatus.UNDER_EVALUATION,
+        changed_by=changed_by,
+        reason=reason,
+        metadata={"defenseId": str(defense.pk)},
+    )
+    defense.status = DefenseStatus.IN_PROGRESS
+    defense.auto_start_suspended = False
+    defense.save(update_fields=["status", "auto_start_suspended", "updated_at"])
+
+
+@transaction.atomic
+def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None) -> Defense:
+    """
+    Idempotently transition SCHEDULED → IN_PROGRESS when scheduled_datetime has passed.
+
+    Intended to be called at the beginning of endpoints that read or mutate a defense
+    so that the status stays current without a background job. If auto_start_suspended
+    is True the transition is skipped (set by revert_defense_status to prevent
+    immediate re-opening after a manual revert). No-op for any status other than
+    SCHEDULED.
+
+    Args:
+        defense: Defense session (may be stale — a fresh copy is fetched under lock).
+        request: HTTP request used for audit context.
+
+    Returns:
+        Defense: Refreshed defense instance (status may have changed to IN_PROGRESS).
+    """
+    if defense.status != DefenseStatus.SCHEDULED or defense.auto_start_suspended or timezone.now() < defense.scheduled_datetime:
+        return defense
+    defense = Defense.objects.select_for_update().get(pk=defense.pk)
+    if defense.status != DefenseStatus.SCHEDULED or defense.auto_start_suspended:
+        return defense
+    thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
+    _transition_defense_to_in_progress(defense, thesis, changed_by=None, reason="Banca iniciada automaticamente pelo horário agendado.")
+    record_audit(
+        action=AuditAction.UPDATE,
+        entity_type="Defense",
+        entity_id=str(defense.pk),
+        entity_app_label="theses",
+        request=request,
+        actor_user=None,
+        metadata={"event": "AUTO_STARTED_BY_SCHEDULE"},
+    )
+    return defense
+
+
 @transaction.atomic
 def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = None, duration_minutes: int | None = None, modality: str | None = None, location: str | None = None, notes: str | None = None, actor: User, request: HttpRequest | None = None) -> Defense:
     """
@@ -113,8 +181,11 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
     if defense.status != DefenseStatus.SCHEDULED:
         raise ValidationError("Só é possível alterar uma banca agendada (antes de iniciar).")
 
+    extra_fields: list[str] = []
     if scheduled_datetime is not None:
         defense.scheduled_datetime = scheduled_datetime
+        defense.auto_start_suspended = False
+        extra_fields.append("auto_start_suspended")
     if duration_minutes is not None:
         defense.duration_minutes = duration_minutes
     if modality is not None:
@@ -125,7 +196,7 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         defense.location = location.strip()
     if notes is not None:
         defense.notes = notes.strip()
-    defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"])
+    defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"] + extra_fields)
 
     record_audit(
         action=AuditAction.UPDATE,
@@ -184,8 +255,10 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         metadata={"defenseId": str(defense.pk)},
     )
 
+    defense.previous_status = defense.status
     defense.status = DefenseStatus.CANCELLED
-    defense.save(update_fields=["status", "updated_at"])
+    defense.auto_start_suspended = False
+    defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
 
     record_audit(
         action=AuditAction.SCHEDULE,
@@ -226,20 +299,7 @@ def start_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
         raise ValidationError("Só é possível iniciar uma banca agendada.")
 
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
-    previous_thesis_status = thesis.status
-    thesis.status = ThesisStatus.UNDER_EVALUATION
-    thesis.save(update_fields=["status", "updated_at"])
-    ThesisStatusHistory.objects.create(
-        thesis=thesis,
-        previous_status=previous_thesis_status,
-        new_status=ThesisStatus.UNDER_EVALUATION,
-        changed_by=actor,
-        reason="Banca iniciada.",
-        metadata={"defenseId": str(defense.pk)},
-    )
-
-    defense.status = DefenseStatus.IN_PROGRESS
-    defense.save(update_fields=["status", "updated_at"])
+    _transition_defense_to_in_progress(defense, thesis, changed_by=actor, reason="Banca iniciada.")
 
     record_audit(
         action=AuditAction.SCHEDULE,
@@ -332,6 +392,82 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
         request=request,
         actor_user=actor,
         metadata={"event": "DEFENSE_CLOSED", "result": result, "thesisNewStatus": new_thesis_status},
+    )
+    return defense
+
+
+@transaction.atomic
+def revert_defense_status(defense: Defense, *, reason: str, actor: User, request: HttpRequest | None = None) -> Defense:
+    """
+    Revert a defense to its previous status (admin only).
+
+    Allowed transitions:
+    - IN_PROGRESS → SCHEDULED (also reverts thesis from UNDER_EVALUATION to DEFENSE_SCHEDULED).
+    - CANCELLED → previous status stored in defense.previous_status, defaulting to SCHEDULED.
+
+    After reverting to SCHEDULED, auto_start_suspended is set to True so that
+    sync_defense_status does not immediately re-open the defense if the scheduled
+    time has already passed. The flag is cleared when the defense datetime is
+    updated via update_defense or when it is manually started via start_defense.
+
+    COMPLETED defenses cannot be reverted.
+    Existing evaluations are preserved.
+
+    Args:
+        defense: Defense session to revert.
+        reason: Mandatory explanation for the revert (non-empty string required).
+        actor: Administrator performing the action.
+        request: HTTP request used for audit context.
+
+    Returns:
+        Defense: Updated defense record.
+
+    Raises:
+        PermissionDenied: When the actor is not an administrator.
+        ValidationError: When reason is empty, the status is COMPLETED, or the
+            current status is not revertible.
+    """
+    if not user_is_admin(actor):
+        raise PermissionDenied()
+    if not reason or not reason.strip():
+        raise ValidationError({"reason": "Este campo é obrigatório."})
+
+    defense = Defense.objects.select_for_update().get(pk=defense.pk)
+
+    if defense.status == DefenseStatus.COMPLETED:
+        raise ValidationError("Não é possível reverter uma banca já encerrada.")
+    if defense.status not in (DefenseStatus.IN_PROGRESS, DefenseStatus.CANCELLED):
+        raise ValidationError("Só é possível reverter bancas em andamento ou canceladas.")
+
+    from_status = defense.status
+    to_status = defense.previous_status or DefenseStatus.SCHEDULED
+
+    thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
+    previous_thesis_status = thesis.status
+    thesis.status = ThesisStatus.DEFENSE_SCHEDULED
+    thesis.save(update_fields=["status", "updated_at"])
+    ThesisStatusHistory.objects.create(
+        thesis=thesis,
+        previous_status=previous_thesis_status,
+        new_status=ThesisStatus.DEFENSE_SCHEDULED,
+        changed_by=actor,
+        reason=f"Status da banca revertido pelo administrador. {reason}".strip(),
+        metadata={"defenseId": str(defense.pk)},
+    )
+
+    defense.status = to_status
+    defense.previous_status = ""
+    defense.auto_start_suspended = True
+    defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
+
+    record_audit(
+        action=AuditAction.UPDATE,
+        entity_type="Defense",
+        entity_id=str(defense.pk),
+        entity_app_label="theses",
+        request=request,
+        actor_user=actor,
+        metadata={"event": "STATUS_REVERTED_BY_ADMIN", "from": from_status, "to": to_status, "reason": reason},
     )
     return defense
 

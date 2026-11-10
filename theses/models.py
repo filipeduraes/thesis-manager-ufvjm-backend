@@ -783,6 +783,17 @@ class Defense(models.Model):
         default=DefenseStatus.SCHEDULED,
         db_index=True,
     )
+    previous_status = models.CharField(
+        max_length=20,
+        choices=DefenseStatus.choices,
+        blank=True,
+        default="",
+        help_text="Status imediatamente anterior ao cancelamento; usado pela reversão do admin.",
+    )
+    auto_start_suspended = models.BooleanField(
+        default=False,
+        help_text="Quando True, sync_defense_status não reabre esta banca automaticamente.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
