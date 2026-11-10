@@ -25,10 +25,6 @@ def _can_manage_defense(actor: User, thesis_id) -> bool:
     Administrators and coordinators always have permission. An advisor may manage
     defenses only for the thesis where they are the assigned advisor.
 
-    NOTE (pending Filipe's review): Requisitos.md says the advisor "solicits"
-    scheduling; the current implementation lets the advisor schedule, update,
-    cancel, and manage committee members directly for their own thesis.
-
     Args:
         actor: Authenticated institutional user.
         thesis_id: Primary key of the target thesis.
