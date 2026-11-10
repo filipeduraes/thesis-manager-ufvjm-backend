@@ -113,6 +113,8 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Avaliação individual por membro | **Implementado** | `PUT /api/v1/defenses/<id>/members/<memberId>/evaluation` — cada membro (institucional ou externo via convite válido) registra decisão, nota (0–10) e notas; suplentes não podem avaliar (403); membro não vê nota/notas de outro membro. |
 | Encerramento automático com cálculo de resultado | **Implementado** | `POST /api/v1/defenses/<id>/close` (admin/coordenador) verifica quórum, calcula resultado por maioria, transita `ThesisStatus` e chama `purge_thesis_versions` para aprovados. |
 | Registro do resultado final (manual) | **Implementado** | `POST /api/v1/theses/<id>/defense-result` (coordenação/admin) ainda disponível para lançamento manual retroativo. |
+| Abertura automática para avaliação | **Implementado** | `sync_defense_status` transita `SCHEDULED → IN_PROGRESS` quando `scheduled_datetime` já passou, sem job assíncrono. Chamada no início dos endpoints de detalhe, membros e avaliação. Idempotente (audit event `AUTO_STARTED_BY_SCHEDULE`; `AuditAction.UPDATE`). Teses transitam para `UNDER_EVALUATION` pelo mesmo código-caminho do `start_defense` manual. |
+| Reversão de status pelo administrador | **Implementado** | `POST /api/v1/defenses/<id>/revert-status` (somente admin). Permite `IN_PROGRESS → SCHEDULED` e `CANCELLED → status anterior` (campo `previous_status` em `Defense`; fallback para `SCHEDULED`). `COMPLETED` não reverte (400). Campo `auto_start_suspended` impede reabertura automática até que o horário seja reagendado via `PATCH` ou a banca seja iniciada manualmente. `reason` obrigatório (400 se vazio). Audit event `STATUS_REVERTED_BY_ADMIN`. Migration `0004_add_defense_revert_fields`. |
 | Eventos de banca/avaliação | **Pendente** | Submissão, agendamento, avaliação registrada, publicação — disparo assíncrono não implementado; histórico e auditoria síncronos já registram as transições. |
 
 ## 9. Repositório público e publicação
@@ -174,6 +176,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `DELETE` | `/api/v1/defenses/<id>/members/<memberId>` | Institucional | Remove membro da banca (exige status `SCHEDULED` e sem avaliação). |
 | `GET` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Institucional ou membro da banca | Lê avaliação; nota/notas visíveis somente ao próprio membro. |
 | `PUT` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Membro da banca | Registra ou atualiza avaliação individual (decisão, nota 0–10, notas). |
+| `POST` | `/api/v1/defenses/<id>/revert-status` | Admin | Reverte `IN_PROGRESS → SCHEDULED` ou `CANCELLED → status anterior`; `reason` obrigatório; `COMPLETED` não reverte. |
 
 ## 13. Prioridades sugeridas (próximos passos)
 
