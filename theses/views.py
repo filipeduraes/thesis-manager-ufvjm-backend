@@ -23,7 +23,7 @@ from rest_framework.views import APIView
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
-from accounts.permissions import IsInstitutionalUser
+from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
 from accounts.services import record_audit
 from academic.services import active_course_assignment
 from theses.models import (
@@ -1175,7 +1175,7 @@ class DefenseEvaluationView(APIView):
     """
 
     throttle_scope = "thesis"
-    permission_classes = [IsInstitutionalUser | IsDefenseCommitteeMember]
+    permission_classes = [IsInstitutionalAdmin | IsDefenseCommitteeMember]
 
     def get(self, request, defense_id, member_id) -> Response:
         """

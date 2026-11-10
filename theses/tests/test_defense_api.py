@@ -283,3 +283,13 @@ class DefenseEvaluationApiTests(TestCase):
         blocked = AuditLog.objects.filter(entity_id=str(self.defense.pk)).order_by("-occurred_at").first()
         self.assertIsNotNone(blocked)
         self.assertEqual(blocked.metadata.get("event"), "EVALUATION_BLOCKED_AFTER_CLOSE")
+
+    # --- Non-member institutional user blocked ---
+
+    def test_non_member_coordinator_cannot_read_evaluation_returns_403(self) -> None:
+        self.client.force_authenticate(user=self.evaluator1)
+        self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "9.0"}, format="json")
+
+        self.client.force_authenticate(user=self.coordinator)
+        response = self.client.get(self._eval_url(self.member1))
+        self.assertEqual(response.status_code, 403)
