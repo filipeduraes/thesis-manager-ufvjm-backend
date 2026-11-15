@@ -854,7 +854,7 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, remove_member, resolve_committee_member  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
-from theses.defense_listing import defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
+from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
@@ -900,19 +900,21 @@ class DefenseListView(APIView):
 
     def get(self, request) -> Response:
         """
-        List role-scoped defenses, optionally filtered by ``status``.
+        List role-scoped defenses with optional search and filters.
 
         External invitation sessions are rejected by ``IsInstitutionalUser`` (403);
         they read their committee through ``GET /api/v1/defenses/<id>``.
 
         Args:
-            request: HTTP request (``status`` accepts comma-separated DefenseStatus codes).
+            request: HTTP request. Query parameters: ``q`` (free-text search),
+                ``status`` (comma-separated DefenseStatus codes) and
+                ``pendingEvaluation`` (``true``/``1``/``yes``).
 
         Returns:
             Response: Paginated defense list payloads.
         """
-        status_filter = request.query_params.get("status")
-        queryset = list_visible_defenses(request.user, status_filter=status_filter, request=request)
+        filters = DefenseListFilters.from_query_params(request.query_params)
+        queryset = list_visible_defenses(request.user, filters=filters, request=request)
         paginator = ThesisPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         results = [defense_list_payload(defense, viewer=request.user) for defense in page]

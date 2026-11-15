@@ -5,10 +5,11 @@ Read-only listing services for defense sessions and schedulable theses.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Q, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
@@ -21,6 +22,39 @@ from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_
 logger = logging.getLogger(__name__)
 
 DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__institutional_member", "members__external_invitation", "members__evaluation", "thesis__authors__author")
+TRUTHY_QUERY_VALUES: frozenset[str] = frozenset({"1", "true", "yes"})
+
+
+@dataclass(frozen=True)
+class DefenseListFilters:
+    """
+    Search and filter options accepted by the defense listing.
+
+    Attributes:
+        query: Free-text search (``q``), already stripped; empty means no search.
+        status: Raw comma-separated DefenseStatus codes (``status``).
+        pending_evaluation: Whether to keep only defenses awaiting the viewer's evaluation.
+    """
+
+    query: str = ""
+    status: str = ""
+    pending_evaluation: bool = False
+
+    @classmethod
+    def from_query_params(cls, params: Any) -> DefenseListFilters:
+        """
+        Build filters from request query parameters, following ``GET /api/v1/theses`` conventions.
+
+        Args:
+            params: Query parameter mapping (``request.query_params``).
+
+        Returns:
+            DefenseListFilters: Parsed filters.
+        """
+        query = (params.get("q") or "").strip()
+        status = (params.get("status") or "").strip()
+        pending_value = (params.get("pendingEvaluation") or "").strip().lower()
+        return cls(query=query, status=status, pending_evaluation=pending_value in TRUTHY_QUERY_VALUES)
 
 
 def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QuerySet[Defense]:
@@ -95,26 +129,78 @@ def sync_due_defenses(queryset: QuerySet[Defense], request: HttpRequest | None =
     return started_count
 
 
-def list_visible_defenses(principal: User, status_filter: str | None = None, request: HttpRequest | None = None) -> QuerySet[Defense]:
+def _search_defenses(queryset: QuerySet[Defense], query: str) -> QuerySet[Defense]:
     """
-    Return the defenses visible to an institutional user, optionally filtered by status.
+    Apply a case-insensitive free-text search to a defense queryset.
 
-    Side effect: overdue scheduled defenses are auto-started (see ``sync_due_defenses``).
+    Matches thesis title, thesis reference code, main author name, advisor name
+    and defense location. The main-author conditions share one ``Q`` so they hit
+    the same author row (a co-author's name does not match).
+
+    Args:
+        queryset: Scoped defense queryset.
+        query: Non-empty search term.
+
+    Returns:
+        QuerySet[Defense]: Filtered queryset (may contain duplicates; caller applies distinct).
+    """
+    main_author_match = Q(thesis__authors__is_main_author=True, thesis__authors__author__name__icontains=query)
+    return queryset.filter(
+        Q(thesis__title__icontains=query)
+        | Q(thesis__reference_code__icontains=query)
+        | main_author_match
+        | Q(thesis__advisor__name__icontains=query)
+        | Q(location__icontains=query)
+    )
+
+
+def _pending_evaluation_for(queryset: QuerySet[Defense], principal: User) -> QuerySet[Defense]:
+    """
+    Keep only active defenses where the principal is a non-alternate member without an evaluation.
+
+    Only SCHEDULED and IN_PROGRESS defenses are kept: a cancelled or completed
+    defense can no longer receive evaluations, so it is not "pending". An
+    ``Exists`` subquery guarantees that role and evaluation are checked on the
+    same membership row.
+
+    Args:
+        queryset: Scoped defense queryset.
+        principal: Authenticated institutional user.
+
+    Returns:
+        QuerySet[Defense]: Filtered queryset.
+    """
+    pending_memberships = DefenseMember.objects.filter(defense=OuterRef("pk"), institutional_member=principal, evaluation__isnull=True)
+    pending_memberships = pending_memberships.exclude(role=CommitteeRole.ALTERNATE)
+    return queryset.filter(Exists(pending_memberships), status__in=ACTIVE_DEFENSE_STATUSES)
+
+
+def list_visible_defenses(principal: User, filters: DefenseListFilters | None = None, request: HttpRequest | None = None) -> QuerySet[Defense]:
+    """
+    Return the defenses visible to an institutional user, with optional search and filters.
+
+    Side effect: overdue scheduled defenses are auto-started (see ``sync_due_defenses``)
+    before any filter runs, so ``status`` and ``pendingEvaluation`` see current statuses.
 
     Args:
         principal: Authenticated institutional user.
-        status_filter: Optional comma-separated DefenseStatus codes.
+        filters: Search/filter options; ``None`` means no filtering.
         request: HTTP request used for audit context.
 
     Returns:
-        QuerySet[Defense]: Scoped queryset ordered by most recent schedule first.
+        QuerySet[Defense]: Distinct scoped queryset ordered by most recent schedule first.
     """
+    active_filters = filters or DefenseListFilters()
     queryset = defenses_visible_to(principal)
     sync_due_defenses(queryset, request=request)
-    statuses = parse_defense_status_filter(status_filter)
+    statuses = parse_defense_status_filter(active_filters.status)
     if statuses:
         queryset = queryset.filter(status__in=statuses)
-    return queryset.order_by("-scheduled_datetime", "-created_at")
+    if active_filters.query:
+        queryset = _search_defenses(queryset, active_filters.query)
+    if active_filters.pending_evaluation:
+        queryset = _pending_evaluation_for(queryset, principal)
+    return queryset.distinct().order_by("-scheduled_datetime", "-created_at")
 
 
 def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:

@@ -172,6 +172,106 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
 
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
+class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
+    """Tests for q, status and pendingEvaluation on GET /api/v1/defenses."""
+
+    def test_search_by_thesis_title_is_case_insensitive(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "tese a"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk)})
+
+    def test_search_by_reference_code(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": self.second_thesis.reference_code.lower()})
+        self.assertEqual(self._ids(response), {str(self.second_defense.pk)})
+
+    def test_search_by_main_author_name(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "ALUNO"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk)})
+
+    def test_search_ignores_co_author_name(self) -> None:
+        co_author = create_user("coautor@ufvjm.edu.br", "Fulano Coautor", ProfileRole.STUDENT)
+        ThesisAuthor.objects.create(thesis=self.second_thesis, author=co_author, position=2, is_main_author=False)
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "fulano"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_search_by_advisor_name_and_location(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "orientador"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk), str(self.second_defense.pk)})
+        response = self.client.get(DEFENSES_URL, {"q": "sala 1"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk)})
+
+    def test_search_without_results(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "inexistente"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 0)
+        self.assertEqual(response.data["results"], [])
+
+    def test_search_does_not_duplicate_results(self) -> None:
+        co_author = create_user("coautor@ufvjm.edu.br", "Aluno Coautor", ProfileRole.STUDENT)
+        ThesisAuthor.objects.create(thesis=self.thesis, author=co_author, position=2, is_main_author=False)
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "tese"})
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(len(response.data["results"]), 2)
+
+    def test_search_respects_role_visibility(self) -> None:
+        self.client.force_authenticate(user=self.other_advisor)
+        response = self.client.get(DEFENSES_URL, {"q": "tese"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_search_combined_with_status(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"q": "tese", "status": "CANCELLED"})
+        self.assertEqual(self._ids(response), {str(self.second_defense.pk)})
+        response = self.client.get(DEFENSES_URL, {"q": "tese b", "status": "SCHEDULED"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_pending_evaluation_lists_member_without_evaluation(self) -> None:
+        self.client.force_authenticate(user=self.member_professor)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk)})
+
+    def test_pending_evaluation_hides_member_who_evaluated(self) -> None:
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED)
+        self.client.force_authenticate(user=self.member_professor)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_pending_evaluation_hides_alternate_member(self) -> None:
+        DefenseMember.objects.filter(pk=self.member.pk).update(role=CommitteeRole.ALTERNATE)
+        self.client.force_authenticate(user=self.member_professor)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "1"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_pending_evaluation_hides_cancelled_defense(self) -> None:
+        cancel_defense(self.defense, actor=self.admin)
+        self.client.force_authenticate(user=self.member_professor)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_pending_evaluation_only_considers_viewer_membership(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
+        self.assertEqual(response.data["count"], 0)
+
+    def test_pending_evaluation_false_does_not_filter(self) -> None:
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "false"})
+        self.assertEqual(response.data["count"], 2)
+
+    def test_pending_evaluation_after_auto_start(self) -> None:
+        Defense.objects.filter(pk=self.defense.pk).update(scheduled_datetime=timezone.now() - timedelta(minutes=5))
+        self.client.force_authenticate(user=self.member_professor)
+        response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true", "status": "IN_PROGRESS"})
+        self.assertEqual(self._ids(response), {str(self.defense.pk)})
+
+
+@override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
 class SchedulableThesisListApiTests(DefenseListingFixtureMixin, TestCase):
     """Tests for GET /api/v1/defenses/schedulable-theses."""
 
