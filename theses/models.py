@@ -836,6 +836,58 @@ class Defense(models.Model):
         return f"{self.thesis_id}@{self.scheduled_datetime.date()}"
 
 
+class DefenseStatusHistory(models.Model):
+    """
+    Immutable history of defense status transitions.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    defense = models.ForeignKey(
+        Defense,
+        on_delete=models.CASCADE,
+        related_name="status_history",
+    )
+    previous_status = models.CharField(
+        max_length=20,
+        choices=DefenseStatus.choices,
+        blank=True,
+        default="",
+    )
+    new_status = models.CharField(max_length=20, choices=DefenseStatus.choices)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="defense_status_changes",
+        help_text="Nulo em transições automáticas (ex.: abertura pelo horário agendado).",
+    )
+    reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        """
+        Database table, ordering and indexes for defense status history.
+        """
+
+        db_table = "defense_status_history"
+        verbose_name = "Histórico de status da banca"
+        verbose_name_plural = "Históricos de status da banca"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["defense", "created_at"], name="defense_status_history_idx"),
+        ]
+
+    def __str__(self) -> str:
+        """
+        Return the transition representation.
+
+        Returns:
+            str: Previous and new statuses.
+        """
+        return f"{self.previous_status}->{self.new_status}"
+
+
 class DefenseMember(models.Model):
     """
     Committee member assigned to a thesis defense.

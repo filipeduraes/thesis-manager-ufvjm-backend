@@ -15,8 +15,54 @@ from django.utils import timezone
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
 from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload
-from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
+from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import purge_thesis_versions, user_is_admin, user_is_coordinator
+
+
+def record_defense_status_change(defense: Defense, previous_status: str, changed_by: User | None, reason: str) -> DefenseStatusHistory:
+    """
+    Append a status transition of a defense to its history.
+
+    Must be called inside the transaction that changes ``defense.status`` and after
+    the new status has been assigned, so history and status are committed together.
+
+    Args:
+        defense: Defense whose ``status`` already holds the new value.
+        previous_status: Status before the transition (empty string on creation).
+        changed_by: User responsible, or None for automatic transitions.
+        reason: Human-readable explanation stored with the entry.
+
+    Returns:
+        DefenseStatusHistory: Created history entry.
+    """
+    return DefenseStatusHistory.objects.create(defense=defense, previous_status=previous_status, new_status=defense.status, changed_by=changed_by, reason=reason)
+
+
+def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
+    """
+    Serialize the status history of a defense in chronological order.
+
+    Args:
+        defense: Defense session.
+
+    Returns:
+        list[dict[str, Any]]: History entries, oldest first.
+    """
+    entries = defense.status_history.select_related("changed_by").order_by("created_at")
+    history: list[dict[str, Any]] = []
+    for entry in entries:
+        previous_label = DefenseStatus(entry.previous_status).label if entry.previous_status else None
+        changed_by_name = (entry.changed_by.name or entry.changed_by.email) if entry.changed_by else None
+        history.append({
+            "previousStatus": entry.previous_status or None,
+            "previousStatusLabel": previous_label,
+            "newStatus": entry.new_status,
+            "newStatusLabel": DefenseStatus(entry.new_status).label,
+            "changedBy": changed_by_name,
+            "reason": entry.reason,
+            "createdAt": entry.created_at.isoformat(),
+        })
+    return history
 
 
 @transaction.atomic
@@ -62,6 +108,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         status=DefenseStatus.SCHEDULED,
         created_by=actor,
     )
+    record_defense_status_change(defense, "", actor, "Banca agendada.")
 
     previous_status = thesis.status
     thesis.status = ThesisStatus.DEFENSE_SCHEDULED
@@ -91,14 +138,14 @@ def _transition_defense_to_in_progress(defense: Defense, thesis: Thesis, *, chan
     Apply the SCHEDULED → IN_PROGRESS transition in-place for defense and thesis.
 
     Both objects must already be locked with select_for_update. Saves both records
-    and creates a ThesisStatusHistory entry. Does NOT write an audit log entry;
-    the caller is responsible for that.
+    and creates ThesisStatusHistory and DefenseStatusHistory entries. Does NOT write
+    an audit log entry; the caller is responsible for that.
 
     Args:
         defense: Locked Defense instance (status must be SCHEDULED).
         thesis: Locked Thesis instance belonging to the defense.
         changed_by: User who triggered the transition, or None for system actions.
-        reason: Text stored in ThesisStatusHistory.
+        reason: Text stored in both ThesisStatusHistory and DefenseStatusHistory.
     """
     previous_thesis_status = thesis.status
     thesis.status = ThesisStatus.UNDER_EVALUATION
@@ -111,9 +158,11 @@ def _transition_defense_to_in_progress(defense: Defense, thesis: Thesis, *, chan
         reason=reason,
         metadata={"defenseId": str(defense.pk)},
     )
+    previous_defense_status = defense.status
     defense.status = DefenseStatus.IN_PROGRESS
     defense.auto_start_suspended = False
     defense.save(update_fields=["status", "auto_start_suspended", "updated_at"])
+    record_defense_status_change(defense, previous_defense_status, changed_by, reason)
 
 
 @transaction.atomic
@@ -263,6 +312,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
     defense.status = DefenseStatus.CANCELLED
     defense.auto_start_suspended = False
     defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
+    record_defense_status_change(defense, defense.previous_status, actor, cancel_reason)
 
     record_audit(
         action=AuditAction.SCHEDULE,
@@ -384,6 +434,7 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
 
     defense.status = DefenseStatus.COMPLETED
     defense.save(update_fields=["status", "updated_at"])
+    record_defense_status_change(defense, DefenseStatus.IN_PROGRESS, actor, f"Banca encerrada. Resultado: {DefenseResult(result).label}.")
 
     if new_thesis_status in APPROVED_DEFENSE_STATUSES:
         purge_thesis_versions(thesis, actor=actor, request=request)
@@ -463,6 +514,7 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
     defense.previous_status = ""
     defense.auto_start_suspended = True
     defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
+    record_defense_status_change(defense, from_status, actor, f"Status revertido pelo administrador. {reason.strip()}")
 
     record_audit(
         action=AuditAction.UPDATE,
