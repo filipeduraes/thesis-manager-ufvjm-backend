@@ -116,13 +116,37 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
     return payload
 
 
-def _check_schedule_overlap(defense: Defense, user: User) -> None:
+def _has_schedule_overlap(defense: Defense, user_id: Any) -> bool:
     """
-    Raise ValidationError when user already belongs to an overlapping active defense.
+    Return whether the user belongs to another active defense overlapping this one.
 
     Two defenses overlap when their half-open intervals [start, start+duration)
     intersect: A.start < B.end AND B.start < A.end. Adjacent sessions (one ends
-    exactly when the other starts) are not considered overlapping.
+    exactly when the other starts) are not considered overlapping. The interval
+    is read from the in-memory ``defense``, so unsaved schedule changes are honored.
+
+    Args:
+        defense: Defense whose (possibly unsaved) interval is checked.
+        user_id: Primary key of the institutional user to check.
+
+    Returns:
+        bool: True when an overlapping active defense is found.
+    """
+    this_start = defense.scheduled_datetime
+    this_end = this_start + timedelta(minutes=defense.duration_minutes)
+    base_qs = Defense.objects.filter(members__institutional_member_id=user_id, status__in=ACTIVE_DEFENSE_STATUSES)
+    candidates = base_qs.exclude(pk=defense.pk).values("scheduled_datetime", "duration_minutes")
+    for other in candidates:
+        other_start = other["scheduled_datetime"]
+        other_end = other_start + timedelta(minutes=other["duration_minutes"])
+        if this_start < other_end and other_start < this_end:
+            return True
+    return False
+
+
+def _check_schedule_overlap(defense: Defense, user: User) -> None:
+    """
+    Raise ValidationError when user already belongs to an overlapping active defense.
 
     Args:
         defense: Defense the user is being added to.
@@ -131,15 +155,27 @@ def _check_schedule_overlap(defense: Defense, user: User) -> None:
     Raises:
         ValidationError: When an overlapping active defense is found.
     """
-    this_start = defense.scheduled_datetime
-    this_end = this_start + timedelta(minutes=defense.duration_minutes)
-    base_qs = Defense.objects.filter(members__institutional_member=user, status__in=ACTIVE_DEFENSE_STATUSES)
-    candidates = base_qs.exclude(pk=defense.pk).values("scheduled_datetime", "duration_minutes")
-    for other in candidates:
-        other_start = other["scheduled_datetime"]
-        other_end = other_start + timedelta(minutes=other["duration_minutes"])
-        if this_start < other_end and other_start < this_end:
-            raise ValidationError("Este membro já participa de outra banca no mesmo período.")
+    if _has_schedule_overlap(defense, user.pk):
+        raise ValidationError("Este membro já participa de outra banca no mesmo período.")
+
+
+def check_committee_schedule_conflicts(defense: Defense) -> None:
+    """
+    Validate that no institutional member of the defense has an overlapping active defense.
+
+    Used when the defense date, time or duration changes. External members are not
+    checked because they have no cross-defense identity (one invitation per membership).
+
+    Args:
+        defense: Defense carrying the new (possibly unsaved) schedule.
+
+    Raises:
+        ValidationError: Naming the first institutional member found in conflict.
+    """
+    institutional_members = defense.members.filter(institutional_member__isnull=False).order_by("created_at")
+    for member in institutional_members:
+        if _has_schedule_overlap(defense, member.institutional_member_id):
+            raise ValidationError(f"O membro {member.name} já participa de outra banca no mesmo período.")
 
 
 @transaction.atomic

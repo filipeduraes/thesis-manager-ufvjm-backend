@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
-from theses.defense_committee import _can_manage_defense, defense_member_payload
+from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import purge_thesis_versions, user_is_admin, user_is_coordinator
 
@@ -173,7 +173,9 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
 
     Raises:
         PermissionDenied: When the actor is not authorized to update this defense.
-        ValidationError: When the defense is not in SCHEDULED status.
+        ValidationError: When the defense is not in SCHEDULED status, the modality is
+            invalid, or a new date, time or duration overlaps another active defense of
+            an institutional committee member.
     """
     if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
@@ -196,6 +198,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         defense.location = location.strip()
     if notes is not None:
         defense.notes = notes.strip()
+    if scheduled_datetime is not None or duration_minutes is not None:
+        check_committee_schedule_conflicts(defense)
     defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"] + extra_fields)
 
     record_audit(
