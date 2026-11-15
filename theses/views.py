@@ -854,6 +854,7 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, remove_member, resolve_committee_member  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
+from theses.defense_listing import defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
@@ -865,20 +866,10 @@ def _scoped_defense_qs(user) -> QuerySet:
     """
     Return a Defense queryset restricted to what the given principal may access.
 
-    - Admin / coordinator: unrestricted.
-    - Advisor: only defenses for their own advised theses.
-    - Student: only defenses for the thesis they authored (main author).
-    - ExternalInvitationPrincipal: only defenses they are a committee member of.
+    Delegates to ``defenses_visible_to`` so that detail and listing endpoints share
+    the same visibility rule.
     """
-    base = Defense.objects.select_related("thesis").prefetch_related("members__institutional_member", "members__external_invitation")
-    if isinstance(user, ExternalInvitationPrincipal):
-        return base.filter(members__external_invitation=user.invitation).distinct()
-    if user_is_admin(user) or user_is_coordinator(user):
-        return base
-    if user_is_advisor(user):
-        return base.filter(Q(thesis__advisor_id=user.pk) | Q(members__institutional_member=user)).distinct()
-    # Aluno: só a própria tese principal
-    return base.filter(Q(thesis__authors__author=user, thesis__authors__is_main_author=True) | Q(members__institutional_member=user)).distinct()
+    return defenses_visible_to(user)
 
 
 def _scoped_thesis(user, thesis_id) -> Thesis:
@@ -897,6 +888,62 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
 
 
 # ─── Defense views ────────────────────────────────────────────────────────────
+
+
+class DefenseListView(APIView):
+    """
+    List every defense the authenticated institutional user may see.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def get(self, request) -> Response:
+        """
+        List role-scoped defenses, optionally filtered by ``status``.
+
+        External invitation sessions are rejected by ``IsInstitutionalUser`` (403);
+        they read their committee through ``GET /api/v1/defenses/<id>``.
+
+        Args:
+            request: HTTP request (``status`` accepts comma-separated DefenseStatus codes).
+
+        Returns:
+            Response: Paginated defense list payloads.
+        """
+        status_filter = request.query_params.get("status")
+        queryset = list_visible_defenses(request.user, status_filter=status_filter, request=request)
+        paginator = ThesisPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        results = [defense_list_payload(defense, viewer=request.user) for defense in page]
+        return paginator.get_paginated_response(results)
+
+
+class SchedulableThesisListView(APIView):
+    """
+    List theses for which the authenticated user may schedule a defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def get(self, request) -> Response:
+        """
+        List advisor-approved theses without an active defense, scoped by ``_can_manage_defense``.
+
+        Users without scheduling rights (e.g. students) receive an empty page.
+
+        Args:
+            request: HTTP request.
+
+        Returns:
+            Response: Paginated thesis summaries (same shape as ``GET /api/v1/theses``).
+        """
+        queryset = schedulable_theses_for(request.user)
+        paginator = ThesisPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        results = [thesis_list_payload(thesis, request.user) for thesis in page]
+        return paginator.get_paginated_response(results)
 
 
 class DefenseListCreateView(APIView):
