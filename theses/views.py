@@ -34,7 +34,7 @@ from theses.models import (
     ThesisFile,
     ThesisStatus,
 )
-from theses.permissions import IsAcademicManager, IsStudentUser
+from theses.permissions import IsAcademicManager, IsAdvisorUser, IsStudentUser
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
@@ -962,7 +962,6 @@ class DefenseListCreateView(APIView):
         Returns:
             list: Permission instances.
         """
-        from theses.permissions import IsAdvisorUser
         if self.request.method == "POST":
             return [(IsAcademicManager | IsAdvisorUser)()]
         return [IsInstitutionalUser()]
@@ -1081,10 +1080,13 @@ class DefenseCancelView(APIView):
 class DefenseStartView(APIView):
     """
     Transition a defense from SCHEDULED to IN_PROGRESS.
+
+    Admins, coordinators and the advisor of the thesis may call it; the object-level
+    rule (advisor of this thesis) is enforced by the service via ``_can_manage_defense``.
     """
 
     throttle_scope = "thesis"
-    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    permission_classes = [IsAcademicManager | IsAdvisorUser]
 
     def post(self, request, defense_id) -> Response:
         """
@@ -1109,10 +1111,13 @@ class DefenseStartView(APIView):
 class DefenseCloseView(APIView):
     """
     Close an in-progress defense and compute the final result.
+
+    Admins, coordinators and the advisor of the thesis may call it; the object-level
+    rule (advisor of this thesis) is enforced by the service via ``_can_manage_defense``.
     """
 
     throttle_scope = "thesis"
-    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    permission_classes = [IsAcademicManager | IsAdvisorUser]
 
     def post(self, request, defense_id) -> Response:
         """

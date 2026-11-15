@@ -129,11 +129,18 @@ class DefenseSchedulingServiceTests(TestCase):
         self.assertEqual(defense.status, DefenseStatus.IN_PROGRESS)
         self.assertEqual(thesis.status, ThesisStatus.UNDER_EVALUATION)
 
-    def test_advisor_cannot_start_defense(self) -> None:
+    def test_advisor_of_own_thesis_can_start_defense(self) -> None:
+        thesis = self._make_thesis()
+        defense = self._make_scheduled_defense(thesis)
+        start_defense(defense, actor=self.advisor)
+        defense.refresh_from_db()
+        self.assertEqual(defense.status, DefenseStatus.IN_PROGRESS)
+
+    def test_advisor_other_thesis_cannot_start_defense(self) -> None:
         thesis = self._make_thesis()
         defense = self._make_scheduled_defense(thesis)
         with self.assertRaises(PermissionDenied):
-            start_defense(defense, actor=self.advisor)
+            start_defense(defense, actor=self.other_advisor)
 
 
 @override_settings(CACHES=TEST_CACHES)

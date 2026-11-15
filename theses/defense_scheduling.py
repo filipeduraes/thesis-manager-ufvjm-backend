@@ -16,7 +16,7 @@ from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
 from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
-from theses.services import purge_thesis_versions, user_is_admin, user_is_coordinator
+from theses.services import purge_thesis_versions, user_is_admin
 
 
 def record_defense_status_change(defense: Defense, previous_status: str, changed_by: User | None, reason: str) -> DefenseStatusHistory:
@@ -331,22 +331,23 @@ def start_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     """
     Transition a scheduled defense to IN_PROGRESS and the thesis to UNDER_EVALUATION.
 
-    Restricted to administrators and coordinators. The advisor permission for
-    starting a defense has not been confirmed by Filipe (pending decision).
+    Allowed for administrators, coordinators and the advisor of the thesis
+    (``_can_manage_defense``), following the review decision to keep the advisor
+    in control of their own defense.
 
     Args:
         defense: Defense session to start.
-        actor: Admin or coordinator performing the action.
+        actor: Admin, coordinator, or thesis advisor performing the action.
         request: HTTP request used for audit context.
 
     Returns:
         Defense: Updated (IN_PROGRESS) defense record.
 
     Raises:
-        PermissionDenied: When the actor is not an admin or coordinator.
+        PermissionDenied: When the actor is not authorized to manage this defense.
         ValidationError: When the defense is not in SCHEDULED status.
     """
-    if not (user_is_admin(actor) or user_is_coordinator(actor)):
+    if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
     defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if defense.status != DefenseStatus.SCHEDULED:
@@ -377,22 +378,23 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     otherwise APPROVED_WITH_REMARKS. When the thesis is approved, non-current
     file versions are purged.
 
-    Restricted to administrators and coordinators. The advisor permission for
-    closing a defense has not been confirmed by Filipe (pending decision).
+    Allowed for administrators, coordinators and the advisor of the thesis
+    (``_can_manage_defense``), following the review decision to keep the advisor
+    in control of their own defense.
 
     Args:
         defense: Defense session to close.
-        actor: Admin or coordinator performing the action.
+        actor: Admin, coordinator, or thesis advisor performing the action.
         request: HTTP request used for audit context.
 
     Returns:
         Defense: Updated (COMPLETED) defense record.
 
     Raises:
-        PermissionDenied: When the actor is not an admin or coordinator.
+        PermissionDenied: When the actor is not authorized to manage this defense.
         ValidationError: When the defense is not IN_PROGRESS or evaluations are missing.
     """
-    if not (user_is_admin(actor) or user_is_coordinator(actor)):
+    if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
     defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if defense.status != DefenseStatus.IN_PROGRESS:

@@ -146,11 +146,12 @@ class DefenseSchedulingApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["defense"]["status"], DefenseStatus.IN_PROGRESS)
 
-    def test_advisor_cannot_start_defense(self) -> None:
+    def test_advisor_of_own_thesis_can_start_defense(self) -> None:
         defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.client.force_authenticate(user=self.advisor)
         response = self.client.post(f"/api/v1/defenses/{defense.pk}/start", {}, format="json")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["defense"]["status"], DefenseStatus.IN_PROGRESS)
 
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
