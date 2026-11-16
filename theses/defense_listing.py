@@ -23,7 +23,7 @@ from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_
 
 logger = logging.getLogger(__name__)
 
-DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__institutional_member", "members__external_invitation", "members__evaluation", "thesis__authors__author")
+DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__institutional_member", "members__external_invitation", "members__evaluation", "thesis__authors__author", "thesis__keyword_links__keyword", "thesis__files__stored_file")
 TRUTHY_QUERY_VALUES: frozenset[str] = frozenset({"1", "true", "yes"})
 
 
@@ -76,7 +76,7 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     Returns:
         QuerySet[Defense]: Scoped queryset with thesis and members preloaded.
     """
-    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch(), google_social_accounts_prefetch("members__institutional_member__socialaccount_set"))
+    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor", "thesis__course", "thesis__course__department").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch(), google_social_accounts_prefetch("members__institutional_member__socialaccount_set"))
     if isinstance(principal, ExternalInvitationPrincipal):
         return base.filter(members__external_invitation=principal.invitation).distinct()
     if user_is_admin(principal):
@@ -238,7 +238,7 @@ def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:
         if user_is_advisor(principal):
             allowed |= Q(advisor_id=principal.pk)
         queryset = queryset.filter(allowed)
-    queryset = queryset.select_related("course", "advisor")
+    queryset = queryset.select_related("course", "advisor").prefetch_related("authors__author", "keyword_links__keyword", "files__stored_file")
     return queryset.distinct().order_by("advisor_approved_at", "updated_at")
 
 
@@ -341,7 +341,9 @@ def defense_list_payload(defense: Defense, viewer: User, viewer_context: Defense
 
     Extends ``defense_payload`` with thesis summary fields, the viewer's own
     membership state and ``viewerPermissions``, so the frontend can render the
-    list without extra requests.
+    list without extra requests. ``thesisSummary`` carries the same thesis data in
+    a nested object; the flat ``thesisTitle``/``student``/``advisor`` fields are
+    kept for compatibility with existing clients.
 
     Args:
         defense: Defense loaded through ``defenses_visible_to``.

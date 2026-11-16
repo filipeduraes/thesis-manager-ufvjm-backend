@@ -208,6 +208,7 @@ REST_FRAMEWORK = {
         "session": "120/min",
         "thesis": "120/min",
         "thesis_upload": "30/hour",
+        "user_suggest": "60/min",
     },
 }
 

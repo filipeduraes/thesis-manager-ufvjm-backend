@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
+from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
@@ -729,3 +730,66 @@ def session_audit_for_request(request: HttpRequest, user: User,) -> SessionAudit
     if not session_key:
         return None
     return SessionAudit.objects.filter(session_key=session_key, user=user).first()
+
+
+# TTL curto: usuários institucionais mudam muito raramente e a busca deve ser
+# rápida mesmo com várias digitações por segundo.
+USER_SUGGEST_CACHE_TTL_SECONDS = 45
+USER_SUGGEST_MAX_RESULTS = 3
+USER_SUGGEST_MIN_QUERY = 2
+USER_SUGGEST_MAX_QUERY = 80
+
+
+def suggest_users(query: str, role_codes: tuple[ProfileRole, ...] | None = None) -> list[dict[str, object]]:
+    """
+    Return up to three institutional users matching a search fragment.
+
+    Powers the member-selection autocomplete. The result is cached briefly and
+    capped at a handful of rows, so the endpoint stays cheap even with frequent
+    calls (the frontend debounces too). Name/email are stable enough that a
+    45-second staleness window is acceptable.
+
+    Args:
+        query: Free text typed by the user (at least ``USER_SUGGEST_MIN_QUERY``
+            characters; anything longer than ``USER_SUGGEST_MAX_QUERY`` is ignored).
+        role_codes: Restrict matches to users that hold one of these roles
+            (advisors calling the member picker only see other advisors;
+            administrators and coordinators see the full directory).
+
+    Returns:
+        list[dict[str, object]]: Matches with ``id``, ``name``, ``email`` and
+            ``avatarUrl``, ordered by name then e-mail.
+    """
+    normalized = query.strip().lower()
+    if len(normalized) < USER_SUGGEST_MIN_QUERY or len(normalized) > USER_SUGGEST_MAX_QUERY:
+        return []
+    roles_key = ",".join(sorted(role_codes)) if role_codes else "__all__"
+    cache_key = f"users:suggest:{roles_key}:{normalized}"
+    cached_results = cache.get(cache_key)
+    if cached_results is not None:
+        return cached_results
+    # `icontains` em nome não usa índice; o volume de usuários institucionais
+    # (alguns milhares) torna o seq scan mais barato que manter pg_trgm. Se o
+    # volume crescer muito, habilite a extensão e um índice GIN parcial.
+    base = User.objects.filter(is_active=True)
+    if role_codes:
+        base = base.filter(profile_roles__role__in=role_codes, profile_roles__revoked_at__isnull=True)
+    matches = (
+        base.filter(Q(name__icontains=normalized) | Q(email__startswith=normalized))
+        .distinct()
+        .only("id", "name", "email")
+        .order_by("name", "email")
+        .prefetch_related(google_social_accounts_prefetch())[:USER_SUGGEST_MAX_RESULTS]
+    )
+    results: list[dict[str, object]] = []
+    for user in matches:
+        results.append(
+            {
+                "id": str(user.pk),
+                "name": user.name or user.email,
+                "email": user.email,
+                "avatarUrl": user_avatar_url(user),
+            }
+        )
+    cache.set(cache_key, results, USER_SUGGEST_CACHE_TTL_SECONDS)
+    return results

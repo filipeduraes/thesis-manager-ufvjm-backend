@@ -2,7 +2,7 @@
 
 Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
 
-> Atualizado em: 2026-11-09. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em: 2026-11-16. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
 
 ## Legenda
 - **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).
@@ -175,6 +175,10 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `GET` | `/api/v1/public/theses` | Anônimo | Repositório público com busca/filtros e paginação. |
 | `GET` | `/api/v1/public/theses/<id>` | Anônimo | Detalhe público de monografia publicada. |
 | `GET` | `/api/v1/public/theses/<id>/download` | Anônimo | Download da versão publicada. |
+| `GET` | `/api/v1/public/advisors` | Anônimo | Lista de orientadores (somente ativos); busca por nome, paginado (`q`, `page`, `pageSize`); sem e-mail no payload público. |
+| `GET` | `/api/v1/users` | Coordenação/admin | Diretório paginado de usuários; filtro `role` (`STUDENT`/`ADVISOR`/`COORDINATOR`/`ADMIN`) e `q`; inclui e-mail. |
+| `GET` | `/api/v1/users/suggest` | Coordenação/orientador/admin | Autocomplete (máx. 3): qualificador `q`; orientador vê somente outros orientadores; coordenação/admin veem o diretório completo (ou `role=` para filtrar). |
+| `GET` | `/api/v1/users/suggest` | ADMIN/COORDINATOR/ADVISOR | Autocomplete de usuários institucionais (máx. 3): filtro `q` (mín. 2 caracteres; >80 ignorado), somente ativos, ordenado por nome/e-mail; throttle 60/min; resposta em cache curto (45 s). |
 | `GET` | `/api/v1/theses/<id>/defenses` | Institucional | Lista defesas da tese (escopo por papel). |
 | `POST` | `/api/v1/theses/<id>/defenses` | Admin/coord/orientador | Agenda nova defesa; exige status `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`. |
 | `GET` | `/api/v1/defenses` | Institucional | Lista paginada de bancas visíveis ao usuário; filtros `?q=`, `?status=` e `?pendingEvaluation=true`; inclui dados da tese, aluno, situação do usuário na banca (`viewerMembership`) e `viewerPermissions`. |
@@ -203,6 +207,17 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
 
 ---
+
+## 14. Pendências identificadas na auditoria (2026-11-16, não implementadas)
+
+A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes por serem tarefas delegadas a outros desenvolvedores e não parte da refatoração de auditoria. Os pontos exatos e o contrato proposto estão anotados no código com `TODO(auditoria)` (backend: `theses/views.py`, `theses/urls.py`, `theses/services.py`, `theses/defense_committee.py`).
+
+- **Repositório público incompleto para anônimos**: a listagem `GET /api/v1/public/theses` devolve `currentFile.downloadUrl`/`previewUrl` apontando para `/api/v1/theses/.../download`, que exige usuário autenticado (anônimo recebe 401). O detalhe público (`GET /api/v1/public/theses/<id>`) aponta para o endpoint anônimo. Uma correção mínima foi desenhada e discutida, mas não foi aplicada.
+- **Sem endpoint de filtros públicos**: não existe hoje rota para listar cursos/orientadores/anos/palavras-chave presentes em publicados nem cache versionado; a busca pública não é cacheada.
+- **Sem relatórios no backend**: `GET /api/v1/reports/overview` não existe; as telas de dashboards de coordenação e administração continuam com dados mock no frontend.
+- **Sem leitura de detalhe da tese para membro institucional da banca**: `theses_visible_to` e `user_can_access_thesis` não incluem o membro da comissão; ele precisa de acesso à monografia para avaliar, mas a auditoria não decidiu a regra.
+- **N+1 nas listagens**: a serialização aciona consultas por autor, palavra-chave e arquivo atual por monografia/banca.
+- **Sem rastreamento de upload em andamento** nem consolidação de rate limiting em Redis.
 
 ## Observações finais
 - Itens marcados como **Implementado** referem-se ao estado observado no código; recomenda-se validar em ambiente integrado (Docker + frontend + Postgres/Redis reais) antes de considerar produção.

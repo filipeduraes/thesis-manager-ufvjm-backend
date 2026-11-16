@@ -80,6 +80,10 @@ urlpatterns = [
         views.ThesisDocumentDownloadView.as_view(),
         name="api_thesis_document_download",
     ),
+    # TODO(auditoria): repositório público ainda sem `GET /api/v1/public/theses/filters`
+    # (opções de curso/orientador/ano/palavra-chave presentes em publicados, cacheadas),
+    # e sem cache para a busca anônima. Ver FUNCIONALIDADES.md
+    # "Pendências identificadas na auditoria".
     path(
         "api/v1/public/theses",
         views.PublicThesisListView.as_view(),
@@ -95,6 +99,15 @@ urlpatterns = [
         views.PublicThesisDownloadView.as_view(),
         name="api_public_thesis_download",
     ),
+    # TODO(auditoria): backend ainda não oferece relatórios. Contrato proposto
+    # na auditoria (2026-11-16): `GET /api/v1/reports/overview?courseId=&advisorId=&year=`
+    # com `summary` (total; aprovadas = APPROVED/APPROVED_WITH_REMARKS/PUBLISHED;
+    # reprovadas; pendentes = total - aprovadas - reprovadas; taxa de aprovação =
+    # aprovadas / (aprovadas + reprovadas); média de dias do envio até a primeira
+    # banca COMPLETED; contagem de bancas registradas/encerradas), `byCourse`, `byAdvisor`,
+    # `byYear`, `options` (courses/advisors/years) e `filters` (somente dados dentro
+    # do escopo do usuário: admin vê tudo, coordenador os cursos que coordena;
+    # orientador e aluno recebem 403). Ver FUNCIONALIDADES.md.
     # Defense endpoints
     path("api/v1/theses/<uuid:thesis_id>/defenses", DefenseListCreateView.as_view(), name="api_thesis_defenses"),
     path("api/v1/defenses", DefenseListView.as_view(), name="api_defenses"),

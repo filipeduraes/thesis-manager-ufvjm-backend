@@ -41,6 +41,13 @@ Before changing code, read the settings and modules related to the task. Respect
 - Prefer small functions, single responsibilities, and explicit business rules. Avoid duplication, mutable global state, domain logic hidden in views/serializers, and abstractions without a concrete use.
 - Use `Decimal` for grades or other values that require decimal precision when appropriate. Use timezone-aware dates and keep `USE_TZ` enabled.
 
+### Directory endpoints (permissions and shapes)
+
+- `GET /api/v1/public/advisors` is the only anonymous directory endpoint. It returns active advisors only, searches by name only (never e-mail — the public side of the directory must not leak addresses), exposes only `id`, `name` and `avatarUrl`, is paginated (`count`, `page`, `pageSize`, `totalPages`, `lastPageCount`), and is cached for 60 s. Requires no authentication; search by name is case-insensitive.
+- `GET /api/v1/users` returns the student/coordinator/administrator directory and requires the COORDINATOR or ADMIN role (or staff/superuser); students and advisors receive 403. The e-mail and the caller-relevant `roles` are included because the full directory is internal; paginate with `page`/`pageSize` (default 20, max 50), cache for 60 s, and pass `role=` to filter (`STUDENT`, `ADVISOR`, `COORDINATOR`, `ADMIN`); any other value returns 400.
+- `GET /api/v1/users/suggest` backs the pickers. Advisors see only other advisors (matching the public advisors list); coordinators and administrators see the full directory, narrowable with `role=` (validated); students receive 403. Up to three results, name or e-mail prefix, capped `USER_SUGGEST_*` constants, cached briefly (45 s) keyed by role set + query; scope `user_suggest` (60/min); do not expose it anonymously nor broaden the advisor scope to other roles without an explicit, documented decision.
+- Whichever endpoint you add or change: expose only `id`, `name`, `email`, `avatarUrl` (and role information where callers are authorized to read it), `select_related`/`prefetch_related` avatars, `.only(...)`, deduplicate with `distinct()`, cache identical queries for a minute, and return the standard pagination envelope.
+
 ### Django and API
 
 - Centralize domain validation so it applies to every write path, not only the UI or a single endpoint.

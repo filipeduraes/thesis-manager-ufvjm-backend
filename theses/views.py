@@ -56,6 +56,7 @@ from theses.services import (
     save_thesis_metadata,
     submit_thesis,
     thesis_file_payload,
+    thesis_list_queryset,
     withdraw_submission,
     thesis_list_payload,
     thesis_payload,
@@ -170,17 +171,18 @@ class ThesisPagination(PageNumberPagination):
         )
 
 
-def _scoped_theses(request) -> QuerySet[Thesis]:
+def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> QuerySet[Thesis]:
     """
     Apply role, scope and filter parameters to the visible thesis queryset.
 
     Args:
         request: HTTP request.
+        base_queryset: Optional queryset with list relations prefetched.
 
     Returns:
         QuerySet[Thesis]: Filtered queryset.
     """
-    queryset = theses_visible_to(request.user)
+    queryset = theses_visible_to(request.user, base_queryset=base_queryset or thesis_list_queryset())
     scope = (request.query_params.get("scope") or "").strip().lower()
     if scope == "advised":
         queryset = queryset.filter(advisor_id=request.user.pk)
@@ -764,6 +766,21 @@ class PublicThesisListView(APIView):
     List published theses in the public repository.
     """
 
+    # TODO(auditoria): repositório público incompleto para anônimos.
+    # 1. `thesis_list_payload` aponta `currentFile.downloadUrl`/`previewUrl` para
+    #    `/api/v1/theses/<id>/files/<fileId>/download` (rota autenticada): o visitante
+    #    anônimo recebe 401. Criar `public_thesis_list_payload` mantendo o resumo
+    #    e trocando as URLs para `/api/v1/public/theses/<id>/download` — o detalhe
+    #    (`public_thesis_payload`) já faz esse ajuste.
+    # 2. Serializar também `abstract`, `type`, `typeLabel` e `journal` na listagem
+    #    se os cards do repositório forem exibir esses campos.
+    # 3. Ordenar por `-published_at` para paginação estável por publicação.
+    # 4. Cache versionado (índice girado na publicação) apenas se o volume de
+    #    tráfego anônimo justificar; se implementado, invalidar na publicação
+    #    (ver comentário em `publish_thesis`).
+    # Os pontos de contrato público estão descritos também em
+    # FUNCIONALIDADES.md, seção "Pendências identificadas na auditoria".
+
     permission_classes = [AllowAny]
     authentication_classes: list = []
 
@@ -1006,7 +1023,7 @@ class DefenseListCreateView(APIView):
             Response: List of defense payloads.
         """
         thesis = _scoped_thesis(request.user, thesis_id)
-        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation").order_by("-scheduled_datetime"))
+        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation", "members__evaluation").order_by("-scheduled_datetime"))
         viewer_context = defense_viewer_context_for(defenses, request.user)
         return Response({"defenses": [defense_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in defenses]})
 

@@ -23,6 +23,10 @@ from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, Committee
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
 
 
+# TODO(auditoria): se a leitura de banca para membros institucionais for
+# adicionada a `theses_visible_to`, NÃO reutilizar aqui: este escopo é de
+# gestão. As regras de vínculo de curso devem valer diretamente (como abaixo),
+# para que um coordenador que integra banca de outro curso não possa gerenciá-la.
 def coordinator_managed_theses(coordinator: User) -> QuerySet[Thesis]:
     """
     Return the theses whose defenses a coordinator may see and manage.

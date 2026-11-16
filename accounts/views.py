@@ -32,7 +32,8 @@ from accounts.models import (
     User,
     UserProfileRole,
 )
-from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin
+from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin
+from accounts.directory import ROLE_FILTERS
 from accounts.serializers import (
     AdminUserCreateSerializer,
     AdminUserReadSerializer,
@@ -57,6 +58,7 @@ from accounts.services import (
     revoke_external_invitation,
     role_label,
     set_user_roles,
+    suggest_users,
 )
 
 logger = logging.getLogger(__name__)
@@ -937,3 +939,41 @@ class DevUsersView(APIView):
                 }
             )
         return Response({"results": results}, status=status.HTTP_200_OK)
+
+
+class UserSuggestView(APIView):
+    """
+    Return up to three institutional users matching a search fragment.
+
+    Administrators and coordinators search the full directory; advisors see
+    only other advisors (the advisors list is public). Students and external
+    sessions receive 403.
+    """
+
+    permission_classes = [IsInstitutionalManager]
+    throttle_scope = "user_suggest"
+
+    def get(self, request) -> Response:
+        """
+        Return the matching users for an autocomplete field.
+
+        Query strings shorter than two characters return an empty result list
+        (never an error). Advisors only see other advisors; coordinators and
+        administrators can optionally narrow the result with ``role``.
+
+        Args:
+            request: HTTP request with the ``q`` query parameter.
+
+        Returns:
+            Response: Up to three matches, ordered by name then e-mail.
+        """
+        query = (request.query_params.get("q") or "").strip()
+        start_roles = None
+        if not IsCoordinatorOrAdmin().has_permission(request, self):
+            start_roles = (ProfileRole.ADVISOR,)
+        else:
+            role = (request.query_params.get("role") or "").strip().upper()
+            if role and role not in ROLE_FILTERS:
+                return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
+            start_roles = ROLE_FILTERS.get(role) if role else None
+        return Response({"results": suggest_users(query, start_roles)}, status=status.HTTP_200_OK)

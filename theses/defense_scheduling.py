@@ -15,11 +15,12 @@ from django.db.models import Prefetch, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
+from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
-from theses.services import purge_thesis_versions, user_is_admin
+from theses.services import purge_thesis_versions, thesis_summary_payload, user_is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -742,6 +743,8 @@ def defense_payload(defense: Defense, viewer: Any = None, viewer_context: Defens
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),
+        "thesisId": str(defense.thesis_id),
+        "thesisSummary": thesis_summary_payload(defense.thesis, include_file_urls=not isinstance(viewer, ExternalInvitationPrincipal)),
         "scheduledDatetime": defense.scheduled_datetime.isoformat(),
         "durationMinutes": defense.duration_minutes,
         "modality": defense.modality,

@@ -218,17 +218,27 @@ def user_can_access_thesis(user: User, thesis: Thesis) -> bool:
     return False
 
 
-def theses_visible_to(user: User) -> QuerySet[Thesis]:
+# TODO(auditoria): membro institucional de banca precisa ler a monografia que
+# avalia (detalhe e download do PDF), mas hoje `theses_visible_to` e
+# `user_can_access_thesis` não incluem o membro da comissão. Ao adicionar essa
+# leitura, NÃO reutilizar escopos de gestão (`coordinator_managed_theses`,
+# `_can_manage_defense`): a leitura deve ser somente para detalhe/download, e as
+# escritas (upload, parecer, agendamento, membros) continuam exigindo
+# `user_can_access_thesis`/regras de gestão. Coordenador-membro de outro curso
+# não pode gerenciar a banca por conta da leitura.
+def theses_visible_to(user: User, base_queryset: QuerySet[Thesis] | None = None) -> QuerySet[Thesis]:
     """
     Return the thesis queryset visible to a user according to their roles.
 
     Args:
         user: Institutional user.
+        base_queryset: Optional queryset with related objects already configured.
+            Visibilities are applied on top of it, preserving its prefetches.
 
     Returns:
         QuerySet[Thesis]: Role-scoped queryset.
     """
-    queryset = Thesis.objects.filter(deleted_at__isnull=True)
+    queryset = base_queryset if base_queryset is not None else Thesis.objects.filter(deleted_at__isnull=True)
     if user_is_admin(user):
         return queryset
     roles = user_roles(user)
@@ -248,12 +258,16 @@ def theses_visible_to(user: User) -> QuerySet[Thesis]:
     return queryset.filter(visibility).distinct()
 
 
-def thesis_queryset() -> QuerySet[Thesis]:
+def thesis_list_queryset() -> QuerySet[Thesis]:
     """
-    Return the base queryset used by the thesis API.
+    Return the base queryset used by thesis lists and dashboards.
+
+    Only the relations read by ``thesis_list_payload`` are loaded, so listing pages
+    avoid the N+1 queries caused by accessing authors, keywords and the current
+    file per thesis.
 
     Returns:
-        QuerySet[Thesis]: Query with related objects prefetched for serialization.
+        QuerySet[Thesis]: Query with list dependencies prefetched.
     """
     return Thesis.objects.select_related(
         "course",
@@ -263,6 +277,17 @@ def thesis_queryset() -> QuerySet[Thesis]:
         "authors__author",
         "keyword_links__keyword",
         "files__stored_file",
+    )
+
+
+def thesis_queryset() -> QuerySet[Thesis]:
+    """
+    Return the base queryset used by the thesis API.
+
+    Returns:
+        QuerySet[Thesis]: Query with related objects prefetched for serialization.
+    """
+    return thesis_list_queryset().prefetch_related(
         "files__reviews__reviewer",
         "status_history__changed_by",
         "documents__stored_file",
@@ -1002,6 +1027,9 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
 
 
 @transaction.atomic
+# TODO(auditoria): ao implementar cache do repositório público, invalidar aqui
+# (o ponto natural é logo após salvar `Publicado`); não usar delete amplo por
+# prefixo, mas girar uma versão de chaves para invalidar páginas da busca.
 def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None) -> Thesis:
     """
     Publish an approved thesis in the public repository.
@@ -1292,6 +1320,101 @@ def document_payload(document: ThesisDocument) -> dict[str, Any]:
     }
 
 
+def _prefetched_main_author(thesis: Thesis) -> User | None:
+    """
+    Return the main author using the prefetched ``authors`` relation when available.
+
+    Args:
+        thesis: Thesis instance (``authors__author`` ideally prefetched).
+
+    Returns:
+        User | None: Main author, if any.
+    """
+    for author_link in thesis.authors.all():
+        if author_link.is_main_author:
+            return author_link.author
+    return None
+
+
+def _prefetched_current_file(thesis: Thesis) -> ThesisFile | None:
+    """
+    Return the current file using the prefetched ``files`` relation when available.
+
+    Args:
+        thesis: Thesis instance (``files__stored_file`` ideally prefetched).
+
+    Returns:
+        ThesisFile | None: Current version, if any.
+    """
+    for thesis_file in thesis.files.all():
+        if thesis_file.is_current:
+            return thesis_file
+    return None
+
+
+def _prefetched_keywords(thesis: Thesis) -> list[str]:
+    """
+    Return keyword names using the prefetched ``keyword_links`` relation when available.
+
+    Args:
+        thesis: Thesis instance (``keyword_links__keyword`` ideally prefetched).
+
+    Returns:
+        list[str]: Keyword names in link order.
+    """
+    return [link.keyword.name for link in thesis.keyword_links.all()]
+
+
+def thesis_summary_payload(thesis: Thesis, include_file_urls: bool = True) -> dict[str, Any]:
+    """
+    Serialize a compact thesis reference for cross-feature navigation.
+
+    Used by defense payloads so screens can show which monography is being defended
+    and link to its PDF without a second request.
+
+    Args:
+        thesis: Thesis instance with ``course``, ``advisor``, ``authors`` and ``files``
+            related objects available (prefetched when serializing lists).
+        include_file_urls: Whether to expose institutional preview/download URLs.
+            External committee sessions receive the metadata without direct links,
+            because the institutional download endpoints require a real user.
+
+    Returns:
+        dict[str, Any]: Thesis summary including student, advisor, course and current file.
+    """
+    main_author = _prefetched_main_author(thesis)
+    current_file = _prefetched_current_file(thesis)
+    file_payload: dict[str, Any] | None = None
+    if current_file is not None:
+        file_payload = {
+            "id": str(current_file.pk),
+            "versionNumber": current_file.version_number,
+            "originalFilename": current_file.stored_file.original_filename,
+            "sizeBytes": current_file.stored_file.size_bytes,
+            "sha256": current_file.stored_file.sha256_hex,
+            "uploadedAt": current_file.uploaded_at.isoformat(),
+            "previewUrl": f"/api/v1/theses/{thesis.pk}/files/{current_file.pk}/download?disposition=inline" if include_file_urls else None,
+            "downloadUrl": f"/api/v1/theses/{thesis.pk}/files/{current_file.pk}/download?disposition=attachment" if include_file_urls else None,
+        }
+    return {
+        "id": str(thesis.pk),
+        "referenceCode": thesis.reference_code,
+        "title": thesis.title,
+        "type": thesis.type,
+        "typeLabel": ThesisType(thesis.type).label,
+        "status": thesis.status,
+        "statusLabel": ThesisStatus(thesis.status).label,
+        "isPublic": thesis.is_public,
+        "course": course_brief(thesis.course),
+        "advisor": user_brief(thesis.advisor),
+        "student": user_brief(main_author),
+        "keywords": _prefetched_keywords(thesis),
+        "submittedAt": thesis.submitted_at.isoformat() if thesis.submitted_at else None,
+        "publishedAt": thesis.published_at.isoformat() if thesis.published_at else None,
+        "currentFile": file_payload,
+    }
+
+
 def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
     """
     Compute the actions available to a viewer.
@@ -1321,7 +1444,8 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
     has_advisor_role = ProfileRole.ADVISOR in roles
     is_assigned_advisor = thesis.advisor_id == viewer.pk
     is_advisor = has_advisor_role and is_assigned_advisor
-    is_author = thesis.authors.filter(author_id=viewer.pk, is_main_author=True).exists()
+    main_author = _prefetched_main_author(thesis)
+    is_author = main_author is not None and main_author.pk == viewer.pk
     editable = thesis.status in EDITABLE_STATUSES
     return {
         "canEdit": bool(is_author and editable),
@@ -1348,9 +1472,9 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
     Returns:
         dict[str, Any]: Full thesis payload.
     """
-    main_author = thesis.authors.filter(is_main_author=True).select_related("author").first()
-    keywords = [link.keyword.name for link in thesis.keyword_links.select_related("keyword")]
-    files = list(thesis.files.select_related("stored_file").all())
+    main_author = _prefetched_main_author(thesis)
+    keywords = _prefetched_keywords(thesis)
+    files = list(thesis.files.all())
     current_file = next((item for item in files if item.is_current), None)
     payload: dict[str, Any] = {
         "id": str(thesis.pk),
@@ -1367,7 +1491,7 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
         "isPublic": thesis.is_public,
         "course": course_brief(thesis.course),
         "advisor": user_brief(thesis.advisor),
-        "student": user_brief(main_author.author if main_author else None),
+        "student": user_brief(main_author),
         "authors": [
             {
                 "id": str(author.pk),
@@ -1375,7 +1499,7 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
                 "isMainAuthor": author.is_main_author,
                 "user": user_brief(author.author),
             }
-            for author in thesis.authors.select_related("author")
+            for author in thesis.authors.all()
         ],
         "keywords": keywords,
         "currentFile": thesis_file_payload(current_file) if current_file else None,
@@ -1389,13 +1513,13 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
     if include_history:
         reviews: list[dict[str, Any]] = []
         for thesis_file in files:
-            for review in thesis_file.reviews.select_related("reviewer"):
+            for review in thesis_file.reviews.all():
                 reviews.append(review_payload(review))
         reviews.sort(key=lambda item: item["reviewedAt"], reverse=True)
         payload["files"] = [thesis_file_payload(item) for item in files]
         payload["reviews"] = reviews
-        payload["statusHistory"] = [status_history_payload(entry) for entry in thesis.status_history.select_related("changed_by")]
-        payload["documents"] = [document_payload(document) for document in thesis.documents.select_related("stored_file", "submitted_by", "validated_by")]
+        payload["statusHistory"] = [status_history_payload(entry) for entry in thesis.status_history.all()]
+        payload["documents"] = [document_payload(document) for document in thesis.documents.all()]
     return payload
 
 
@@ -1410,9 +1534,9 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str,
     Returns:
         dict[str, Any]: Compact thesis payload.
     """
-    main_author = thesis.authors.filter(is_main_author=True).select_related("author").first()
-    current_file = thesis.files.filter(is_current=True).select_related("stored_file").first()
-    keywords = [link.keyword.name for link in thesis.keyword_links.select_related("keyword")]
+    main_author = _prefetched_main_author(thesis)
+    current_file = _prefetched_current_file(thesis)
+    keywords = _prefetched_keywords(thesis)
     return {
         "id": str(thesis.pk),
         "referenceCode": thesis.reference_code,
@@ -1424,7 +1548,7 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str,
         "isPublic": thesis.is_public,
         "course": course_brief(thesis.course),
         "advisor": user_brief(thesis.advisor),
-        "student": user_brief(main_author.author if main_author else None),
+        "student": user_brief(main_author),
         "keywords": keywords,
         "currentVersion": current_file.version_number if current_file else None,
         "currentFile": {

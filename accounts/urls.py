@@ -4,8 +4,12 @@ URL patterns for the accounts application.
 from django.urls import path
 
 from accounts import views
+from accounts import directory as accounts_directory
 
 urlpatterns = [
+    path("api/v1/users/suggest", views.UserSuggestView.as_view(), name="api_user_suggest"),
+    path("api/v1/users", accounts_directory.UserDirectoryListView.as_view(), name="api_user_directory"),
+    path("api/v1/public/advisors", accounts_directory.PublicAdvisorsListView.as_view(), name="api_public_advisors"),
     path("api/v1/session", views.SessionView.as_view(), name="api_session"),
     path("api/v1/auth/google/start", views.GoogleStartView.as_view(), name="api_google_start"),
     path(
