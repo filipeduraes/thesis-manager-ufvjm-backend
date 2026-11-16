@@ -4,6 +4,7 @@ Scheduling and lifecycle services for thesis defense sessions.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -14,9 +15,11 @@ from django.utils import timezone
 
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
-from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload
+from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import purge_thesis_versions, user_is_admin
+
+logger = logging.getLogger(__name__)
 
 
 def record_defense_status_change(defense: Defense, previous_status: str, changed_by: User | None, reason: str) -> DefenseStatusHistory:
@@ -176,6 +179,10 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
     immediate re-opening after a manual revert). No-op for any status other than
     SCHEDULED.
 
+    The same availability rule as ``start_defense`` applies: while a non-alternate
+    member has not confirmed availability, the defense stays SCHEDULED without
+    raising, so read endpoints keep working and the detail reports who is missing.
+
     Args:
         defense: Defense session (may be stale — a fresh copy is fetched under lock).
         request: HTTP request used for audit context.
@@ -187,6 +194,10 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
         return defense
     defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if defense.status != DefenseStatus.SCHEDULED or defense.auto_start_suspended:
+        return defense
+    if pending_availability_members(defense):
+        # DEBUG porque a leitura pode repetir esta checagem a cada requisição até todos confirmarem.
+        logger.debug("Auto-start skipped for defense %s: pending availability confirmations", defense.pk)
         return defense
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
     _transition_defense_to_in_progress(defense, thesis, changed_by=None, reason="Banca iniciada automaticamente pelo horário agendado.")
@@ -206,6 +217,10 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
 def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = None, duration_minutes: int | None = None, modality: str | None = None, location: str | None = None, notes: str | None = None, actor: User, request: HttpRequest | None = None) -> Defense:
     """
     Update scheduling details for a not-yet-started defense.
+
+    When the date, time or duration actually changes (a value different from the
+    current one), every member's availability answer is reset to PENDING, because
+    the previous answers referred to another slot.
 
     Args:
         defense: Defense session to update.
@@ -232,6 +247,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
     if defense.status != DefenseStatus.SCHEDULED:
         raise ValidationError("Só é possível alterar uma banca agendada (antes de iniciar).")
 
+    datetime_changed = scheduled_datetime is not None and scheduled_datetime != defense.scheduled_datetime
+    duration_changed = duration_minutes is not None and duration_minutes != defense.duration_minutes
     extra_fields: list[str] = []
     if scheduled_datetime is not None:
         defense.scheduled_datetime = scheduled_datetime
@@ -250,6 +267,9 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
     if scheduled_datetime is not None or duration_minutes is not None:
         check_committee_schedule_conflicts(defense)
     defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"] + extra_fields)
+    availability_reset = datetime_changed or duration_changed
+    if availability_reset:
+        reset_committee_availability(defense)
 
     record_audit(
         action=AuditAction.UPDATE,
@@ -258,7 +278,7 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "DEFENSE_UPDATED"},
+        metadata={"event": "DEFENSE_UPDATED", "availabilityReset": availability_reset},
     )
     return defense
 
@@ -345,13 +365,18 @@ def start_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
 
     Raises:
         PermissionDenied: When the actor is not authorized to manage this defense.
-        ValidationError: When the defense is not in SCHEDULED status.
+        ValidationError: When the defense is not in SCHEDULED status or a non-alternate
+            member has not confirmed availability (the message lists who is missing).
     """
     if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
     defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if defense.status != DefenseStatus.SCHEDULED:
         raise ValidationError("Só é possível iniciar uma banca agendada.")
+    pending_members = pending_availability_members(defense)
+    if pending_members:
+        pending_names = ", ".join(member.name for member in pending_members)
+        raise ValidationError(f"Confirmação de disponibilidade pendente: {pending_names}.")
 
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
     _transition_defense_to_in_progress(defense, thesis, changed_by=actor, reason="Banca iniciada.")

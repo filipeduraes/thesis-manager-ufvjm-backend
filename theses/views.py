@@ -852,13 +852,13 @@ class PublicThesisDownloadView(APIView):
 
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
-from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, remove_member, resolve_committee_member  # noqa: E402
+from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, remove_member, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
 from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
-from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
+from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
 from theses.services import user_is_admin, user_is_advisor, user_is_coordinator  # noqa: E402
 
 
@@ -1032,6 +1032,7 @@ class DefenseDetailView(APIView):
         defense = sync_defense_status(defense, request=request)
         detail_payload = defense_payload(defense, viewer=request.user)
         detail_payload["statusHistory"] = defense_status_history_payload(defense)
+        detail_payload.update(defense_availability_summary(defense))
         return Response({"defense": detail_payload})
 
     def patch(self, request, defense_id) -> Response:
@@ -1297,6 +1298,42 @@ class DefenseEvaluationView(APIView):
         except DjangoValidationError as exc:
             return _validation_response(exc)
         return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=True)})
+
+
+class DefenseMemberAvailabilityView(APIView):
+    """
+    Let a committee member confirm or decline availability for a scheduled defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsDefenseCommitteeMember]
+
+    def post(self, request, defense_id, member_id) -> Response:
+        """
+        Record the member's own availability answer.
+
+        Only the member themselves may answer (institutional user or the external
+        session of their invitation); answering for another member returns 403.
+
+        Args:
+            request: HTTP request with ``status`` (CONFIRMED/DECLINED) and optional ``note``.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Updated member payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        serializer = AvailabilityResponseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member = respond_availability(defense, member, availability_status=data["status"], note=data["note"], actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"member": defense_member_payload(member, viewer=request.user)})
 
 
 class DefenseRevertStatusView(APIView):

@@ -17,6 +17,7 @@ from theses.defense_committee import _can_manage_defense, add_institutional_memb
 from theses.defense_evaluation import submit_committee_evaluation
 from theses.defense_scheduling import cancel_defense, close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
+from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -188,6 +189,7 @@ class CommitteeMemberServiceTests(TestCase):
 
     def test_remove_blocked_in_progress(self) -> None:
         member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
+        confirm_committee(self.defense)
         start_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         with self.assertRaises(ValidationError):
@@ -236,6 +238,7 @@ class EvaluationServiceTests(TestCase):
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)
         self.alternate = add_institutional_member(self.defense, CommitteeRole.ALTERNATE, self.alternate_user, actor=self.admin)
+        confirm_committee(self.defense)
         start_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
 

@@ -9,7 +9,7 @@ from rest_framework import serializers
 
 from academic.models import Course
 from accounts.models import User
-from theses.models import CommitteeRole, DefenseModality, DefenseResult, DocumentType, ReviewDecision, ThesisType
+from theses.models import AvailabilityStatus, CommitteeRole, DefenseModality, DefenseResult, DocumentType, ReviewDecision, ThesisType
 from theses.services import available_advisors, normalize_keyword_names
 
 
@@ -179,6 +179,15 @@ class UpdateDefenseSerializer(serializers.Serializer):
     modality = serializers.ChoiceField(choices=DefenseModality.choices, required=False)
     location = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class AvailabilityResponseSerializer(serializers.Serializer):
+    """
+    Validate a committee member's availability answer.
+    """
+
+    status = serializers.ChoiceField(choices=[AvailabilityStatus.CONFIRMED, AvailabilityStatus.DECLINED])
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=1000)
 
 
 class AddInstitutionalMemberSerializer(serializers.Serializer):

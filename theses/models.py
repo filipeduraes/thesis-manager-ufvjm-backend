@@ -131,6 +131,16 @@ class CommitteeRole(models.TextChoices):
     ALTERNATE = "ALTERNATE", "Suplente"
 
 
+class AvailabilityStatus(models.TextChoices):
+    """
+    Availability answer of a committee member for the scheduled defense slot.
+    """
+
+    PENDING = "PENDING", "Pendente"
+    CONFIRMED = "CONFIRMED", "Confirmada"
+    DECLINED = "DECLINED", "Recusada"
+
+
 EDITABLE_STATUSES = (
     ThesisStatus.DRAFT,
     ThesisStatus.CHANGES_REQUESTED,
@@ -919,6 +929,13 @@ class DefenseMember(models.Model):
     institution = models.CharField(max_length=200, blank=True, default="")
     has_conflict = models.BooleanField(default=False)
     conflict_reason = models.TextField(blank=True, default="")
+    availability_status = models.CharField(
+        max_length=20,
+        choices=AvailabilityStatus.choices,
+        default=AvailabilityStatus.PENDING,
+    )
+    availability_responded_at = models.DateTimeField(null=True, blank=True)
+    availability_note = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

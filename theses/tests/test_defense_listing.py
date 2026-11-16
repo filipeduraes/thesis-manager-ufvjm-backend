@@ -17,6 +17,7 @@ from accounts.services import create_external_invitation
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import cancel_defense, schedule_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus, Thesis, ThesisAuthor, ThesisStatus
+from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 DEFENSES_URL = "/api/v1/defenses"
@@ -163,6 +164,7 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertEqual(self._ids(response), {str(self.defense.pk)})
 
     def test_overdue_defense_is_auto_started_before_filtering(self) -> None:
+        confirm_committee(self.defense)
         Defense.objects.filter(pk=self.defense.pk).update(scheduled_datetime=timezone.now() - timedelta(minutes=5))
         self.client.force_authenticate(user=self.admin)
         response = self.client.get(DEFENSES_URL, {"status": "IN_PROGRESS"})
@@ -265,6 +267,7 @@ class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertEqual(response.data["count"], 2)
 
     def test_pending_evaluation_after_auto_start(self) -> None:
+        confirm_committee(self.defense)
         Defense.objects.filter(pk=self.defense.pk).update(scheduled_datetime=timezone.now() - timedelta(minutes=5))
         self.client.force_authenticate(user=self.member_professor)
         response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true", "status": "IN_PROGRESS"})

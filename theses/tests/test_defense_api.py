@@ -18,6 +18,7 @@ from accounts.services import create_external_invitation
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus, Thesis, ThesisStatus
+from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -173,6 +174,7 @@ class DefenseEvaluationApiTests(TestCase):
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)
         self.alternate = add_institutional_member(self.defense, CommitteeRole.ALTERNATE, self.alternate_user, actor=self.admin)
+        confirm_committee(self.defense)
         start_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         self.client = APIClient()

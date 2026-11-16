@@ -15,6 +15,7 @@ from accounts.models import ProfileRole, User, UserProfileRole
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMemberEvaluation, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisAuthor, ThesisStatus
+from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -43,6 +44,7 @@ class DefenseStartClosePermissionTests(TestCase):
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         # Orientador de outra tese que integra esta banca: enxerga a banca, mas não a gerencia.
         self.member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.other_advisor, actor=self.admin)
+        confirm_committee(self.defense)
         self.client = APIClient()
 
     def _post(self, user: User, action: str, payload: dict[str, str] | None = None):

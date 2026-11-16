@@ -13,6 +13,7 @@ from theses.views import (
     DefenseExternalMemberCreateView,
     DefenseListCreateView,
     DefenseListView,
+    DefenseMemberAvailabilityView,
     DefenseMemberCreateView,
     DefenseMemberDeleteView,
     DefenseRevertStatusView,
@@ -104,6 +105,7 @@ urlpatterns = [
     path("api/v1/defenses/<uuid:defense_id>/members", DefenseMemberCreateView.as_view(), name="api_defense_members"),
     path("api/v1/defenses/<uuid:defense_id>/members/external", DefenseExternalMemberCreateView.as_view(), name="api_defense_external_member"),
     path("api/v1/defenses/<uuid:defense_id>/members/<uuid:member_id>", DefenseMemberDeleteView.as_view(), name="api_defense_member"),
+    path("api/v1/defenses/<uuid:defense_id>/members/<uuid:member_id>/availability", DefenseMemberAvailabilityView.as_view(), name="api_defense_member_availability"),
     path("api/v1/defenses/<uuid:defense_id>/members/<uuid:member_id>/evaluation", DefenseEvaluationView.as_view(), name="api_defense_evaluation"),
     path("api/v1/defenses/<uuid:defense_id>/revert-status", DefenseRevertStatusView.as_view(), name="api_defense_revert_status"),
 ]

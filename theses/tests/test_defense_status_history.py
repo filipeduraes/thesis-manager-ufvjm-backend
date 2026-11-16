@@ -16,6 +16,7 @@ from accounts.models import ProfileRole, User, UserProfileRole
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import cancel_defense, close_defense, revert_defense_status, schedule_defense, start_defense, sync_defense_status
 from theses.models import CommitteeRole, Defense, DefenseMemberEvaluation, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus
+from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -80,6 +81,7 @@ class DefenseStatusHistoryTests(TestCase):
 
     def test_close_records_result(self) -> None:
         member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
+        confirm_committee(self.defense)
         start_defense(self.defense, actor=self.admin)
         DefenseMemberEvaluation.objects.create(member=member, decision=DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.coordinator)

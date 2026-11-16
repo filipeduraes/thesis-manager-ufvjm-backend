@@ -11,11 +11,12 @@ from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, Validat
 from django.db import transaction
 from django.db.models import QuerySet
 from django.http import HttpRequest
+from django.utils import timezone
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
 from accounts.services import create_external_invitation, record_audit, revoke_external_invitation
-from theses.models import ACTIVE_DEFENSE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
+from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
 
 
@@ -107,6 +108,10 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "hasConflict": member.has_conflict,
         "conflictReason": member.conflict_reason if member.has_conflict else "",
         "isInstitutional": member.institutional_member_id is not None,
+        "availabilityStatus": member.availability_status,
+        "availabilityStatusLabel": AvailabilityStatus(member.availability_status).label,
+        "availabilityRespondedAt": member.availability_responded_at.isoformat() if member.availability_responded_at else None,
+        "availabilityNote": member.availability_note,
         "createdAt": member.created_at.isoformat(),
         "evaluation": None,
     }
@@ -369,3 +374,128 @@ def remove_member(defense: Defense, member: DefenseMember, *, actor: User, reque
         actor_user=actor,
         metadata={"event": "MEMBER_REMOVED", "memberId": member_id, "role": role},
     )
+
+
+def pending_availability_members(defense: Defense) -> list[DefenseMember]:
+    """
+    Return the non-alternate members who have not confirmed availability yet.
+
+    Alternates do not block the defense: only evaluating members (president and
+    members) must confirm before the session can start.
+
+    Args:
+        defense: Defense session.
+
+    Returns:
+        list[DefenseMember]: Members with PENDING or DECLINED availability, in the order they were added.
+    """
+    evaluating_members = defense.members.exclude(role=CommitteeRole.ALTERNATE)
+    return list(evaluating_members.exclude(availability_status=AvailabilityStatus.CONFIRMED).order_by("created_at"))
+
+
+def defense_availability_summary(defense: Defense) -> dict[str, Any]:
+    """
+    Summarize committee availability for the defense detail payload.
+
+    ``allMembersConfirmed`` is True only when the defense has at least one
+    non-alternate member and all of them confirmed.
+
+    Args:
+        defense: Defense session.
+
+    Returns:
+        dict[str, Any]: ``allMembersConfirmed`` and ``pendingConfirmations``.
+    """
+    pending_members = pending_availability_members(defense)
+    has_evaluating_members = defense.members.exclude(role=CommitteeRole.ALTERNATE).exists()
+    pending_confirmations = [
+        {"memberId": str(member.pk), "name": member.name, "role": member.role, "roleLabel": CommitteeRole(member.role).label, "availabilityStatus": member.availability_status}
+        for member in pending_members
+    ]
+    return {"allMembersConfirmed": has_evaluating_members and not pending_members, "pendingConfirmations": pending_confirmations}
+
+
+def _member_belongs_to_principal(member: DefenseMember, principal: User | ExternalInvitationPrincipal) -> bool:
+    """
+    Return whether the committee member record represents the request principal.
+
+    Args:
+        member: Committee member.
+        principal: Institutional user or external invitation principal.
+
+    Returns:
+        bool: True when the principal is that member.
+    """
+    if isinstance(principal, ExternalInvitationPrincipal):
+        return member.external_invitation_id is not None and member.external_invitation_id == principal.invitation.pk
+    return member.institutional_member_id is not None and member.institutional_member_id == principal.pk
+
+
+@transaction.atomic
+def respond_availability(defense: Defense, member: DefenseMember, *, availability_status: str, note: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> DefenseMember:
+    """
+    Record a committee member's availability answer for a scheduled defense.
+
+    Only the member themselves may answer (institutional user or the external
+    session of their own invitation). The note is stored on the member but not
+    copied into the audit log.
+
+    Args:
+        defense: Defense session (must be SCHEDULED).
+        member: Committee member answering.
+        availability_status: CONFIRMED or DECLINED.
+        note: Optional free-text note.
+        actor: Institutional user or ExternalInvitationPrincipal.
+        request: HTTP request used for audit context.
+
+    Returns:
+        DefenseMember: Updated member.
+
+    Raises:
+        PermissionDenied: When the actor is not this member.
+        ValidationError: When the defense is not SCHEDULED or the status is invalid.
+    """
+    if member.defense_id != defense.pk or not _member_belongs_to_principal(member, actor):
+        raise PermissionDenied("Você só pode responder a disponibilidade como você mesmo.")
+    if availability_status not in (AvailabilityStatus.CONFIRMED, AvailabilityStatus.DECLINED):
+        raise ValidationError({"status": "Informe CONFIRMED ou DECLINED."})
+    locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
+    if locked_defense.status != DefenseStatus.SCHEDULED:
+        raise ValidationError("Só é possível responder a disponibilidade de uma banca agendada.")
+
+    member = DefenseMember.objects.select_for_update().get(pk=member.pk)
+    previous_status = member.availability_status
+    member.availability_status = availability_status
+    member.availability_responded_at = timezone.now()
+    member.availability_note = note.strip()
+    member.save(update_fields=["availability_status", "availability_responded_at", "availability_note"])
+
+    actor_user = actor if isinstance(actor, User) else None
+    actor_external = actor.invitation if isinstance(actor, ExternalInvitationPrincipal) else None
+    record_audit(
+        action=AuditAction.UPDATE,
+        entity_type="Defense",
+        entity_id=str(defense.pk),
+        entity_app_label="theses",
+        request=request,
+        actor_user=actor_user,
+        actor_external_invitation=actor_external,
+        metadata={"event": "AVAILABILITY_RESPONDED", "memberId": str(member.pk), "from": previous_status, "to": availability_status},
+    )
+    return member
+
+
+def reset_committee_availability(defense: Defense) -> int:
+    """
+    Reset every member's availability answer to PENDING.
+
+    Called when the defense date, time or duration actually changes, because
+    previous answers referred to another slot.
+
+    Args:
+        defense: Defense session.
+
+    Returns:
+        int: Number of members reset.
+    """
+    return defense.members.update(availability_status=AvailabilityStatus.PENDING, availability_responded_at=None, availability_note="")
