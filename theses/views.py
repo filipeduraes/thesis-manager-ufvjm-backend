@@ -852,7 +852,7 @@ class PublicThesisDownloadView(APIView):
 
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
-from theses.defense_committee import add_external_member, add_institutional_member, remove_member, resolve_committee_member  # noqa: E402
+from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, remove_member, resolve_committee_member  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
 from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
@@ -876,12 +876,19 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
     """
     Return the Thesis accessible to the user, raising Http404 otherwise.
 
-    - Admin / coordinator: any thesis.
+    - Admin: any thesis.
+    - Coordinator: theses of the courses they coordinate (plus advised ones).
     - Advisor: only theses they advise.
     - Student: only their authored (main) thesis.
     """
-    if user_is_admin(user) or user_is_coordinator(user):
+    if user_is_admin(user):
         return get_object_or_404(Thesis, pk=thesis_id)
+    if user_is_coordinator(user):
+        managed_thesis_ids = coordinator_managed_theses(user).values("pk")
+        allowed = Q(pk__in=managed_thesis_ids)
+        if user_is_advisor(user):
+            allowed |= Q(advisor_id=user.pk)
+        return get_object_or_404(Thesis.objects.filter(allowed), pk=thesis_id)
     if user_is_advisor(user):
         return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
     return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)

@@ -9,21 +9,40 @@ from typing import Any
 
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import QuerySet
 from django.http import HttpRequest
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
 from accounts.services import create_external_invitation, record_audit, revoke_external_invitation
 from theses.models import ACTIVE_DEFENSE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
-from theses.services import user_is_admin, user_is_advisor, user_is_coordinator
+from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
+
+
+def coordinator_managed_theses(coordinator: User) -> QuerySet[Thesis]:
+    """
+    Return the theses whose defenses a coordinator may see and manage.
+
+    Reuses ``theses_visible_to`` (course coordinator, coordinator e-mail and active
+    course assignments) instead of duplicating the course link rules. Theses the
+    user authors are excluded so that a coordinator never manages their own defense.
+
+    Args:
+        coordinator: Institutional user with the coordinator role.
+
+    Returns:
+        QuerySet[Thesis]: Theses of the courses the user coordinates.
+    """
+    return theses_visible_to(coordinator).exclude(authors__author_id=coordinator.pk)
 
 
 def _can_manage_defense(actor: User, thesis_id) -> bool:
     """
     Return whether the actor may schedule or manage defenses for a thesis.
 
-    Administrators and coordinators always have permission. An advisor may manage
-    defenses only for the thesis where they are the assigned advisor.
+    Administrators always have permission. Coordinators may manage defenses of
+    theses from the courses they coordinate (``coordinator_managed_theses``). An
+    advisor may manage defenses only for the thesis where they are the assigned advisor.
 
     Args:
         actor: Authenticated institutional user.
@@ -32,7 +51,9 @@ def _can_manage_defense(actor: User, thesis_id) -> bool:
     Returns:
         bool: True when the actor is authorized.
     """
-    if user_is_admin(actor) or user_is_coordinator(actor):
+    if user_is_admin(actor):
+        return True
+    if user_is_coordinator(actor) and coordinator_managed_theses(actor).filter(pk=thesis_id).exists():
         return True
     if not user_is_advisor(actor):
         return False

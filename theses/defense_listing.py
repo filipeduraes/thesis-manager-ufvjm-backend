@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import User
+from theses.defense_committee import coordinator_managed_theses
 from theses.defense_scheduling import defense_payload, sync_defense_status
 from theses.models import ACTIVE_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_coordinator
@@ -61,9 +62,11 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     """
     Return the defenses the given principal may read.
 
-    - Admin / coordinator: every defense.
-    - Advisor: defenses of advised theses plus committees they sit on.
-    - Student: defenses of the thesis they mainly author plus committees they sit on.
+    - Admin: every defense.
+    - Coordinator: defenses of theses from the courses they coordinate.
+    - Advisor: defenses of advised theses.
+    - Anyone else (student): the defense of the thesis they mainly author.
+    - Every institutional user also sees the committees they sit on.
     - ExternalInvitationPrincipal: only the committees bound to their invitation.
 
     Args:
@@ -75,13 +78,19 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH)
     if isinstance(principal, ExternalInvitationPrincipal):
         return base.filter(members__external_invitation=principal.invitation).distinct()
-    if user_is_admin(principal) or user_is_coordinator(principal):
+    if user_is_admin(principal):
         return base
-    membership = Q(members__institutional_member=principal)
-    if user_is_advisor(principal):
-        return base.filter(Q(thesis__advisor_id=principal.pk) | membership).distinct()
-    main_authorship = Q(thesis__authors__author=principal, thesis__authors__is_main_author=True)
-    return base.filter(main_authorship | membership).distinct()
+    is_coordinator = user_is_coordinator(principal)
+    is_advisor = user_is_advisor(principal)
+    visibility = Q(members__institutional_member=principal)
+    if is_coordinator:
+        managed_thesis_ids = coordinator_managed_theses(principal).values("pk")
+        visibility |= Q(thesis_id__in=managed_thesis_ids)
+    if is_advisor:
+        visibility |= Q(thesis__advisor_id=principal.pk)
+    if not (is_coordinator or is_advisor):
+        visibility |= Q(thesis__authors__author=principal, thesis__authors__is_main_author=True)
+    return base.filter(visibility).distinct()
 
 
 def parse_defense_status_filter(raw_value: str | None) -> list[str]:
@@ -208,8 +217,9 @@ def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:
     Return theses for which the principal may schedule a defense right now.
 
     Mirrors ``schedule_defense``: status in SCHEDULABLE_STATUSES, no active defense,
-    and the ``_can_manage_defense`` rule (admin/coordinator see all; advisors see
-    only their own advised theses; anyone else sees nothing).
+    and the ``_can_manage_defense`` rule (admin sees all; coordinators see theses of
+    the courses they coordinate; advisors see their own advised theses; anyone else
+    sees nothing).
 
     Args:
         principal: Authenticated institutional user.
@@ -219,10 +229,14 @@ def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:
     """
     queryset = Thesis.objects.filter(deleted_at__isnull=True, status__in=SCHEDULABLE_STATUSES)
     queryset = queryset.exclude(defenses__status__in=ACTIVE_DEFENSE_STATUSES)
-    if not (user_is_admin(principal) or user_is_coordinator(principal)):
-        if not user_is_advisor(principal):
-            return queryset.none()
-        queryset = queryset.filter(advisor_id=principal.pk)
+    if not user_is_admin(principal):
+        allowed = Q(pk__in=[])
+        if user_is_coordinator(principal):
+            managed_thesis_ids = coordinator_managed_theses(principal).values("pk")
+            allowed |= Q(pk__in=managed_thesis_ids)
+        if user_is_advisor(principal):
+            allowed |= Q(advisor_id=principal.pk)
+        queryset = queryset.filter(allowed)
     queryset = queryset.select_related("course", "advisor")
     return queryset.distinct().order_by("advisor_approved_at", "updated_at")
 
