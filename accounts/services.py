@@ -13,10 +13,10 @@ from urllib.parse import urlsplit
 
 from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -134,6 +134,45 @@ def _avatar_url(social_account: SocialAccount | None) -> str | None:
     return candidate
 
 
+GOOGLE_SOCIAL_ACCOUNTS_ATTR = "google_social_accounts"
+
+
+def google_social_accounts_prefetch(lookup: str = "socialaccount_set") -> Prefetch:
+    """
+    Build the prefetch of a user's Google accounts used by ``user_avatar_url``.
+
+    Args:
+        lookup: Path to the users' ``socialaccount_set`` (e.g.
+            ``"members__institutional_member__socialaccount_set"``).
+
+    Returns:
+        Prefetch: Prefetch storing the Google accounts in ``user.google_social_accounts``.
+    """
+    google_accounts = SocialAccount.objects.filter(provider="google")
+    return Prefetch(lookup, queryset=google_accounts, to_attr=GOOGLE_SOCIAL_ACCOUNTS_ATTR)
+
+
+def user_avatar_url(user: User) -> str | None:
+    """
+    Return the user's Google profile picture URL, reusing ``_avatar_url`` rules.
+
+    Uses ``google_social_accounts`` when prefetched (see
+    ``google_social_accounts_prefetch``) and queries the account otherwise.
+
+    Args:
+        user: Institutional user.
+
+    Returns:
+        str | None: Safe https picture URL, or None when there is no Google account or picture.
+    """
+    prefetched_accounts = getattr(user, GOOGLE_SOCIAL_ACCOUNTS_ATTR, None)
+    if prefetched_accounts is not None:
+        google_account = prefetched_accounts[0] if prefetched_accounts else None
+    else:
+        google_account = user.socialaccount_set.filter(provider="google").first()
+    return _avatar_url(google_account)
+
+
 def build_user_payload(user: User, active_role: str | None = None, last_access: timezone.datetime | None = None, avatar_url: str | None = None, roles: list[str] | None = None,) -> dict:
     """
     Serialize the public user shape expected by the frontend.
@@ -203,6 +242,7 @@ def build_session_payload(request: HttpRequest) -> dict:
                 "email": invitation.email,
                 "institution": invitation.institution,
                 "expiresAt": invitation.expires_at.isoformat(),
+                "assignments": external_invitation_assignments(invitation),
             },
         }
 
@@ -511,6 +551,26 @@ def generate_external_token() -> str:
         for _ in range(TOKEN_GROUPS)
     ]
     return f"{TOKEN_PREFIX}-{'-'.join(groups)}"
+
+
+def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict[str, str]]:
+    """
+    Return the defense committee memberships bound to an external invitation.
+
+    Uses the reverse one-to-one ``defense_membership`` (declared by
+    ``theses.DefenseMember``) so the accounts app does not import the theses app.
+
+    Args:
+        invitation: External invitation.
+
+    Returns:
+        list[dict[str, str]]: ``[{"defenseId", "memberId"}]``; empty when the invitation is not on a committee.
+    """
+    try:
+        membership = invitation.defense_membership
+    except ObjectDoesNotExist:
+        return []
+    return [{"defenseId": str(membership.defense_id), "memberId": str(membership.pk)}]
 
 
 def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None,) -> tuple[ExternalInvitation, str]:

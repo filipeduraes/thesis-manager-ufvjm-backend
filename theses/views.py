@@ -8,10 +8,11 @@ import logging
 from typing import Any
 
 from django.conf import settings
-from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError as DjangoValidationError
 from django.core.files.storage import default_storage
 from django.db.models import Q, QuerySet
 from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -20,8 +21,9 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
-from accounts.permissions import IsInstitutionalUser
+from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
 from accounts.services import record_audit
 from academic.services import active_course_assignment
 from theses.models import (
@@ -32,7 +34,7 @@ from theses.models import (
     ThesisFile,
     ThesisStatus,
 )
-from theses.permissions import IsAcademicManager, IsStudentUser
+from theses.permissions import IsAcademicManager, IsAdvisorUser, IsStudentUser
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
@@ -846,3 +848,580 @@ class PublicThesisDownloadView(APIView):
         if disposition not in {"inline", "attachment"}:
             disposition = "attachment"
         return _download_response(thesis_file.stored_file, thesis, disposition, thesis_file.version_number)
+
+
+# ─── Defense API helpers ──────────────────────────────────────────────────────
+
+from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_token, remove_member, resolve_committee_member, respond_availability  # noqa: E402
+from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
+from theses.defense_listing import DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
+from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
+from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
+from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
+from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
+from theses.services import user_is_admin, user_is_advisor, user_is_coordinator  # noqa: E402
+
+
+def _scoped_defense_qs(user) -> QuerySet:
+    """
+    Return a Defense queryset restricted to what the given principal may access.
+
+    Delegates to ``defenses_visible_to`` so that detail and listing endpoints share
+    the same visibility rule.
+    """
+    return defenses_visible_to(user)
+
+
+def _scoped_thesis(user, thesis_id) -> Thesis:
+    """
+    Return the Thesis accessible to the user, raising Http404 otherwise.
+
+    - Admin: any thesis.
+    - Coordinator: theses of the courses they coordinate (plus advised ones).
+    - Advisor: only theses they advise.
+    - Student: only their authored (main) thesis.
+    """
+    if user_is_admin(user):
+        return get_object_or_404(Thesis, pk=thesis_id)
+    if user_is_coordinator(user):
+        managed_thesis_ids = coordinator_managed_theses(user).values("pk")
+        allowed = Q(pk__in=managed_thesis_ids)
+        if user_is_advisor(user):
+            allowed |= Q(advisor_id=user.pk)
+        return get_object_or_404(Thesis.objects.filter(allowed), pk=thesis_id)
+    if user_is_advisor(user):
+        return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
+    return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)
+
+
+def _external_token_response(member: DefenseMember, access_token: str, viewer: Any, status_code: int) -> Response:
+    """
+    Build the one-time response that carries an external member's readable token.
+
+    Args:
+        member: External committee member with its current invitation.
+        access_token: Readable token, shown only in this response.
+        viewer: Authenticated user, used for member payload visibility.
+        status_code: HTTP status code of the response.
+
+    Returns:
+        Response: Payload with ``member``, ``accessToken`` and ``accessTokenExpiresAt``, not cacheable.
+    """
+    expires_at = member.external_invitation.expires_at.isoformat()
+    response = Response({"member": defense_member_payload(member, viewer=viewer), "accessToken": access_token, "accessTokenExpiresAt": expires_at}, status=status_code)
+    # O token é exibido uma única vez: impede que proxies ou o navegador o guardem em cache.
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+# ─── Defense views ────────────────────────────────────────────────────────────
+
+
+class DefenseListView(APIView):
+    """
+    List every defense the authenticated institutional user may see.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def get(self, request) -> Response:
+        """
+        List role-scoped defenses with optional search and filters.
+
+        External invitation sessions are rejected by ``IsInstitutionalUser`` (403);
+        they read their committee through ``GET /api/v1/defenses/<id>``.
+
+        Args:
+            request: HTTP request. Query parameters: ``q`` (free-text search),
+                ``status`` (comma-separated DefenseStatus codes) and
+                ``pendingEvaluation`` (``true``/``1``/``yes``).
+
+        Returns:
+            Response: Paginated defense list payloads.
+        """
+        filters = DefenseListFilters.from_query_params(request.query_params)
+        queryset = list_visible_defenses(request.user, filters=filters, request=request)
+        paginator = ThesisPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        viewer_context = defense_viewer_context_for(page, request.user)
+        results = [defense_list_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in page]
+        return paginator.get_paginated_response(results)
+
+
+class SchedulableThesisListView(APIView):
+    """
+    List theses for which the authenticated user may schedule a defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def get(self, request) -> Response:
+        """
+        List advisor-approved theses without an active defense, scoped by ``_can_manage_defense``.
+
+        Users without scheduling rights (e.g. students) receive an empty page.
+
+        Args:
+            request: HTTP request.
+
+        Returns:
+            Response: Paginated thesis summaries (same shape as ``GET /api/v1/theses``).
+        """
+        queryset = schedulable_theses_for(request.user)
+        paginator = ThesisPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        results = [thesis_list_payload(thesis, request.user) for thesis in page]
+        return paginator.get_paginated_response(results)
+
+
+class DefenseListCreateView(APIView):
+    """
+    List defenses for a thesis or schedule a new one.
+    """
+
+    throttle_scope = "thesis"
+
+    def get_permissions(self):
+        """
+        Return stricter permissions for POST (schedule requires advisor or manager role).
+
+        Returns:
+            list: Permission instances.
+        """
+        if self.request.method == "POST":
+            return [(IsAcademicManager | IsAdvisorUser)()]
+        return [IsInstitutionalUser()]
+
+    def get(self, request, thesis_id) -> Response:
+        """
+        List all defenses for a thesis accessible to the authenticated user.
+
+        Args:
+            request: HTTP request.
+            thesis_id: Thesis primary key from URL.
+
+        Returns:
+            Response: List of defense payloads.
+        """
+        thesis = _scoped_thesis(request.user, thesis_id)
+        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation").order_by("-scheduled_datetime"))
+        viewer_context = defense_viewer_context_for(defenses, request.user)
+        return Response({"defenses": [defense_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in defenses]})
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Schedule a defense for the specified thesis.
+
+        Args:
+            request: HTTP request with scheduling data.
+            thesis_id: Thesis primary key from URL.
+
+        Returns:
+            Response: Created defense payload (201).
+        """
+        thesis = _scoped_thesis(request.user, thesis_id)
+        serializer = ScheduleDefenseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            defense = schedule_defense(thesis, actor=request.user, request=request, **serializer.validated_data)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+class DefenseDetailView(APIView):
+    """
+    Retrieve or update a specific defense session.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser | IsDefenseCommitteeMember]
+
+    def get(self, request, defense_id) -> Response:
+        """
+        Return the defense with its committee members, chronological ``statusHistory``,
+        availability summary, the viewer's own ``viewerMembership`` and ``viewerPermissions``.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        viewer_context = defense_viewer_context_for([defense], request.user)
+        detail_payload = defense_payload(defense, viewer=request.user, viewer_context=viewer_context)
+        detail_payload["statusHistory"] = defense_status_history_payload(defense)
+        viewer_permissions = viewer_context.permissions_for(defense)
+        detail_payload.update(defense_availability_summary(defense, include_pending_confirmations=viewer_permissions.can_manage))
+        detail_payload["viewerMembership"] = viewer_membership_payload(defense, request.user)
+        detail_payload["viewerPermissions"] = viewer_permissions.to_payload()
+        return Response({"defense": detail_payload})
+
+    def patch(self, request, defense_id) -> Response:
+        """
+        Update scheduling details for a not-yet-started defense.
+
+        Args:
+            request: HTTP request with updated fields.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        serializer = UpdateDefenseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            defense = update_defense(defense, actor=request.user, request=request, **serializer.validated_data)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseCancelView(APIView):
+    """
+    Cancel a scheduled defense and restore the thesis status.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Cancel the defense.
+
+        Args:
+            request: HTTP request with optional ``reason`` field.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        try:
+            defense = cancel_defense(defense, reason=(request.data.get("reason") or ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseStartView(APIView):
+    """
+    Transition a defense from SCHEDULED to IN_PROGRESS.
+
+    Admins, coordinators and the advisor of the thesis may call it; the object-level
+    rule (advisor of this thesis) is enforced by the service via ``_can_manage_defense``.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsAcademicManager | IsAdvisorUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Start the defense session.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        try:
+            defense = start_defense(defense, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseCloseView(APIView):
+    """
+    Close an in-progress defense and compute the final result.
+
+    Admins, coordinators and the advisor of the thesis may call it; the object-level
+    rule (advisor of this thesis) is enforced by the service via ``_can_manage_defense``.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsAcademicManager | IsAdvisorUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Close the defense, compute the committee result, and update the thesis.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        try:
+            defense = close_defense(defense, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})
+
+
+class DefenseMemberCreateView(APIView):
+    """
+    Add an institutional user as a committee member.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Add an institutional committee member to the defense.
+
+        Args:
+            request: HTTP request with member data.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Created member payload (201).
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        serializer = AddInstitutionalMemberSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member = add_institutional_member(defense, data["role"], data["user"], conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        from theses.defense_committee import defense_member_payload
+        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+class DefenseExternalMemberCreateView(APIView):
+    """
+    Add an external (non-institutional) user as a committee member via invitation.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Add an external committee member and create their invitation.
+
+        The readable ``accessToken`` is returned only in this response (the database
+        keeps only its hash) and the response is marked ``Cache-Control: no-store``.
+
+        Args:
+            request: HTTP request with external member data.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Created member payload plus ``accessToken`` and ``accessTokenExpiresAt`` (201).
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        serializer = AddExternalMemberSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member, access_token = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return _external_token_response(member, access_token, request.user, status.HTTP_201_CREATED)
+
+
+class DefenseExternalMemberTokenView(APIView):
+    """
+    Revoke an external member's invitation and issue a new access token.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id, member_id) -> Response:
+        """
+        Regenerate the external member's access token (same permission as managing the defense).
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Member payload plus the new ``accessToken`` and ``accessTokenExpiresAt``.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        try:
+            member, access_token = regenerate_external_member_token(defense, member, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return _external_token_response(member, access_token, request.user, status.HTTP_200_OK)
+
+
+class DefenseMemberDeleteView(APIView):
+    """
+    Remove a committee member from a scheduled defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def delete(self, request, defense_id, member_id) -> Response:
+        """
+        Remove a committee member.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Empty 204 response on success.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        try:
+            remove_member(defense, member, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DefenseEvaluationView(APIView):
+    """
+    Retrieve or submit a committee member's evaluation.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalAdmin | IsDefenseCommitteeMember]
+
+    def get(self, request, defense_id, member_id) -> Response:
+        """
+        Return the evaluation for a committee member.
+
+        Full details (score, notes) are only shown to the member themselves or an admin.
+        Other viewers receive decision and timestamp only.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Evaluation payload, or 404 when not yet submitted.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        viewer_member = resolve_committee_member(defense, request.user)
+        is_own = (viewer_member is not None and viewer_member.pk == member.pk) or (not isinstance(request.user, ExternalInvitationPrincipal) and user_is_admin(request.user))
+        try:
+            evaluation = member.evaluation
+        except ObjectDoesNotExist:
+            return Response({"detail": "Avaliação não submetida."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=is_own)})
+
+    def put(self, request, defense_id, member_id) -> Response:
+        """
+        Submit or update a committee member's evaluation.
+
+        When it is the last required evaluation the defense is closed automatically;
+        if that close fails the evaluation is still saved and ``autoCloseError``
+        carries the reason (otherwise null).
+
+        Args:
+            request: HTTP request with evaluation data.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Evaluation payload plus ``autoCloseError``, ``defenseStatus`` and ``defenseStatusLabel``.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        serializer = SubmitEvaluationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            outcome = record_committee_evaluation(defense, member, decision=data["decision"], score=data.get("score"), notes=data.get("notes", ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        defense.refresh_from_db(fields=["status"])
+        return Response({"evaluation": defense_evaluation_payload(outcome.evaluation, is_own=True), "autoCloseError": outcome.auto_close_error, "defenseStatus": defense.status, "defenseStatusLabel": DefenseStatus(defense.status).label})
+
+
+class DefenseMemberAvailabilityView(APIView):
+    """
+    Let a committee member confirm or decline availability for a scheduled defense.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsDefenseCommitteeMember]
+
+    def post(self, request, defense_id, member_id) -> Response:
+        """
+        Record the member's own availability answer.
+
+        Only the member themselves may answer (institutional user or the external
+        session of their invitation); answering for another member returns 403.
+
+        Args:
+            request: HTTP request with ``status`` (CONFIRMED/DECLINED) and optional ``note``.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Updated member payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        serializer = AvailabilityResponseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            member = respond_availability(defense, member, availability_status=data["status"], note=data["note"], actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"member": defense_member_payload(member, viewer=request.user)})
+
+
+class DefenseRevertStatusView(APIView):
+    """
+    Revert a defense to its previous status (admin only).
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalAdmin]
+
+    def post(self, request, defense_id) -> Response:
+        """
+        Revert an IN_PROGRESS or CANCELLED defense to its previous status.
+
+        Args:
+            request: HTTP request with mandatory ``reason`` field.
+            defense_id: Defense primary key from URL.
+
+        Returns:
+            Response: Updated defense payload.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        try:
+            defense = revert_defense_status(defense, reason=(request.data.get("reason") or ""), actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"defense": defense_payload(defense, viewer=request.user)})

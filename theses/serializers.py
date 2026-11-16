@@ -8,7 +8,8 @@ from django.conf import settings
 from rest_framework import serializers
 
 from academic.models import Course
-from theses.models import DefenseResult, DocumentType, ReviewDecision, ThesisType
+from accounts.models import User
+from theses.models import AvailabilityStatus, CommitteeRole, DefenseModality, DefenseResult, DocumentType, ReviewDecision, ThesisType
 from theses.services import available_advisors, normalize_keyword_names
 
 
@@ -154,3 +155,68 @@ class DocumentUploadSerializer(serializers.Serializer):
         if value.size > maximum_bytes:
             raise serializers.ValidationError(f"O arquivo excede o limite de {maximum_mb} MB.")
         return value
+
+
+class ScheduleDefenseSerializer(serializers.Serializer):
+    """
+    Validate a defense scheduling request.
+    """
+
+    scheduledDatetime = serializers.DateTimeField(source="scheduled_datetime")
+    durationMinutes = serializers.IntegerField(source="duration_minutes", required=False, min_value=1, max_value=720, default=120)
+    modality = serializers.ChoiceField(choices=DefenseModality.choices, required=False, default=DefenseModality.IN_PERSON)
+    location = serializers.CharField(required=False, allow_blank=True, default="")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class UpdateDefenseSerializer(serializers.Serializer):
+    """
+    Validate a partial defense update (all fields optional).
+    """
+
+    scheduledDatetime = serializers.DateTimeField(source="scheduled_datetime", required=False)
+    durationMinutes = serializers.IntegerField(source="duration_minutes", required=False, min_value=1, max_value=720)
+    modality = serializers.ChoiceField(choices=DefenseModality.choices, required=False)
+    location = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class AvailabilityResponseSerializer(serializers.Serializer):
+    """
+    Validate a committee member's availability answer.
+    """
+
+    status = serializers.ChoiceField(choices=[AvailabilityStatus.CONFIRMED, AvailabilityStatus.DECLINED])
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=1000)
+
+
+class AddInstitutionalMemberSerializer(serializers.Serializer):
+    """
+    Validate an institutional committee member addition request.
+    """
+
+    role = serializers.ChoiceField(choices=CommitteeRole.choices)
+    userId = serializers.PrimaryKeyRelatedField(source="user", queryset=User.objects.filter(is_active=True))
+    conflictReason = serializers.CharField(source="conflict_reason", required=False, allow_blank=True, default="")
+
+
+class AddExternalMemberSerializer(serializers.Serializer):
+    """
+    Validate an external committee member addition request.
+    """
+
+    role = serializers.ChoiceField(choices=CommitteeRole.choices)
+    name = serializers.CharField(max_length=200)
+    email = serializers.EmailField()
+    institution = serializers.CharField(required=False, allow_blank=True, default="")
+    conflictReason = serializers.CharField(source="conflict_reason", required=False, allow_blank=True, default="")
+
+
+class SubmitEvaluationSerializer(serializers.Serializer):
+    """
+    Validate a committee member evaluation submission.
+    """
+
+    decision = serializers.ChoiceField(choices=DefenseResult.choices)
+    score = serializers.DecimalField(max_digits=4, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=10)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")

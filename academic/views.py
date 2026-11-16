@@ -30,7 +30,7 @@ from academic.services import (
 )
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalAdmin
-from accounts.services import record_audit
+from accounts.services import record_audit, user_avatar_url
 
 
 class AdminPagination(PageNumberPagination):
@@ -378,6 +378,7 @@ class AdminUserLookupView(APIView):
                     "name": user.name or user.email,
                     "email": user.email,
                     "isActive": user.is_active,
+                    "avatarUrl": user_avatar_url(user),
                 },
                 "message": f"Usuário encontrado: {user.name or user.email}.",
             }
