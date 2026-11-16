@@ -732,6 +732,7 @@ def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
         (null until the defense is COMPLETED).
     """
     result_code = defense_result_code(defense)
+    viewer_is_admin = isinstance(viewer, User) and user_is_admin(viewer)
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),
@@ -747,5 +748,5 @@ def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
         "resultLabel": DefenseResult(result_code).label if result_code else None,
         "createdAt": defense.created_at.isoformat(),
         "updatedAt": defense.updated_at.isoformat(),
-        "members": [defense_member_payload(m, viewer=viewer) for m in defense.members.all()],
+        "members": [defense_member_payload(m, viewer=viewer, viewer_is_admin=viewer_is_admin) for m in defense.members.all()],
     }

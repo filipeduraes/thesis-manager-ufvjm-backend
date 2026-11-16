@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
-from accounts.services import create_external_invitation, record_audit, revoke_external_invitation
+from accounts.services import create_external_invitation, record_audit, revoke_external_invitation, user_avatar_url
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
 
@@ -86,7 +86,7 @@ def resolve_committee_member(defense: Defense, principal: User | ExternalInvitat
     return None
 
 
-def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None) -> dict[str, Any]:
+def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None) -> dict[str, Any]:
     """
     Serialize a committee member.
 
@@ -94,9 +94,15 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
     Coordinators do not see other members' evaluations (pending decision — registered
     in the final report as: coordinator evaluation visibility not yet decided).
 
+    ``avatarUrl`` comes from the institutional member's Google account (null for
+    external members and users without a picture); prefetch it with
+    ``google_social_accounts_prefetch`` to avoid one query per member.
+
     Args:
         member: Committee member instance.
         viewer: Authenticated user, ExternalInvitationPrincipal, or None.
+        viewer_is_admin: Precomputed admin flag for ``viewer``; when None it is resolved
+            here (callers serializing many members pass it to avoid a query per member).
 
     Returns:
         dict[str, Any]: Member payload with optional evaluation field.
@@ -111,6 +117,7 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "hasConflict": member.has_conflict,
         "conflictReason": member.conflict_reason if member.has_conflict else "",
         "isInstitutional": member.institutional_member_id is not None,
+        "avatarUrl": user_avatar_url(member.institutional_member) if member.institutional_member_id else None,
         "availabilityStatus": member.availability_status,
         "availabilityStatusLabel": AvailabilityStatus(member.availability_status).label,
         "availabilityRespondedAt": member.availability_responded_at.isoformat() if member.availability_responded_at else None,
@@ -123,7 +130,7 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
     if viewer is not None:
         if isinstance(viewer, ExternalInvitationPrincipal):
             can_see_eval = (member.external_invitation_id is not None and str(member.external_invitation_id) == str(viewer.invitation.pk))
-        elif isinstance(viewer, User) and user_is_admin(viewer):
+        elif isinstance(viewer, User) and (viewer_is_admin if viewer_is_admin is not None else user_is_admin(viewer)):
             can_see_eval = True
         elif isinstance(viewer, User) and member.institutional_member_id == viewer.pk:
             can_see_eval = True

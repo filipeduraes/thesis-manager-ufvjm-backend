@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import User
+from accounts.services import google_social_accounts_prefetch
 from theses.defense_committee import coordinator_managed_theses
 from theses.defense_scheduling import defense_close_entries_prefetch, defense_payload, sync_defense_status
 from theses.models import ACTIVE_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
@@ -75,7 +76,7 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     Returns:
         QuerySet[Defense]: Scoped queryset with thesis and members preloaded.
     """
-    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch())
+    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch(), google_social_accounts_prefetch("members__institutional_member__socialaccount_set"))
     if isinstance(principal, ExternalInvitationPrincipal):
         return base.filter(members__external_invitation=principal.invitation).distinct()
     if user_is_admin(principal):
