@@ -16,7 +16,7 @@ from django.utils import timezone
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import User
 from theses.defense_committee import coordinator_managed_theses
-from theses.defense_scheduling import defense_payload, sync_defense_status
+from theses.defense_scheduling import defense_close_entries_prefetch, defense_payload, sync_defense_status
 from theses.models import ACTIVE_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_coordinator
 
@@ -75,7 +75,7 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     Returns:
         QuerySet[Defense]: Scoped queryset with thesis and members preloaded.
     """
-    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH)
+    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch())
     if isinstance(principal, ExternalInvitationPrincipal):
         return base.filter(members__external_invitation=principal.invitation).distinct()
     if user_is_admin(principal):
@@ -241,21 +241,49 @@ def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:
     return queryset.distinct().order_by("advisor_approved_at", "updated_at")
 
 
-def _viewer_membership(defense: Defense, viewer: User) -> DefenseMember | None:
+def _viewer_membership(defense: Defense, viewer: User | ExternalInvitationPrincipal) -> DefenseMember | None:
     """
     Return the viewer's committee membership using the prefetched members.
 
     Args:
         defense: Defense with ``members`` prefetched.
-        viewer: Authenticated institutional user.
+        viewer: Institutional user or external invitation principal.
 
     Returns:
         DefenseMember | None: Matching member, if any.
     """
     for member in defense.members.all():
-        if member.institutional_member_id == viewer.pk:
+        if isinstance(viewer, ExternalInvitationPrincipal):
+            if member.external_invitation_id is not None and member.external_invitation_id == viewer.invitation.pk:
+                return member
+        elif member.institutional_member_id is not None and member.institutional_member_id == viewer.pk:
             return member
     return None
+
+
+def viewer_membership_payload(defense: Defense, viewer: User | ExternalInvitationPrincipal) -> dict[str, Any]:
+    """
+    Serialize the viewer's own committee membership state for a defense.
+
+    Shared by the listing and the detail so both return the same shape, for
+    institutional users and external invitation sessions.
+
+    Args:
+        defense: Defense (``members`` and ``members__evaluation`` ideally prefetched).
+        viewer: Institutional user or external invitation principal.
+
+    Returns:
+        dict[str, Any]: ``isMember``, ``memberId``, ``role``, ``roleLabel``, ``canEvaluate``, ``hasEvaluated``.
+    """
+    member = _viewer_membership(defense, viewer)
+    return {
+        "isMember": member is not None,
+        "memberId": str(member.pk) if member else None,
+        "role": member.role if member else None,
+        "roleLabel": CommitteeRole(member.role).label if member else None,
+        "canEvaluate": member is not None and member.role != CommitteeRole.ALTERNATE,
+        "hasEvaluated": _member_has_evaluated(member) if member else False,
+    }
 
 
 def _member_has_evaluated(member: DefenseMember) -> bool:
@@ -309,17 +337,9 @@ def defense_list_payload(defense: Defense, viewer: User) -> dict[str, Any]:
     payload = defense_payload(defense, viewer=viewer)
     thesis = defense.thesis
     main_author = _thesis_main_author(thesis)
-    member = _viewer_membership(defense, viewer)
     payload["thesisTitle"] = thesis.title
     payload["thesisReferenceCode"] = thesis.reference_code
     payload["student"] = user_brief(main_author)
     payload["advisor"] = user_brief(thesis.advisor)
-    payload["viewerMembership"] = {
-        "isMember": member is not None,
-        "memberId": str(member.pk) if member else None,
-        "role": member.role if member else None,
-        "roleLabel": CommitteeRole(member.role).label if member else None,
-        "canEvaluate": member is not None and member.role != CommitteeRole.ALTERNATE,
-        "hasEvaluated": _member_has_evaluated(member) if member else False,
-    }
+    payload["viewerMembership"] = viewer_membership_payload(defense, viewer)
     return payload

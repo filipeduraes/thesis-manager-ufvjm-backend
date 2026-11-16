@@ -11,6 +11,7 @@ from typing import Any
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import URLValidator
 from django.db import transaction
+from django.db.models import Prefetch, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
@@ -23,6 +24,7 @@ from theses.services import purge_thesis_versions, user_is_admin
 logger = logging.getLogger(__name__)
 
 AUTO_CLOSE_REASON = "Resultado calculado automaticamente após a última avaliação."
+DEFENSE_CLOSE_ENTRIES_ATTR = "defense_close_entries"
 REMOTE_LOCATION_ERROR = "Para defesa remota, informe o link da reunião (URL http ou https)."
 MEETING_URL_VALIDATOR = URLValidator(schemes=["http", "https"])
 
@@ -667,6 +669,55 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
     return defense
 
 
+def _defense_close_entries_queryset() -> QuerySet[ThesisStatusHistory]:
+    """
+    Return thesis history entries written by ``_finalize_defense``.
+
+    Only the defense close stores both ``defenseId`` and ``defenseResult``; the
+    manual thesis-level result (``record_defense_result``) has no ``defenseId``.
+
+    Returns:
+        QuerySet[ThesisStatusHistory]: Close entries, newest first.
+    """
+    return ThesisStatusHistory.objects.filter(metadata__has_keys=["defenseId", "defenseResult"]).order_by("-changed_at")
+
+
+def defense_close_entries_prefetch() -> Prefetch:
+    """
+    Build the prefetch that lets list payloads read defense results without N+1 queries.
+
+    Returns:
+        Prefetch: Prefetch of ``thesis__status_history`` into ``thesis.defense_close_entries``.
+    """
+    return Prefetch("thesis__status_history", queryset=_defense_close_entries_queryset(), to_attr=DEFENSE_CLOSE_ENTRIES_ATTR)
+
+
+def defense_result_code(defense: Defense) -> str | None:
+    """
+    Return the committee result computed when the defense was closed.
+
+    Reads the result that ``_finalize_defense`` recorded (manual or automatic close)
+    instead of recomputing it, so the payload always matches what was applied to
+    the thesis.
+
+    Args:
+        defense: Defense session (``thesis.defense_close_entries`` used when prefetched).
+
+    Returns:
+        str | None: DefenseResult code, or None while the defense is not COMPLETED.
+    """
+    if defense.status != DefenseStatus.COMPLETED:
+        return None
+    close_entries = getattr(defense.thesis, DEFENSE_CLOSE_ENTRIES_ATTR, None)
+    if close_entries is None:
+        close_entries = list(_defense_close_entries_queryset().filter(thesis_id=defense.thesis_id, metadata__defenseId=str(defense.pk)))
+    defense_id = str(defense.pk)
+    for entry in close_entries:
+        if entry.metadata.get("defenseId") == defense_id:
+            return entry.metadata.get("defenseResult")
+    return None
+
+
 def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
     """
     Serialize a defense session with its committee members.
@@ -677,8 +728,10 @@ def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
             evaluation visibility per member (passed through to defense_member_payload).
 
     Returns:
-        dict[str, Any]: Defense payload including members list.
+        dict[str, Any]: Defense payload including members list and ``result``/``resultLabel``
+        (null until the defense is COMPLETED).
     """
+    result_code = defense_result_code(defense)
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),
@@ -690,6 +743,8 @@ def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
         "notes": defense.notes,
         "status": defense.status,
         "statusLabel": DefenseStatus(defense.status).label,
+        "result": result_code,
+        "resultLabel": DefenseResult(result_code).label if result_code else None,
         "createdAt": defense.created_at.isoformat(),
         "updatedAt": defense.updated_at.isoformat(),
         "members": [defense_member_payload(m, viewer=viewer) for m in defense.members.all()],

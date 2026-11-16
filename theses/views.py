@@ -854,7 +854,7 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_token, remove_member, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
-from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
+from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
@@ -1039,7 +1039,8 @@ class DefenseDetailView(APIView):
 
     def get(self, request, defense_id) -> Response:
         """
-        Return the defense with its committee members and chronological ``statusHistory``.
+        Return the defense with its committee members, chronological ``statusHistory``,
+        availability summary and the viewer's own ``viewerMembership``.
 
         Args:
             request: HTTP request.
@@ -1053,6 +1054,7 @@ class DefenseDetailView(APIView):
         detail_payload = defense_payload(defense, viewer=request.user)
         detail_payload["statusHistory"] = defense_status_history_payload(defense)
         detail_payload.update(defense_availability_summary(defense))
+        detail_payload["viewerMembership"] = viewer_membership_payload(defense, request.user)
         return Response({"defense": detail_payload})
 
     def patch(self, request, defense_id) -> Response:
