@@ -62,7 +62,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Autenticação de sessão externa | **Implementado** | `ExternalInvitationSessionAuthentication` + `ExternalInvitationPrincipal`; CSRF em métodos não seguros; bloqueio por expiração/revogação. |
 | Login por token no frontend | **Implementado** | `LoginView` envia token; sessão externa direciona para fluxo de avaliação externa. |
 | Criação de token no frontend | **Implementado** | UI admin (`AdminUsers`) e integração na tela de bancas/agendamento (`DefenseScheduling`) para gerar token real (sem vínculo de defesa ainda). |
-| Escopo do convite à banca/defesa/membro | **Pendente/Parcial** | Convite ainda não é vinculado a `defense`/membro da banca/TCC; necessário para garantir acesso apenas à banca correta. |
+| Escopo do convite à banca/defesa/membro | **Implementado** | Cada `DefenseMember` externo aponta para o seu `ExternalInvitation` (one-to-one). `POST /api/v1/defenses/<id>/members/external` devolve `accessToken` (e `accessTokenExpiresAt`) **uma única vez**, com `Cache-Control: no-store`; o banco guarda só o hash, e o token não vai para AuditLog, logs nem mensagens de erro. `POST /api/v1/defenses/<id>/members/<memberId>/regenerate-token` (mesma permissão de gerenciar a banca; banca `SCHEDULED`/`IN_PROGRESS`) revoga o convite atual, cria outro para o mesmo membro (mantém disponibilidade e avaliação) e devolve o token novo uma vez. `GET /api/v1/session` e `POST /api/v1/auth/external-token` incluem `externalInvitation.assignments` (`[{defenseId, memberId}]`). A sessão externa só lê o detalhe da própria banca, confirma disponibilidade e avalia; outras bancas e ações de gestão retornam 403. |
 | Envio do token por e-mail | **Pendente** | Sem fila/worker/notificação; planejamento discutido (assíncrono, sem token em logs/banco). |
 
 ## 5. Cursos e departamentos (cadastro acadêmico)
@@ -146,7 +146,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Login Google + sessão | **Implementado** | Integração com `/api/v1/session` e início OAuth. |
 | Login por token externo | **Implementado** | Troca de token e rota para avaliação externa. |
 | Área admin: usuários/cursos/auditoria | **Implementado** | Integrada aos endpoints administrativos; multi-papéis e navegação combinada. |
-| Criação de convite externo | **Implementado** | Admin e tela de bancas (integração parcial; escopo de banca pendente). |
+| Criação de convite externo | **Implementado** | Admin e tela de bancas; convite da banca vinculado ao membro, com token devolvido uma vez e regeneração. |
 | Fluxos de TCC/orientação | **Implementado** | Submissão do aluno, acompanhamento, upload de PDF/versões/documentos, parecer do orientador (aprovar/ajustes/reprovar), leitor de PDF com zoom/download, resultado da banca e publicação. |
 | Fluxos de banca/avaliação/repositório/relatórios | **Parcial/Pendente** | Agendamento de banca, avaliação individual e relatórios dependem de domínio/backend pendente; repositório público possui endpoint, mas a tela do frontend ainda usa dados mock. |
 
@@ -180,7 +180,8 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `POST` | `/api/v1/defenses/<id>/start` | Admin/coord/orientador da própria tese | Inicia a defesa (transição para `IN_PROGRESS`); exige confirmação de todos os membros não suplentes. |
 | `POST` | `/api/v1/defenses/<id>/close` | Admin/coord/orientador da própria tese | Encerra a defesa, calcula resultado e transita status da tese. |
 | `POST` | `/api/v1/defenses/<id>/members` | Institucional | Adiciona membro institucional à banca. |
-| `POST` | `/api/v1/defenses/<id>/members/external` | Institucional | Cria convite externo e adiciona membro externo à banca. |
+| `POST` | `/api/v1/defenses/<id>/members/external` | Admin/coord do curso/orientador da própria tese | Cria convite externo, adiciona membro externo à banca e devolve `accessToken` uma única vez. |
+| `POST` | `/api/v1/defenses/<id>/members/<memberId>/regenerate-token` | Admin/coord do curso/orientador da própria tese | Revoga o convite do membro externo e devolve um novo `accessToken` uma única vez. |
 | `DELETE` | `/api/v1/defenses/<id>/members/<memberId>` | Institucional | Remove membro da banca (exige status `SCHEDULED` e sem avaliação). |
 | `POST` | `/api/v1/defenses/<id>/members/<memberId>/availability` | O próprio membro (institucional ou convite externo) | Confirma (`CONFIRMED`) ou recusa (`DECLINED`) disponibilidade; só com a banca `SCHEDULED`. |
 | `GET` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Institucional ou membro da banca | Lê avaliação; nota/notas visíveis somente ao próprio membro. |

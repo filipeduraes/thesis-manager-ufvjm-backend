@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
@@ -203,6 +203,7 @@ def build_session_payload(request: HttpRequest) -> dict:
                 "email": invitation.email,
                 "institution": invitation.institution,
                 "expiresAt": invitation.expires_at.isoformat(),
+                "assignments": external_invitation_assignments(invitation),
             },
         }
 
@@ -511,6 +512,26 @@ def generate_external_token() -> str:
         for _ in range(TOKEN_GROUPS)
     ]
     return f"{TOKEN_PREFIX}-{'-'.join(groups)}"
+
+
+def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict[str, str]]:
+    """
+    Return the defense committee memberships bound to an external invitation.
+
+    Uses the reverse one-to-one ``defense_membership`` (declared by
+    ``theses.DefenseMember``) so the accounts app does not import the theses app.
+
+    Args:
+        invitation: External invitation.
+
+    Returns:
+        list[dict[str, str]]: ``[{"defenseId", "memberId"}]``; empty when the invitation is not on a committee.
+    """
+    try:
+        membership = invitation.defense_membership
+    except ObjectDoesNotExist:
+        return []
+    return [{"defenseId": str(membership.defense_id), "memberId": str(membership.pk)}]
 
 
 def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None,) -> tuple[ExternalInvitation, str]:

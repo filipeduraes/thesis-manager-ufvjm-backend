@@ -852,7 +852,7 @@ class PublicThesisDownloadView(APIView):
 
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
-from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, remove_member, resolve_committee_member, respond_availability  # noqa: E402
+from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_token, remove_member, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
 from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
@@ -892,6 +892,26 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
     if user_is_advisor(user):
         return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
     return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)
+
+
+def _external_token_response(member: DefenseMember, access_token: str, viewer: Any, status_code: int) -> Response:
+    """
+    Build the one-time response that carries an external member's readable token.
+
+    Args:
+        member: External committee member with its current invitation.
+        access_token: Readable token, shown only in this response.
+        viewer: Authenticated user, used for member payload visibility.
+        status_code: HTTP status code of the response.
+
+    Returns:
+        Response: Payload with ``member``, ``accessToken`` and ``accessTokenExpiresAt``, not cacheable.
+    """
+    expires_at = member.external_invitation.expires_at.isoformat()
+    response = Response({"member": defense_member_payload(member, viewer=viewer), "accessToken": access_token, "accessTokenExpiresAt": expires_at}, status=status_code)
+    # O token é exibido uma única vez: impede que proxies ou o navegador o guardem em cache.
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 # ─── Defense views ────────────────────────────────────────────────────────────
@@ -1191,12 +1211,15 @@ class DefenseExternalMemberCreateView(APIView):
         """
         Add an external committee member and create their invitation.
 
+        The readable ``accessToken`` is returned only in this response (the database
+        keeps only its hash) and the response is marked ``Cache-Control: no-store``.
+
         Args:
             request: HTTP request with external member data.
             defense_id: Defense primary key from URL.
 
         Returns:
-            Response: Created member payload (201).
+            Response: Created member payload plus ``accessToken`` and ``accessTokenExpiresAt`` (201).
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
         defense = sync_defense_status(defense, request=request)
@@ -1204,11 +1227,40 @@ class DefenseExternalMemberCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            member = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+            member, access_token = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        from theses.defense_committee import defense_member_payload
-        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+        return _external_token_response(member, access_token, request.user, status.HTTP_201_CREATED)
+
+
+class DefenseExternalMemberTokenView(APIView):
+    """
+    Revoke an external member's invitation and issue a new access token.
+    """
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id, member_id) -> Response:
+        """
+        Regenerate the external member's access token (same permission as managing the defense).
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: Member payload plus the new ``accessToken`` and ``accessTokenExpiresAt``.
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        try:
+            member, access_token = regenerate_external_member_token(defense, member, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return _external_token_response(member, access_token, request.user, status.HTTP_200_OK)
 
 
 class DefenseMemberDeleteView(APIView):

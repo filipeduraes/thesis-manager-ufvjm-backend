@@ -52,6 +52,9 @@ def _can_manage_defense(actor: User, thesis_id) -> bool:
     Returns:
         bool: True when the actor is authorized.
     """
+    if not isinstance(actor, User):
+        # Sessões de convite externo nunca gerenciam bancas.
+        return False
     if user_is_admin(actor):
         return True
     if user_is_coordinator(actor) and coordinator_managed_theses(actor).filter(pk=thesis_id).exists():
@@ -258,9 +261,12 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
 
 
 @transaction.atomic
-def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> DefenseMember:
+def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> tuple[DefenseMember, str]:
     """
     Add an external member via the ExternalInvitation flow.
+
+    The readable access token is returned once so the caller can hand it to the
+    member; only its SHA-256 hash is stored. It must never be logged or audited.
 
     Args:
         defense: Defense session.
@@ -273,7 +279,8 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         request: HTTP request used for audit context.
 
     Returns:
-        DefenseMember: Created member record with linked invitation.
+        tuple[DefenseMember, str]: Created member record (with linked invitation) and
+        the one-time readable access token.
 
     Raises:
         PermissionDenied: When the actor is not authorized to manage this defense.
@@ -295,7 +302,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
     if not clean_email:
         raise ValidationError("Informe o e-mail do membro externo.")
 
-    invitation, _token = create_external_invitation(
+    invitation, access_token = create_external_invitation(
         name=clean_name,
         email=clean_email,
         institution=institution.strip(),
@@ -322,7 +329,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         actor_user=actor,
         metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "external", "invitationId": str(invitation.pk)},
     )
-    return member
+    return member, access_token
 
 
 @transaction.atomic
@@ -499,3 +506,53 @@ def reset_committee_availability(defense: Defense) -> int:
         int: Number of members reset.
     """
     return defense.members.update(availability_status=AvailabilityStatus.PENDING, availability_responded_at=None, availability_note="")
+
+
+@transaction.atomic
+def regenerate_external_member_token(defense: Defense, member: DefenseMember, *, actor: User, request: HttpRequest | None = None) -> tuple[DefenseMember, str]:
+    """
+    Replace an external member's invitation and return the new readable token once.
+
+    The current invitation is revoked (its sessions stop working) and a new one is
+    created and linked to the same member, keeping availability and evaluation.
+
+    Args:
+        defense: Defense session (must be SCHEDULED or IN_PROGRESS).
+        member: External committee member.
+        actor: Admin, coordinator, or thesis advisor managing the defense.
+        request: HTTP request used for audit context.
+
+    Returns:
+        tuple[DefenseMember, str]: Updated member and the new one-time access token.
+
+    Raises:
+        PermissionDenied: When the actor is not authorized to manage this defense.
+        ValidationError: When the member is not external or the defense is not active.
+    """
+    if not _can_manage_defense(actor, defense.thesis_id):
+        raise PermissionDenied()
+    if member.defense_id != defense.pk:
+        raise ValidationError("Membro não pertence a esta banca.")
+    locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
+    if locked_defense.status not in ACTIVE_DEFENSE_STATUSES:
+        raise ValidationError("Só é possível gerar novo token para bancas agendadas ou em andamento.")
+    # FOR UPDATE não pode ser combinado com o LEFT JOIN do convite (nulo para institucionais).
+    member = DefenseMember.objects.select_for_update().get(pk=member.pk)
+    previous_invitation = member.external_invitation
+    if previous_invitation is None:
+        raise ValidationError("Somente membros externos possuem token de acesso.")
+
+    revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
+    new_invitation, access_token = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
+    member.external_invitation = new_invitation
+    member.save(update_fields=["external_invitation"])
+    record_audit(
+        action=AuditAction.INVITE,
+        entity_type="Defense",
+        entity_id=str(defense.pk),
+        entity_app_label="theses",
+        request=request,
+        actor_user=actor,
+        metadata={"event": "EXTERNAL_TOKEN_REGENERATED", "memberId": str(member.pk), "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
+    )
+    return member, access_token
