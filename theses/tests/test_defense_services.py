@@ -17,7 +17,7 @@ from theses.defense_committee import _can_manage_defense, add_institutional_memb
 from theses.defense_evaluation import submit_committee_evaluation
 from theses.defense_scheduling import cancel_defense, close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
-from theses.tests.defense_helpers import confirm_committee
+from theses.tests.defense_helpers import confirm_committee, record_evaluation_without_auto_close
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -281,7 +281,7 @@ class EvaluationServiceTests(TestCase):
 
     def test_close_defense_result_rejected(self) -> None:
         submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.APPROVED, actor=self.evaluator2)
+        record_evaluation_without_auto_close(self.member2, DefenseResult.APPROVED)
         close_defense(self.defense, actor=self.admin)
         self.thesis.refresh_from_db()
         self.assertEqual(self.thesis.status, ThesisStatus.REJECTED)
@@ -305,14 +305,14 @@ class EvaluationServiceTests(TestCase):
     def test_alternate_missing_evaluation_does_not_block_close(self) -> None:
         # Suplente não avaliou — não deve bloquear o encerramento
         submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.REJECTED, actor=self.evaluator2)
+        record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)
 
     def test_evaluation_blocked_after_completed_raises_and_audits(self) -> None:
         submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.REJECTED, actor=self.evaluator2)
+        record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
 

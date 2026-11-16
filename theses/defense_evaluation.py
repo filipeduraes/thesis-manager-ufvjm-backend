@@ -4,6 +4,7 @@ Evaluation submission services for defense committee members.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -14,12 +15,59 @@ from django.http import HttpRequest
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
 from accounts.services import record_audit
+from theses.defense_scheduling import auto_close_after_last_evaluation
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus
+
+
+@dataclass(frozen=True)
+class EvaluationOutcome:
+    """
+    Result of recording a committee evaluation.
+
+    Attributes:
+        evaluation: Saved evaluation.
+        auto_close_error: Message when the automatic close after the last evaluation
+            failed (the evaluation is still saved), otherwise None.
+    """
+
+    evaluation: DefenseMemberEvaluation
+    auto_close_error: str | None = None
 
 
 def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score=None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> DefenseMemberEvaluation:
     """
+    Submit or update a committee member's evaluation and return only the evaluation.
+
+    Thin wrapper over ``record_committee_evaluation`` kept for callers that do not
+    need the automatic-close outcome; the automatic close still runs.
+
+    Args:
+        defense: Defense session.
+        member: Committee member submitting the evaluation.
+        decision: DefenseResult code (APPROVED, REJECTED, or APPROVED_WITH_REMARKS).
+        score: Optional score between 0.00 and 10.00.
+        notes: Optional evaluation notes.
+        actor: Institutional user or ExternalInvitationPrincipal performing the action.
+        request: HTTP request used for audit context.
+
+    Returns:
+        DefenseMemberEvaluation: Created or updated evaluation record.
+
+    Raises:
+        ValidationError: When the defense status, member role, identity, or score is invalid.
+    """
+    outcome = record_committee_evaluation(defense, member, decision=decision, score=score, notes=notes, actor=actor, request=request)
+    return outcome.evaluation
+
+
+def record_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score=None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> EvaluationOutcome:
+    """
     Submit or update a committee member's evaluation for an in-progress defense.
+
+    After the evaluation is saved, if every non-alternate member has evaluated, the
+    defense is closed automatically through the same logic as ``close_defense``,
+    in a separate savepoint: a failure there never undoes the evaluation and is
+    reported in ``EvaluationOutcome.auto_close_error``.
 
     Alternates are blocked from evaluating. Only the member themselves (institutional
     or external) may submit their own evaluation. After the defense is COMPLETED,
@@ -38,7 +86,7 @@ def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
         request: HTTP request used for audit context.
 
     Returns:
-        DefenseMemberEvaluation: Created or updated evaluation record.
+        EvaluationOutcome: Saved evaluation and the automatic-close error, if any.
 
     Raises:
         ValidationError: When the defense status, member role, identity, or score is invalid.
@@ -105,7 +153,8 @@ def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             actor_external_invitation=actor_ext,
             metadata={"event": "EVALUATION_SUBMITTED", "memberId": str(member.pk), "decision": decision},
         )
-    return evaluation
+    auto_close_error = auto_close_after_last_evaluation(defense, request=request)
+    return EvaluationOutcome(evaluation=evaluation, auto_close_error=auto_close_error)
 
 
 def defense_evaluation_payload(evaluation: DefenseMemberEvaluation, *, is_own: bool = False) -> dict[str, Any]:

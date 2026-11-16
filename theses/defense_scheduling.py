@@ -21,6 +21,8 @@ from theses.services import purge_thesis_versions, user_is_admin
 
 logger = logging.getLogger(__name__)
 
+AUTO_CLOSE_REASON = "Resultado calculado automaticamente após a última avaliação."
+
 
 def record_defense_status_change(defense: Defense, previous_status: str, changed_by: User | None, reason: str) -> DefenseStatusHistory:
     """
@@ -421,6 +423,48 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     """
     if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
+    return _finalize_defense(defense, closed_by=actor, automatic=False, request=request)
+
+
+def all_required_evaluations_submitted(defense: Defense) -> bool:
+    """
+    Return whether every non-alternate member of the defense has an evaluation.
+
+    Args:
+        defense: Defense session.
+
+    Returns:
+        bool: True when there is at least one non-alternate member and all evaluated.
+    """
+    non_alternate_ids = list(defense.members.exclude(role=CommitteeRole.ALTERNATE).values_list("id", flat=True))
+    if not non_alternate_ids:
+        return False
+    evaluated_count = DefenseMemberEvaluation.objects.filter(member__in=non_alternate_ids).count()
+    return evaluated_count == len(non_alternate_ids)
+
+
+@transaction.atomic
+def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bool, request: HttpRequest | None = None) -> Defense:
+    """
+    Compute the committee result, complete the defense and update the thesis.
+
+    Shared by the manual ``close_defense`` and the automatic close triggered after
+    the last evaluation, so both apply the same quorum, result and purge rules.
+    Permission checks are the caller's responsibility.
+
+    Args:
+        defense: Defense session to close.
+        closed_by: User who closed it, or None for the automatic close.
+        automatic: Whether the close was triggered by the last evaluation.
+        request: HTTP request used for audit context.
+
+    Returns:
+        Defense: Updated (COMPLETED) defense record.
+
+    Raises:
+        ValidationError: When the defense is not IN_PROGRESS, evaluations are missing,
+            or the thesis version purge fails (e.g. approval without a current PDF).
+    """
     defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if defense.status != DefenseStatus.IN_PROGRESS:
         raise ValidationError("Só é possível encerrar uma banca em andamento.")
@@ -429,9 +473,7 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     non_alternate_ids = list(defense.members.exclude(role=CommitteeRole.ALTERNATE).values_list("id", flat=True))
     if not non_alternate_ids:
         raise ValidationError("A banca não possui membros avaliadores (não-suplentes).")
-    evaluated_ids = set(DefenseMemberEvaluation.objects.filter(member__in=non_alternate_ids).values_list("member_id", flat=True))
-    missing = set(non_alternate_ids) - evaluated_ids
-    if missing:
+    if not all_required_evaluations_submitted(defense):
         raise ValidationError("Todos os membros não-suplentes precisam ter avaliado antes do encerramento.")
 
     # Calcular resultado a partir das avaliações
@@ -450,21 +492,23 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     previous_thesis_status = thesis.status
     thesis.status = new_thesis_status
     thesis.save(update_fields=["status", "updated_at"])
+    result_reason = f"Banca encerrada. Resultado: {DefenseResult(result).label}."
     ThesisStatusHistory.objects.create(
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=new_thesis_status,
-        changed_by=actor,
-        reason=f"Banca encerrada. Resultado: {DefenseResult(result).label}.",
-        metadata={"defenseId": str(defense.pk), "defenseResult": result},
+        changed_by=closed_by,
+        reason=result_reason,
+        metadata={"defenseId": str(defense.pk), "defenseResult": result, "automatic": automatic},
     )
 
     defense.status = DefenseStatus.COMPLETED
     defense.save(update_fields=["status", "updated_at"])
-    record_defense_status_change(defense, DefenseStatus.IN_PROGRESS, actor, f"Banca encerrada. Resultado: {DefenseResult(result).label}.")
+    history_reason = AUTO_CLOSE_REASON if automatic else result_reason
+    record_defense_status_change(defense, DefenseStatus.IN_PROGRESS, closed_by, history_reason)
 
     if new_thesis_status in APPROVED_DEFENSE_STATUSES:
-        purge_thesis_versions(thesis, actor=actor, request=request)
+        purge_thesis_versions(thesis, actor=closed_by, request=request)
 
     record_audit(
         action=AuditAction.EVALUATE,
@@ -472,10 +516,40 @@ def close_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
         entity_id=str(defense.pk),
         entity_app_label="theses",
         request=request,
-        actor_user=actor,
-        metadata={"event": "DEFENSE_CLOSED", "result": result, "thesisNewStatus": new_thesis_status},
+        actor_user=closed_by,
+        metadata={"event": "DEFENSE_CLOSED", "result": result, "thesisNewStatus": new_thesis_status, "trigger": "AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"},
     )
     return defense
+
+
+def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | None = None) -> str | None:
+    """
+    Close the defense automatically when every required evaluation is in.
+
+    Runs in its own savepoint: if closing raises ValidationError (for example, an
+    approval whose thesis has no current PDF), only the close is rolled back, the
+    evaluation that triggered it stays saved and the defense stays IN_PROGRESS so
+    it can still be closed manually. A concurrent close is not reported as error.
+
+    Args:
+        defense: Defense that just received an evaluation.
+        request: HTTP request used for audit context.
+
+    Returns:
+        str | None: Error message when the automatic close failed, otherwise None.
+    """
+    try:
+        with transaction.atomic():
+            locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
+            if locked_defense.status != DefenseStatus.IN_PROGRESS or not all_required_evaluations_submitted(locked_defense):
+                return None
+            _finalize_defense(locked_defense, closed_by=None, automatic=True, request=request)
+    except ValidationError as exc:
+        error_message = exc.messages[0] if exc.messages else "Não foi possível encerrar a banca automaticamente."
+        logger.warning("Automatic close failed for defense %s after last evaluation: %s", defense.pk, error_message)
+        return error_message
+    logger.info("Defense %s closed automatically after last evaluation", defense.pk)
+    return None
 
 
 @transaction.atomic

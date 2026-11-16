@@ -18,7 +18,7 @@ from accounts.services import create_external_invitation
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus, Thesis, ThesisStatus
-from theses.tests.defense_helpers import confirm_committee
+from theses.tests.defense_helpers import confirm_committee, record_evaluation_without_auto_close
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -272,7 +272,7 @@ class DefenseEvaluationApiTests(TestCase):
         from theses.defense_scheduling import close_defense
 
         submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.REJECTED, actor=self.evaluator2)
+        record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)

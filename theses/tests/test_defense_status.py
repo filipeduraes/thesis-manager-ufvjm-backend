@@ -15,6 +15,7 @@ from accounts.models import AuditLog, ProfileRole, User, UserProfileRole
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import schedule_defense, start_defense, sync_defense_status
 from theses.models import CommitteeRole, Defense, DefenseStatus, Thesis, ThesisStatus
+from theses.tests.defense_helpers import record_evaluation_without_auto_close
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -186,7 +187,7 @@ class RevertDefenseStatusApiTests(TestCase):
         from theses.defense_scheduling import close_defense
         evaluator = _make_user("ev_rv@t.br", "Ev-RV", ProfileRole.ADVISOR)
         member = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, evaluator, actor=self.admin)
-        submit_committee_evaluation(self.defense, member, decision="REJECTED", actor=evaluator)
+        record_evaluation_without_auto_close(member, "REJECTED")
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)

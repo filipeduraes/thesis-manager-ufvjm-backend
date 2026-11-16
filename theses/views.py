@@ -853,10 +853,10 @@ class PublicThesisDownloadView(APIView):
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
 from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_token, remove_member, resolve_committee_member, respond_availability  # noqa: E402
-from theses.defense_evaluation import defense_evaluation_payload, submit_committee_evaluation  # noqa: E402
+from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
 from theses.defense_listing import DefenseListFilters, defense_list_payload, defenses_visible_to, list_visible_defenses, schedulable_theses_for  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
-from theses.models import Defense, DefenseMember  # noqa: E402
+from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
 from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
 from theses.services import user_is_admin, user_is_advisor, user_is_coordinator  # noqa: E402
@@ -1331,13 +1331,17 @@ class DefenseEvaluationView(APIView):
         """
         Submit or update a committee member's evaluation.
 
+        When it is the last required evaluation the defense is closed automatically;
+        if that close fails the evaluation is still saved and ``autoCloseError``
+        carries the reason (otherwise null).
+
         Args:
             request: HTTP request with evaluation data.
             defense_id: Defense primary key from URL.
             member_id: DefenseMember primary key from URL.
 
         Returns:
-            Response: Submitted evaluation payload.
+            Response: Evaluation payload plus ``autoCloseError``, ``defenseStatus`` and ``defenseStatusLabel``.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
         defense = sync_defense_status(defense, request=request)
@@ -1346,10 +1350,11 @@ class DefenseEvaluationView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            evaluation = submit_committee_evaluation(defense, member, decision=data["decision"], score=data.get("score"), notes=data.get("notes", ""), actor=request.user, request=request)
+            outcome = record_committee_evaluation(defense, member, decision=data["decision"], score=data.get("score"), notes=data.get("notes", ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"evaluation": defense_evaluation_payload(evaluation, is_own=True)})
+        defense.refresh_from_db(fields=["status"])
+        return Response({"evaluation": defense_evaluation_payload(outcome.evaluation, is_own=True), "autoCloseError": outcome.auto_close_error, "defenseStatus": defense.status, "defenseStatusLabel": DefenseStatus(defense.status).label})
 
 
 class DefenseMemberAvailabilityView(APIView):
