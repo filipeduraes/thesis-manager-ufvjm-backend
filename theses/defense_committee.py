@@ -229,13 +229,17 @@ def resolve_committee_member(defense: Defense, principal: User | ExternalInvitat
     return None
 
 
-def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None) -> dict[str, Any]:
+def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None, viewer_can_manage: bool | None = None) -> dict[str, Any]:
     """
     Serialize a committee member.
 
     Evaluation visibility: the member themselves or an admin may see it.
     Coordinators do not see other members' evaluations (pending decision — registered
     in the final report as: coordinator evaluation visibility not yet decided).
+
+    Availability visibility: ``availabilityStatus``, ``availabilityStatusLabel``,
+    ``availabilityRespondedAt`` and ``availabilityNote`` are filled only for viewers
+    who manage the defense and for the member themselves; for anyone else they are null.
 
     ``avatarUrl`` comes from the institutional member's Google account (null for
     external members and users without a picture); prefetch it with
@@ -246,10 +250,16 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         viewer: Authenticated user, ExternalInvitationPrincipal, or None.
         viewer_is_admin: Precomputed admin flag for ``viewer``; when None it is resolved
             here (callers serializing many members pass it to avoid a query per member).
+        viewer_can_manage: Precomputed ``_can_manage_defense`` for ``viewer`` and the
+            member's defense; when None it is resolved here.
 
     Returns:
         dict[str, Any]: Member payload with optional evaluation field.
     """
+    if viewer_can_manage is None:
+        viewer_can_manage = isinstance(viewer, User) and _can_manage_defense(viewer, member.defense.thesis_id)
+    is_viewer_member = viewer is not None and _member_belongs_to_principal(member, viewer)
+    can_see_availability = viewer_can_manage or is_viewer_member
     payload: dict[str, Any] = {
         "id": str(member.pk),
         "role": member.role,
@@ -261,13 +271,10 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "conflictReason": member.conflict_reason if member.has_conflict else "",
         "isInstitutional": member.institutional_member_id is not None,
         "avatarUrl": user_avatar_url(member.institutional_member) if member.institutional_member_id else None,
-        "availabilityStatus": member.availability_status,
-        "availabilityStatusLabel": AvailabilityStatus(member.availability_status).label,
-        "availabilityRespondedAt": member.availability_responded_at.isoformat() if member.availability_responded_at else None,
-        "availabilityNote": member.availability_note,
         "createdAt": member.created_at.isoformat(),
         "evaluation": None,
     }
+    payload.update(_member_availability_payload(member, can_see_availability))
 
     can_see_eval = False
     if viewer is not None:
@@ -293,6 +300,29 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
             pass
 
     return payload
+
+
+def _member_availability_payload(member: DefenseMember, visible: bool) -> dict[str, Any]:
+    """
+    Serialize a member's availability answer, or nulls when the viewer may not see it.
+
+    Args:
+        member: Committee member.
+        visible: Whether the viewer manages the defense or is this member.
+
+    Returns:
+        dict[str, Any]: ``availabilityStatus``, ``availabilityStatusLabel``,
+        ``availabilityRespondedAt`` and ``availabilityNote``.
+    """
+    if not visible:
+        return {"availabilityStatus": None, "availabilityStatusLabel": None, "availabilityRespondedAt": None, "availabilityNote": None}
+    responded_at = member.availability_responded_at
+    return {
+        "availabilityStatus": member.availability_status,
+        "availabilityStatusLabel": AvailabilityStatus(member.availability_status).label,
+        "availabilityRespondedAt": responded_at.isoformat() if responded_at else None,
+        "availabilityNote": member.availability_note,
+    }
 
 
 def _has_schedule_overlap(defense: Defense, user_id: Any) -> bool:
@@ -550,26 +580,33 @@ def pending_availability_members(defense: Defense) -> list[DefenseMember]:
     return list(evaluating_members.exclude(availability_status=AvailabilityStatus.CONFIRMED).order_by("created_at"))
 
 
-def defense_availability_summary(defense: Defense) -> dict[str, Any]:
+def defense_availability_summary(defense: Defense, include_pending_confirmations: bool) -> dict[str, Any]:
     """
     Summarize committee availability for the defense detail payload.
 
     ``allMembersConfirmed`` is True only when the defense has at least one
-    non-alternate member and all of them confirmed.
+    non-alternate member and all of them confirmed. It is returned to every viewer,
+    while ``pendingConfirmations`` names who has not answered and is reserved for
+    viewers who manage the defense.
 
     Args:
         defense: Defense session.
+        include_pending_confirmations: Whether the viewer may see ``pendingConfirmations``
+            (``canManage``); when False the key is null.
 
     Returns:
         dict[str, Any]: ``allMembersConfirmed`` and ``pendingConfirmations``.
     """
     pending_members = pending_availability_members(defense)
     has_evaluating_members = defense.members.exclude(role=CommitteeRole.ALTERNATE).exists()
+    all_members_confirmed = has_evaluating_members and not pending_members
+    if not include_pending_confirmations:
+        return {"allMembersConfirmed": all_members_confirmed, "pendingConfirmations": None}
     pending_confirmations = [
         {"memberId": str(member.pk), "name": member.name, "role": member.role, "roleLabel": CommitteeRole(member.role).label, "availabilityStatus": member.availability_status}
         for member in pending_members
     ]
-    return {"allMembersConfirmed": has_evaluating_members and not pending_members, "pendingConfirmations": pending_confirmations}
+    return {"allMembersConfirmed": all_members_confirmed, "pendingConfirmations": pending_confirmations}
 
 
 def _member_belongs_to_principal(member: DefenseMember, principal: User | ExternalInvitationPrincipal) -> bool:

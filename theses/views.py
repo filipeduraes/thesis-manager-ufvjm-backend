@@ -1006,8 +1006,9 @@ class DefenseListCreateView(APIView):
             Response: List of defense payloads.
         """
         thesis = _scoped_thesis(request.user, thesis_id)
-        defenses = Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation").order_by("-scheduled_datetime")
-        return Response({"defenses": [defense_payload(d, viewer=request.user) for d in defenses]})
+        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation").order_by("-scheduled_datetime"))
+        viewer_context = defense_viewer_context_for(defenses, request.user)
+        return Response({"defenses": [defense_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in defenses]})
 
     def post(self, request, thesis_id) -> Response:
         """
@@ -1055,9 +1056,9 @@ class DefenseDetailView(APIView):
         viewer_context = defense_viewer_context_for([defense], request.user)
         detail_payload = defense_payload(defense, viewer=request.user, viewer_context=viewer_context)
         detail_payload["statusHistory"] = defense_status_history_payload(defense)
-        detail_payload.update(defense_availability_summary(defense))
-        detail_payload["viewerMembership"] = viewer_membership_payload(defense, request.user)
         viewer_permissions = viewer_context.permissions_for(defense)
+        detail_payload.update(defense_availability_summary(defense, include_pending_confirmations=viewer_permissions.can_manage))
+        detail_payload["viewerMembership"] = viewer_membership_payload(defense, request.user)
         detail_payload["viewerPermissions"] = viewer_permissions.to_payload()
         return Response({"defense": detail_payload})
 
