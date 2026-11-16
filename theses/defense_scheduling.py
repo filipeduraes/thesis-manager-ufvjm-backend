@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.validators import URLValidator
 from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
@@ -22,6 +23,32 @@ from theses.services import purge_thesis_versions, user_is_admin
 logger = logging.getLogger(__name__)
 
 AUTO_CLOSE_REASON = "Resultado calculado automaticamente após a última avaliação."
+REMOTE_LOCATION_ERROR = "Para defesa remota, informe o link da reunião (URL http ou https)."
+MEETING_URL_VALIDATOR = URLValidator(schemes=["http", "https"])
+
+
+def validate_defense_location(modality: str, location: str) -> None:
+    """
+    Validate the defense location for its modality.
+
+    Remote defenses need a meeting link (http/https URL); in-person defenses keep
+    free-text locations.
+
+    Args:
+        modality: DefenseModality code.
+        location: Stripped location value.
+
+    Raises:
+        ValidationError: When a remote defense has no valid http(s) link (key ``location``).
+    """
+    if modality != DefenseModality.REMOTE:
+        return
+    if not location:
+        raise ValidationError({"location": REMOTE_LOCATION_ERROR})
+    try:
+        MEETING_URL_VALIDATOR(location)
+    except ValidationError as exc:
+        raise ValidationError({"location": REMOTE_LOCATION_ERROR}) from exc
 
 
 def record_defense_status_change(defense: Defense, previous_status: str, changed_by: User | None, reason: str) -> DefenseStatusHistory:
@@ -90,7 +117,8 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
 
     Raises:
         PermissionDenied: When the actor is not authorized to schedule this defense.
-        ValidationError: When the thesis status or active defense constraint is violated.
+        ValidationError: When the thesis status or active defense constraint is violated,
+            or a remote defense has no valid http(s) meeting link.
     """
     if not _can_manage_defense(actor, thesis.pk):
         raise PermissionDenied()
@@ -102,13 +130,15 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         raise ValidationError("Esta monografia já possui uma defesa ativa (agendada ou em andamento).")
     if modality not in DefenseModality.values:
         raise ValidationError("Modalidade de defesa inválida.")
+    clean_location = location.strip()
+    validate_defense_location(modality, clean_location)
 
     defense = Defense.objects.create(
         thesis=thesis,
         scheduled_datetime=scheduled_datetime,
         duration_minutes=duration_minutes,
         modality=modality,
-        location=location.strip(),
+        location=clean_location,
         notes=notes.strip(),
         status=DefenseStatus.SCHEDULED,
         created_by=actor,
@@ -222,7 +252,9 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
 
     When the date, time or duration actually changes (a value different from the
     current one), every member's availability answer is reset to PENDING, because
-    the previous answers referred to another slot.
+    the previous answers referred to another slot. The remote meeting link is
+    validated only when modality or location change, so older defenses with a
+    non-conforming location stay editable in their other fields.
 
     Args:
         defense: Defense session to update.
@@ -241,7 +273,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         PermissionDenied: When the actor is not authorized to update this defense.
         ValidationError: When the defense is not in SCHEDULED status, the modality is
             invalid, or a new date, time or duration overlaps another active defense of
-            an institutional committee member.
+            an institutional committee member, or a changed modality/location leaves a
+            remote defense without a valid http(s) meeting link.
     """
     if not _can_manage_defense(actor, defense.thesis_id):
         raise PermissionDenied()
@@ -251,6 +284,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
 
     datetime_changed = scheduled_datetime is not None and scheduled_datetime != defense.scheduled_datetime
     duration_changed = duration_minutes is not None and duration_minutes != defense.duration_minutes
+    modality_changed = modality is not None and modality != defense.modality
+    location_changed = location is not None and location.strip() != defense.location
     extra_fields: list[str] = []
     if scheduled_datetime is not None:
         defense.scheduled_datetime = scheduled_datetime
@@ -266,6 +301,9 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         defense.location = location.strip()
     if notes is not None:
         defense.notes = notes.strip()
+    # Só valida o local quando modalidade ou local mudam, para não travar bancas antigas fora do padrão.
+    if modality_changed or location_changed:
+        validate_defense_location(defense.modality, defense.location)
     if scheduled_datetime is not None or duration_minutes is not None:
         check_committee_schedule_conflicts(defense)
     defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"] + extra_fields)
