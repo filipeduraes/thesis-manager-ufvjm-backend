@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
-from theses.defense_committee import _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
+from theses.defense_committee import DefenseViewerContext, _can_manage_defense, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import purge_thesis_versions, user_is_admin
 
@@ -718,7 +718,7 @@ def defense_result_code(defense: Defense) -> str | None:
     return None
 
 
-def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
+def defense_payload(defense: Defense, viewer: Any = None, viewer_context: DefenseViewerContext | None = None) -> dict[str, Any]:
     """
     Serialize a defense session with its committee members.
 
@@ -726,13 +726,18 @@ def defense_payload(defense: Defense, viewer: Any = None) -> dict[str, Any]:
         defense: Defense session.
         viewer: Authenticated user or ExternalInvitationPrincipal used to decide
             evaluation visibility per member (passed through to defense_member_payload).
+        viewer_context: Viewer rights already resolved for this defense's thesis
+            (``build_defense_viewer_context``); listings pass it to avoid queries per defense.
 
     Returns:
         dict[str, Any]: Defense payload including members list and ``result``/``resultLabel``
         (null until the defense is COMPLETED).
     """
     result_code = defense_result_code(defense)
-    viewer_is_admin = isinstance(viewer, User) and user_is_admin(viewer)
+    if viewer_context is not None:
+        viewer_is_admin = viewer_context.is_admin
+    else:
+        viewer_is_admin = isinstance(viewer, User) and user_is_admin(viewer)
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),

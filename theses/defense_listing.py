@@ -16,7 +16,7 @@ from django.utils import timezone
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import User
 from accounts.services import google_social_accounts_prefetch
-from theses.defense_committee import coordinator_managed_theses
+from theses.defense_committee import DefenseViewerContext, build_defense_viewer_context, coordinator_managed_theses
 from theses.defense_scheduling import defense_close_entries_prefetch, defense_payload, sync_defense_status
 from theses.models import ACTIVE_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_coordinator
@@ -320,22 +320,39 @@ def _thesis_main_author(thesis: Thesis) -> User | None:
     return None
 
 
-def defense_list_payload(defense: Defense, viewer: User) -> dict[str, Any]:
+def defense_viewer_context_for(defenses: list[Defense], viewer: User | ExternalInvitationPrincipal) -> DefenseViewerContext:
+    """
+    Resolve the viewer's management rights once for a page of defenses.
+
+    Args:
+        defenses: Defenses about to be serialized.
+        viewer: Institutional user or external invitation principal.
+
+    Returns:
+        DefenseViewerContext: Context covering every thesis of ``defenses``.
+    """
+    thesis_ids = {defense.thesis_id for defense in defenses}
+    return build_defense_viewer_context(viewer, thesis_ids)
+
+
+def defense_list_payload(defense: Defense, viewer: User, viewer_context: DefenseViewerContext) -> dict[str, Any]:
     """
     Serialize a defense for the committee listing screen.
 
-    Extends ``defense_payload`` with thesis summary fields and the viewer's own
-    membership state, so the frontend can render the list without extra requests.
+    Extends ``defense_payload`` with thesis summary fields, the viewer's own
+    membership state and ``viewerPermissions``, so the frontend can render the
+    list without extra requests.
 
     Args:
         defense: Defense loaded through ``defenses_visible_to``.
         viewer: Authenticated institutional user.
+        viewer_context: Viewer rights resolved once for the page (``defense_viewer_context_for``).
 
     Returns:
         dict[str, Any]: Defense payload plus ``thesisTitle``, ``thesisReferenceCode``,
-        ``student``, ``advisor`` and ``viewerMembership``.
+        ``student``, ``advisor``, ``viewerMembership`` and ``viewerPermissions``.
     """
-    payload = defense_payload(defense, viewer=viewer)
+    payload = defense_payload(defense, viewer=viewer, viewer_context=viewer_context)
     thesis = defense.thesis
     main_author = _thesis_main_author(thesis)
     payload["thesisTitle"] = thesis.title
@@ -343,4 +360,6 @@ def defense_list_payload(defense: Defense, viewer: User) -> dict[str, Any]:
     payload["student"] = user_brief(main_author)
     payload["advisor"] = user_brief(thesis.advisor)
     payload["viewerMembership"] = viewer_membership_payload(defense, viewer)
+    viewer_permissions = viewer_context.permissions_for(defense)
+    payload["viewerPermissions"] = viewer_permissions.to_payload()
     return payload

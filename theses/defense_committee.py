@@ -4,8 +4,11 @@ Committee member management services for thesis defense sessions.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import transaction
@@ -37,13 +40,163 @@ def coordinator_managed_theses(coordinator: User) -> QuerySet[Thesis]:
     return theses_visible_to(coordinator).exclude(authors__author_id=coordinator.pk)
 
 
-def _can_manage_defense(actor: User, thesis_id) -> bool:
+def _manageable_thesis_ids(actor: User, thesis_ids: Iterable[UUID]) -> frozenset[UUID]:
+    """
+    Return which of the given theses a non-admin actor may manage, in at most one query per role.
+
+    Coordinators manage theses of the courses they coordinate
+    (``coordinator_managed_theses``) and advisors manage only theses they advise.
+    Administrators are handled by the caller, since they manage every thesis.
+
+    Args:
+        actor: Authenticated institutional user who is not an administrator.
+        thesis_ids: Primary keys of the candidate theses.
+
+    Returns:
+        frozenset[UUID]: Subset of ``thesis_ids`` the actor may manage.
+    """
+    candidate_ids: list[UUID] = list(thesis_ids)
+    manageable_ids: set[UUID] = set()
+    if not candidate_ids:
+        return frozenset()
+    if user_is_coordinator(actor):
+        coordinator_theses = coordinator_managed_theses(actor).filter(pk__in=candidate_ids)
+        manageable_ids.update(coordinator_theses.values_list("pk", flat=True))
+    if user_is_advisor(actor):
+        advised_theses = Thesis.objects.filter(pk__in=candidate_ids, advisor_id=actor.pk)
+        manageable_ids.update(advised_theses.values_list("pk", flat=True))
+    return frozenset(manageable_ids)
+
+
+@dataclass(frozen=True)
+class DefenseViewerPermissions:
+    """
+    Actions the request principal may perform on one defense, exposed as ``viewerPermissions``.
+
+    Each flag mirrors the permission and status checks of the matching service, so
+    the frontend can hide actions that the API would reject. Business preconditions
+    that do not depend on the viewer (availability confirmations for start, submitted
+    evaluations for close) are not included: the payload exposes them separately.
+
+    Attributes:
+        can_manage: ``_can_manage_defense`` for the defense thesis.
+        can_edit: May update scheduling details (``update_defense``: SCHEDULED).
+        can_cancel: May cancel (``cancel_defense``: SCHEDULED).
+        can_start: May start manually (``start_defense``: SCHEDULED).
+        can_close: May close manually (``close_defense``: IN_PROGRESS).
+        can_revert: May revert the status (``revert_defense_status``: admin, IN_PROGRESS or CANCELLED).
+        can_manage_members: May add committee members (SCHEDULED or IN_PROGRESS).
+    """
+
+    can_manage: bool = False
+    can_edit: bool = False
+    can_cancel: bool = False
+    can_start: bool = False
+    can_close: bool = False
+    can_revert: bool = False
+    can_manage_members: bool = False
+
+    def to_payload(self) -> dict[str, bool]:
+        """
+        Serialize the permissions with the API camelCase names.
+
+        Returns:
+            dict[str, bool]: ``canManage``, ``canEdit``, ``canCancel``, ``canStart``,
+            ``canClose``, ``canRevert`` and ``canManageMembers``.
+        """
+        return {
+            "canManage": self.can_manage,
+            "canEdit": self.can_edit,
+            "canCancel": self.can_cancel,
+            "canStart": self.can_start,
+            "canClose": self.can_close,
+            "canRevert": self.can_revert,
+            "canManageMembers": self.can_manage_members,
+        }
+
+
+REVERTIBLE_DEFENSE_STATUSES: tuple[str, ...] = (DefenseStatus.IN_PROGRESS, DefenseStatus.CANCELLED)
+
+
+@dataclass(frozen=True)
+class DefenseViewerContext:
+    """
+    Viewer authorization facts resolved once per request and reused for every defense.
+
+    Attributes:
+        is_admin: Whether the viewer is an active administrator (``user_is_admin``).
+        manageable_thesis_ids: Theses a non-admin viewer may manage (see ``_manageable_thesis_ids``).
+    """
+
+    is_admin: bool = False
+    manageable_thesis_ids: frozenset[UUID] = frozenset()
+
+    def can_manage(self, thesis_id: UUID) -> bool:
+        """
+        Return whether the viewer may manage defenses of the given thesis.
+
+        Args:
+            thesis_id: Primary key of a thesis included when the context was built.
+
+        Returns:
+            bool: True for administrators or when the thesis is in the manageable set.
+        """
+        return self.is_admin or thesis_id in self.manageable_thesis_ids
+
+    def permissions_for(self, defense: Defense) -> DefenseViewerPermissions:
+        """
+        Compute the viewer permissions for a defense without querying the database.
+
+        Args:
+            defense: Defense whose ``thesis_id`` was included when the context was built.
+
+        Returns:
+            DefenseViewerPermissions: Flags derived from management rights and the current status.
+        """
+        can_manage = self.can_manage(defense.thesis_id)
+        is_scheduled = defense.status == DefenseStatus.SCHEDULED
+        return DefenseViewerPermissions(
+            can_manage=can_manage,
+            can_edit=can_manage and is_scheduled,
+            can_cancel=can_manage and is_scheduled,
+            can_start=can_manage and is_scheduled,
+            can_close=can_manage and defense.status == DefenseStatus.IN_PROGRESS,
+            can_revert=self.is_admin and defense.status in REVERTIBLE_DEFENSE_STATUSES,
+            can_manage_members=can_manage and defense.status in ACTIVE_DEFENSE_STATUSES,
+        )
+
+
+def build_defense_viewer_context(viewer: User | ExternalInvitationPrincipal | None, thesis_ids: Iterable[UUID]) -> DefenseViewerContext:
+    """
+    Resolve the viewer's management rights for a batch of theses.
+
+    Listings build one context for the whole page so that permissions cost a fixed
+    number of queries instead of one lookup per defense.
+
+    Args:
+        viewer: Institutional user, external invitation principal, or None.
+        thesis_ids: Primary keys of the theses whose defenses will be serialized.
+
+    Returns:
+        DefenseViewerContext: Empty context (no rights) for external sessions and anonymous viewers.
+    """
+    if not isinstance(viewer, User) or not viewer.is_authenticated:
+        # Sessões de convite externo nunca gerenciam bancas.
+        return DefenseViewerContext()
+    if user_is_admin(viewer):
+        return DefenseViewerContext(is_admin=True)
+    return DefenseViewerContext(manageable_thesis_ids=_manageable_thesis_ids(viewer, thesis_ids))
+
+
+def _can_manage_defense(actor: User, thesis_id: UUID) -> bool:
     """
     Return whether the actor may schedule or manage defenses for a thesis.
 
     Administrators always have permission. Coordinators may manage defenses of
     theses from the courses they coordinate (``coordinator_managed_theses``). An
     advisor may manage defenses only for the thesis where they are the assigned advisor.
+    Delegates to ``build_defense_viewer_context`` so that services and the
+    ``viewerPermissions`` payload share one rule.
 
     Args:
         actor: Authenticated institutional user.
@@ -52,18 +205,8 @@ def _can_manage_defense(actor: User, thesis_id) -> bool:
     Returns:
         bool: True when the actor is authorized.
     """
-    if not isinstance(actor, User):
-        # Sessões de convite externo nunca gerenciam bancas.
-        return False
-    if user_is_admin(actor):
-        return True
-    if user_is_coordinator(actor) and coordinator_managed_theses(actor).filter(pk=thesis_id).exists():
-        return True
-    if not user_is_advisor(actor):
-        return False
-    # Orientador só pode gerenciar a própria tese
-    advisor_id = Thesis.objects.values_list("advisor_id", flat=True).get(pk=thesis_id)
-    return advisor_id == actor.pk
+    viewer_context = build_defense_viewer_context(actor, [thesis_id])
+    return viewer_context.can_manage(thesis_id)
 
 
 def resolve_committee_member(defense: Defense, principal: User | ExternalInvitationPrincipal) -> DefenseMember | None:
