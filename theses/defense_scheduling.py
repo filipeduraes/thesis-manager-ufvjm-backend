@@ -19,6 +19,7 @@ from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
+from theses.events import record_defense_completed, record_defense_scheduled
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import purge_thesis_versions, thesis_summary_payload, user_is_admin
 
@@ -159,6 +160,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         reason="Defesa agendada.",
         metadata={"defenseId": str(defense.pk)},
     )
+    record_defense_scheduled(defense)
     record_audit(
         action=AuditAction.SCHEDULE,
         entity_type="Defense",
@@ -560,6 +562,8 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
         actor_user=closed_by,
         metadata={"event": "DEFENSE_CLOSED", "result": result, "thesisNewStatus": new_thesis_status, "trigger": "AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"},
     )
+    # Dentro do mesmo savepoint do encerramento: se o auto-close falhar, o evento é desfeito junto.
+    record_defense_completed(defense, result, new_thesis_status, automatic)
     return defense
 
 

@@ -16,6 +16,7 @@ from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
 from accounts.services import record_audit
 from theses.defense_scheduling import auto_close_after_last_evaluation
+from theses.events import record_defense_evaluation_recorded
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus
 
 
@@ -139,10 +140,11 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             raise ValidationError("A nota deve ser entre 0,00 e 10,00.")
 
     with transaction.atomic():
-        evaluation, _ = DefenseMemberEvaluation.objects.update_or_create(
+        evaluation, created = DefenseMemberEvaluation.objects.update_or_create(
             member=member,
             defaults={"decision": decision, "score": score_value, "notes": notes.strip()},
         )
+        record_defense_evaluation_recorded(defense, member, is_update=not created)
         record_audit(
             action=AuditAction.EVALUATE,
             entity_type="Defense",

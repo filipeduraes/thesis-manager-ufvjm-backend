@@ -23,6 +23,7 @@ from academic.services import active_course_assignment
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
+from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted
 from theses.models import (
     APPROVED_DEFENSE_STATUSES,
     DEFENSE_RESULT_STATUSES,
@@ -813,6 +814,7 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
     thesis.submitted_at = now
     thesis.save(update_fields=["status", "submitted_at", "updated_at"])
     _add_status_history(thesis, previous_status, ThesisStatus.SUBMITTED, user, "Monografia submetida para avaliação do orientador.")
+    record_thesis_submitted(thesis, current.version_number)
     _audit_thesis(
         AuditAction.UPDATE,
         thesis,
@@ -1037,6 +1039,7 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
     thesis.status = new_status
     thesis.save(update_fields=["status", "updated_at"])
     _add_status_history(thesis, previous_status, new_status, user, reason, metadata={"defenseResult": result})
+    record_thesis_defense_result_recorded(thesis, result, new_status)
     if new_status in APPROVED_DEFENSE_STATUSES:
         purge_thesis_versions(thesis, actor=user, request=request)
     _audit_thesis(
@@ -1090,6 +1093,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     thesis.published_at = timezone.now()
     thesis.save(update_fields=["status", "is_public", "published_at", "updated_at"])
     _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, user, "Monografia publicada no repositório institucional.")
+    record_thesis_published(thesis)
     purge_thesis_versions(thesis, actor=user, request=request)
     _audit_thesis(
         AuditAction.PUBLISH,
