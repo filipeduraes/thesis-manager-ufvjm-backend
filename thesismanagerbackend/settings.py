@@ -207,6 +207,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
         "reports": "60/min",
+        "reports_export": "10/min",
         "session": "120/min",
         "thesis": "120/min",
         "thesis_upload": "30/hour",
@@ -223,6 +224,9 @@ CORS_ALLOWED_ORIGINS = env.list(
     default=[FRONTEND_URL],
 )
 CORS_ALLOW_CREDENTIALS = True
+# Sem isso o navegador esconde o nome do arquivo dos downloads (PDF de relatórios,
+# CSV de auditoria) do frontend, que roda em outra origem.
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 CSRF_TRUSTED_ORIGINS = env.list(
     "CSRF_TRUSTED_ORIGINS",
     default=[FRONTEND_URL],

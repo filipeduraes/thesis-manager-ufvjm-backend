@@ -13,6 +13,7 @@ from typing import Any, TypedDict
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from django.core.cache import cache
 from django.db.models import Avg, CharField, Count, DurationField, ExpressionWrapper, F, OuterRef, Q, QuerySet, Subquery
 from django.db.models.fields.json import KT
 from django.db.models.functions import Cast, ExtractYear
@@ -446,3 +447,26 @@ def build_overview(scope: ReportScope, filters: ReportFilters) -> dict[str, Any]
         "byDefenseYear": _by_defense_year(defenses),
         "options": _options(scope),
     }
+
+
+def get_overview_payload(scope: ReportScope, filters: ReportFilters) -> dict[str, Any]:
+    """
+    Return the overview payload from the cache, computing and caching it on a miss.
+
+    Shared by the JSON overview and the PDF export so both show the same figures
+    within the cache window.
+
+    Args:
+        scope: Caller scope from ``resolve_report_scope``.
+        filters: Validated filters.
+
+    Returns:
+        dict[str, Any]: camelCase payload of ``GET /api/v1/reports/overview``.
+    """
+    cache_key = overview_cache_key(scope, filters)
+    cached_payload: dict[str, Any] | None = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+    payload = build_overview(scope, filters)
+    cache.set(cache_key, payload, REPORT_CACHE_TTL_SECONDS)
+    return payload

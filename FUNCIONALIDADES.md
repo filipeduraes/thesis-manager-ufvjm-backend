@@ -142,6 +142,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Item | Status | Observações |
 |---|---|---|
 | Relatórios administrativos | **Implementado** | `GET /api/v1/reports/overview` (app `reports`): resumo, `byCourse`, `byAdvisor`, `byDefenseYear` e `options`, com filtros `courseId`, `advisorId`, `year` (ano da banca, America/Sao_Paulo) e `scope=coordinated`. Admin vê todos os cursos; coordenador vê só os cursos vinculados (FK `coordinator`, `coordinator_email` ou `UserCourseAssignment` ativo); orientador/aluno/externo recebem 403. Agregação no banco (`Count`/`Avg` com `GROUP BY`), cache Redis de 60 s (`reports:overview:*`) e throttle `reports` (60/min). Taxa de aprovação **por banca concluída**: (aprovadas + com ressalvas) / bancas com resultado. Tempo médio: da última submissão (`thesis_status_history` `SUBMITTED`) anterior à banca até `scheduled_datetime`. O resultado vem de `thesis_status_history.metadata` (`defenseId`/`defenseResult`, gravados por `_finalize_defense`); `Defense` não tem coluna `result` (diferente do `.puml`). |
+| Exportação de relatórios em PDF | **Implementado** | `GET /api/v1/reports/overview/pdf` (app `reports`, `reports/pdf.py`, biblioteca ReportLab). Mesmos filtros, permissões, escopo e payload em cache de `reports/overview`; o PDF só formata os números calculados pelo backend. Conteúdo em português: título, data/hora da geração (America/Sao_Paulo), escopo e filtros por nome, resumo (com "Taxa de aprovação em bancas") e tabelas por curso, orientador e ano de defesa. Arquivo `relatorio-tcc-AAAAMMDD-HHMM.pdf` (`attachment`, `no-store`); erros sempre em JSON. Throttle próprio `reports_export` (10/min). Cada exportação gera `audit_log` `DOWNLOAD` (`ReportOverview`) só com identificadores dos filtros. Exportação CSV e histórico em `report_execution` continuam pendentes. |
 | Dashboards frontend | **Implementado** | Telas iniciais de aluno, orientador, coordenador e administrador usam dados reais; coordenação e administração consomem `reports/overview`. |
 
 ## 11. Frontend (repositório separado, resumo de integração)
@@ -153,7 +154,9 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Área admin: usuários/cursos/auditoria | **Implementado** | Integrada aos endpoints administrativos; multi-papéis e navegação combinada. |
 | Criação de convite externo | **Implementado** | Admin e tela de bancas; convite da banca vinculado ao membro, com token devolvido uma vez e regeneração. |
 | Fluxos de TCC/orientação | **Implementado** | Submissão do aluno, acompanhamento, upload de PDF/versões/documentos, parecer do orientador (aprovar/ajustes/reprovar), leitor de PDF com zoom/download, resultado da banca e publicação. |
-| Fluxos de banca/avaliação/repositório/relatórios | **Parcial/Pendente** | Agendamento de banca, avaliação individual e relatórios dependem de domínio/backend pendente; repositório público possui endpoint, mas a tela do frontend ainda usa dados mock. |
+| Fluxos de banca/avaliação | **Implementado** | Agendamento (`DefenseScheduling`), gestão da banca (`DefenseCommittee`), avaliação individual (`DefenseEvaluation`) e avaliação externa (`ExternalEvaluation`) consomem os endpoints de `/api/v1/defenses`. |
+| Relatórios e dashboards | **Implementado** | `ReportsView` e os dashboards de coordenação/administração consomem `GET /api/v1/reports/overview`; o botão "Exportar PDF" baixa `GET /api/v1/reports/overview/pdf` com os filtros atuais. |
+| Repositório público | **Parcial** | O backend possui os endpoints públicos, mas a tela do frontend (`PublicRepository`) ainda usa dados mock. |
 
 ## 12. Endpoints de TCC implementados
 
@@ -201,7 +204,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 1. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
 2. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
-3. **Relatórios**: exportação (CSV/PDF) e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview`.
+3. **Relatórios**: exportação CSV e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview` e exportados em PDF por `GET /api/v1/reports/overview/pdf`.
 4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
 5. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
 6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
