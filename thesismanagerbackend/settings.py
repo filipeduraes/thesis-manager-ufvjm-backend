@@ -293,6 +293,40 @@ EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 
 
+# Eventos assíncronos (transactional outbox + RabbitMQ)
+# A URL do broker contém credenciais: nunca registrar em log nem em `last_error`.
+RABBITMQ_URL = env("RABBITMQ_URL", default="")
+EVENTS_EXCHANGE = env("EVENTS_EXCHANGE", default="thesis.events")
+OUTBOX_BATCH_SIZE = env.int("OUTBOX_BATCH_SIZE", default=50)
+OUTBOX_POLL_INTERVAL_SECONDS = env.float("OUTBOX_POLL_INTERVAL_SECONDS", default=2.0)
+OUTBOX_MAX_ATTEMPTS = env.int("OUTBOX_MAX_ATTEMPTS", default=10)
+OUTBOX_RETRY_BASE_SECONDS = env.int("OUTBOX_RETRY_BASE_SECONDS", default=5)
+OUTBOX_RETRY_MAX_SECONDS = env.int("OUTBOX_RETRY_MAX_SECONDS", default=900)
+NOTIFICATIONS_QUEUE = env("NOTIFICATIONS_QUEUE", default="notifications.thesis-events")
+NOTIFICATIONS_PREFETCH = env.int("NOTIFICATIONS_PREFETCH", default=10)
+
+
+# Logging
+# Os workers de eventos rodam fora do runserver e precisam de saída em stdout.
+# Apenas os apps de eventos são configurados para não duplicar os logs do Django.
+LOG_LEVEL = env("LOG_LEVEL", default="INFO")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "standard"},
+    },
+    "loggers": {
+        "events": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "notifications": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+    },
+}
+
+
 # Reforço de segurança (habilitar em produção pelas variáveis de ambiente)
 
 SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=False)
