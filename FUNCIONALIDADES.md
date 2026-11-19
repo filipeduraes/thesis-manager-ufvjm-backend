@@ -141,8 +141,8 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 | Item | Status | Observações |
 |---|---|---|
-| Relatórios administrativos | **Pendente** | TCCs por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa. Cálculo deve ser no backend. |
-| Dashboards frontend | **Parcial** | Dashboard do aluno (status, progresso, próxima ação, pareceres e atividades) e do orientador (fila de revisão e orientandos) usam dados reais de TCC. Demais áreas (coordenação/admin) ainda usam dados mock em parte. |
+| Relatórios administrativos | **Implementado** | `GET /api/v1/reports/overview` (app `reports`): resumo, `byCourse`, `byAdvisor`, `byDefenseYear` e `options`, com filtros `courseId`, `advisorId`, `year` (ano da banca, America/Sao_Paulo) e `scope=coordinated`. Admin vê todos os cursos; coordenador vê só os cursos vinculados (FK `coordinator`, `coordinator_email` ou `UserCourseAssignment` ativo); orientador/aluno/externo recebem 403. Agregação no banco (`Count`/`Avg` com `GROUP BY`), cache Redis de 60 s (`reports:overview:*`) e throttle `reports` (60/min). Taxa de aprovação **por banca concluída**: (aprovadas + com ressalvas) / bancas com resultado. Tempo médio: da última submissão (`thesis_status_history` `SUBMITTED`) anterior à banca até `scheduled_datetime`. O resultado vem de `thesis_status_history.metadata` (`defenseId`/`defenseResult`, gravados por `_finalize_defense`); `Defense` não tem coluna `result` (diferente do `.puml`). |
+| Dashboards frontend | **Implementado** | Telas iniciais de aluno, orientador, coordenador e administrador usam dados reais; coordenação e administração consomem `reports/overview`. |
 
 ## 11. Frontend (repositório separado, resumo de integração)
 
@@ -201,7 +201,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 1. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
 2. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
-3. **Relatórios** calculados no backend (por curso/orientador/ano, taxa de aprovação, tempo médio submissão–defesa).
+3. **Relatórios**: exportação (CSV/PDF) e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview`.
 4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
 5. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
 6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
@@ -214,7 +214,6 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 
 - **Repositório público incompleto para anônimos**: a listagem `GET /api/v1/public/theses` devolve `currentFile.downloadUrl`/`previewUrl` apontando para `/api/v1/theses/.../download`, que exige usuário autenticado (anônimo recebe 401). O detalhe público (`GET /api/v1/public/theses/<id>`) aponta para o endpoint anônimo. Uma correção mínima foi desenhada e discutida, mas não foi aplicada.
 - **Sem endpoint de filtros públicos**: não existe hoje rota para listar cursos/orientadores/anos/palavras-chave presentes em publicados nem cache versionado; a busca pública não é cacheada.
-- **Sem relatórios no backend**: `GET /api/v1/reports/overview` não existe; as telas de dashboards de coordenação e administração continuam com dados mock no frontend.
 - **Sem leitura de detalhe da tese para membro institucional da banca**: `theses_visible_to` e `user_can_access_thesis` não incluem o membro da comissão; ele precisa de acesso à monografia para avaliar, mas a auditoria não decidiu a regra.
 - **N+1 nas listagens**: a serialização aciona consultas por autor, palavra-chave e arquivo atual por monografia/banca.
 - **Sem rastreamento de upload em andamento** nem consolidação de rate limiting em Redis.

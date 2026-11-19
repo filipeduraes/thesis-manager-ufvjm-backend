@@ -248,14 +248,37 @@ def theses_visible_to(user: User, base_queryset: QuerySet[Thesis] | None = None)
     if ProfileRole.STUDENT in roles:
         visibility |= Q(authors__author_id=user.pk)
     if ProfileRole.COORDINATOR in roles:
-        visibility |= Q(course__coordinator_id=user.pk)
-        visibility |= Q(course__coordinator_email__iexact=user.email)
-        visibility |= Q(
-            course__user_assignments__user_id=user.pk,
-            course__user_assignments__is_active=True,
-            course__user_assignments__revoked_at__isnull=True,
-        )
+        visibility |= coordinated_courses_filter(user, prefix="course__")
     return queryset.filter(visibility).distinct()
+
+
+def coordinated_courses_filter(user: User, prefix: str = "") -> Q:
+    """
+    Build the filter matching the courses a user coordinates.
+
+    A course counts as coordinated through its ``coordinator`` FK, its
+    ``coordinator_email`` (case-insensitive, for coordinators registered before
+    their first login) or an active ``UserCourseAssignment``. Callers must check
+    the COORDINATOR role themselves; the filter only encodes the course link.
+
+    Args:
+        user: Institutional user.
+        prefix: Lookup path from the queried model to ``Course`` (for example
+            ``"course__"`` for theses, ``""`` for courses).
+
+    Returns:
+        Q: Filter combining the three course-link rules.
+    """
+    by_coordinator = Q(**{f"{prefix}coordinator_id": user.pk})
+    by_email = Q(**{f"{prefix}coordinator_email__iexact": user.email})
+    by_assignment = Q(
+        **{
+            f"{prefix}user_assignments__user_id": user.pk,
+            f"{prefix}user_assignments__is_active": True,
+            f"{prefix}user_assignments__revoked_at__isnull": True,
+        }
+    )
+    return by_coordinator | by_email | by_assignment
 
 
 def thesis_list_queryset() -> QuerySet[Thesis]:

@@ -44,6 +44,7 @@ from theses.serializers import (
 from theses.services import (
     available_advisors,
     available_courses_for_student,
+    coordinated_courses_filter,
     course_brief,
     document_payload,
     get_accessible_thesis,
@@ -189,15 +190,8 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
     elif scope == "authored":
         queryset = queryset.filter(authors__author_id=request.user.pk)
     elif scope == "coordinated":
-        queryset = queryset.filter(
-            Q(course__coordinator_id=request.user.pk)
-            | Q(course__coordinator_email__iexact=request.user.email)
-            | Q(
-                course__user_assignments__user_id=request.user.pk,
-                course__user_assignments__is_active=True,
-                course__user_assignments__revoked_at__isnull=True,
-            )
-        )
+        coordinated_filter = coordinated_courses_filter(request.user, prefix="course__")
+        queryset = queryset.filter(coordinated_filter)
     query = (request.query_params.get("q") or "").strip()
     if query:
         queryset = queryset.filter(

@@ -39,6 +39,7 @@ urlpatterns = [
     path("", include("accounts.urls")),
     path("", include("academic.urls")),
     path("", include("theses.urls")),
+    path("", include("reports.urls")),
 ]
 
 if settings.DEBUG:

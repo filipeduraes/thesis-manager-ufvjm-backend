@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "accounts",
     "academic",
     "theses",
+    "reports",
 ]
 
 MIDDLEWARE = [
@@ -205,6 +206,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
+        "reports": "60/min",
         "session": "120/min",
         "thesis": "120/min",
         "thesis_upload": "30/hour",
