@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "academic",
     "theses",
     "reports",
+    "events",
 ]
 
 MIDDLEWARE = [
