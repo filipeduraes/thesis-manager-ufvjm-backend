@@ -661,6 +661,8 @@ package "Event Bus & Notification Service" #E8FFFF {
     * channel : notification_channel
     * subject : varchar(200)
     * body : text
+    ' Versão HTML já renderizada, para o reenvio mandar exatamente a mesma mensagem
+    body_html : text
     * status : notification_status = PENDING
     * attempts : integer = 0
     priority : smallint = 5

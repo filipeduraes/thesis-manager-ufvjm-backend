@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "theses",
     "reports",
     "events",
+    "notifications",
 ]
 
 MIDDLEWARE = [
