@@ -494,25 +494,19 @@ package "Defense Service" #FFE8F4 {
     * id : uuid <<PK>>
     --
     * thesis_id : uuid <<FK>>
-    * scheduled_by_id : uuid <<FK>>
-    * modality : defense_modality
+    created_by_id : uuid <<FK>>
+    * scheduled_datetime : timestamptz
+    * duration_minutes : smallint = 120
+    * modality : defense_modality = IN_PERSON
+    * location : varchar(500) = ''
+    * notes : text = ''
     * status : defense_status = SCHEDULED
-    * starts_at : timestamptz
-    * ends_at : timestamptz
-    location : varchar(255)
-    meeting_url : varchar(500)
-    meeting_room : varchar(100)
-    result : defense_result
-    final_grade : numeric(4,2)
-    result_calculated_at : timestamptz
-    result_calculated_by_id : uuid <<FK>>
-    minutes_file_id : uuid <<FK>>
-    * created_at : timestamptz = now()
-    * updated_at : timestamptz = now()
-    cancelled_at : timestamptz
-    cancellation_reason : text
     * previous_status : defense_status = ''
     * auto_start_suspended : boolean = false
+    * created_at : timestamptz = now()
+    * updated_at : timestamptz = now()
+    ' location: sala (IN_PERSON) ou link http(s) da reunião (REMOTE)
+    ' Sem coluna de resultado ou nota: o resultado fica em thesis_status_history.metadata (defenseId/defenseResult)
     ' previous_status: status anterior ao cancelamento (vazio se não houver), usado pela reversão do admin
     ' auto_start_suspended: impede a abertura automática pelo horário até reagendar ou iniciar manualmente
   }
@@ -557,9 +551,7 @@ package "Defense Service" #FFE8F4 {
   }
 
   thesis ||--o{ defense
-  users_user ||--o{ defense : "scheduled_by"
-  users_user |o--o{ defense : "result_calculated_by"
-  stored_file |o--o{ defense : "minutes"
+  users_user |o--o{ defense : "created_by"
   defense ||--|{ defense_member
   users_user |o--o{ defense_member
   external_invitation |o--o| defense_member
@@ -799,7 +791,7 @@ note as N_RULES
   - thesis_author: position >=1, UNIQUE(thesis_id, position), <= 5 autores
   - Agendamento requer thesis_review APPROVED na versão CURRENT
   - defense_member: exatamente um entre user_id/external_invitation_id
-  - defense: CHECK(ends_at > starts_at); UNIQUE parcial por thesis com status SCHEDULED
+  - defense: fim = scheduled_datetime + duration_minutes; UNIQUE parcial por thesis com status SCHEDULED ou IN_PROGRESS
   - defense_evaluation: grade BETWEEN 0 AND 10; imutável após locked
   - Resultado calculado apenas após todos membros não-suplentes avaliados
   - PUBLICATION_AUTHORIZATION VALIDATED obrigatório p/ publicação
