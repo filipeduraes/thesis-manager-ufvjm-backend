@@ -315,6 +315,18 @@ package "Academic Registry" #E8FFE8 {
     ' OneToOne com users_user - dados acadêmicos do aluno
   }
 
+  entity academic_user_course_assignment {
+    * id : uuid <<PK>>
+    --
+    * user_id : uuid <<FK>>
+    * course_id : uuid <<FK>>
+    assigned_by_id : uuid <<FK>>
+    * is_active : boolean = true
+    * assigned_at : timestamptz = now()
+    revoked_at : timestamptz
+    ' Modelo UserCourseAssignment. Histórico simples; UNIQUE parcial (user_id) WHERE is_active
+  }
+
   department ||--o{ course
   department ||--o{ professor_profile
   course ||--o{ student_profile
@@ -322,6 +334,9 @@ package "Academic Registry" #E8FFE8 {
   users_user ||--o| student_profile
   users_user |o--o{ course : "coordenador"
   users_user |o--o{ student_profile : "orientador"
+  users_user ||--o{ academic_user_course_assignment : "usuário"
+  course ||--o{ academic_user_course_assignment
+  users_user |o--o{ academic_user_course_assignment : "assigned_by"
 }
 
 ' ============================================================
@@ -496,6 +511,22 @@ package "Defense Service" #FFE8F4 {
     * updated_at : timestamptz = now()
     cancelled_at : timestamptz
     cancellation_reason : text
+    * previous_status : defense_status = ''
+    * auto_start_suspended : boolean = false
+    ' previous_status: status anterior ao cancelamento (vazio se não houver), usado pela reversão do admin
+    ' auto_start_suspended: impede a abertura automática pelo horário até reagendar ou iniciar manualmente
+  }
+
+  entity defense_status_history {
+    * id : uuid <<PK>>
+    --
+    * defense_id : uuid <<FK>>
+    * previous_status : defense_status = ''
+    * new_status : defense_status
+    changed_by_id : uuid <<FK>>
+    * reason : text
+    * created_at : timestamptz = now()
+    ' Imutável. changed_by nulo em transições automáticas
   }
 
   entity defense_member {
@@ -533,6 +564,8 @@ package "Defense Service" #FFE8F4 {
   users_user |o--o{ defense_member
   external_invitation |o--o| defense_member
   defense_member ||--o{ defense_evaluation
+  defense ||--o{ defense_status_history
+  users_user |o--o{ defense_status_history : "changed_by"
 }
 
 ' ============================================================

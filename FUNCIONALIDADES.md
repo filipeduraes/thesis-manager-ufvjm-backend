@@ -21,7 +21,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Fila de eventos (RabbitMQ/Kafka) | **Implementado** | RabbitMQ com *transactional outbox* (apps `events` e `notifications`, biblioteca `pika`). As transições gravam `outbox_event` na mesma transação; o comando `publish_outbox_events` publica na exchange `topic` `thesis.events` com *publisher confirms*, tentativas e backoff exponencial (`attempts`, `max_attempts`, `next_attempt_at`, `last_error`); o comando `consume_notifications` consome a fila `notifications.thesis-events` (DLQ `notifications.thesis-events.dlq`) de forma idempotente via `processed_event`. Variáveis `RABBITMQ_*`, `EVENTS_EXCHANGE`, `OUTBOX_*`, `NOTIFICATIONS_*` no `.env.example`. Conexões ociosas mantidas por heartbeat (`keep_alive`); queda do broker (inclusive host sem DNS) interrompe o lote sem gastar tentativas e os workers reconectam sozinhos com backoff até 60 s (validado com o RabbitMQ parado e religado). Extração/indexação de texto ainda não usam a fila (comando `extract_thesis_text` sob demanda). |
 | Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios (inclui `THESIS_MAX_PDF_SIZE_MB`, `THESIS_MAX_DOCUMENT_SIZE_MB`, `THESIS_MAX_KEYWORDS`). |
 | Health check | **Implementado** | `GET /health` (`HealthView`). |
-| Docker Compose | **Implementado** | Postgres, Redis, RabbitMQ (`rabbitmq:4.1-management-alpine`, painel só em `127.0.0.1:15672`), serviço one-shot `init` (`migrate` + `declare_event_topology`), backend e workers `event-publisher`/`notification-consumer` (`restart: unless-stopped`), que só sobem após o `init` concluir; perfil opcional para frontend. O backend não roda mais `migrate` no próprio comando. |
+| Docker Compose | **Implementado** | Postgres, Redis, RabbitMQ (`rabbitmq:4.1-management-alpine`, painel só em `127.0.0.1:15672`), serviço one-shot `init` (`migrate` + `declare_event_topology`), backend e workers `event-publisher`/`notification-consumer` (`restart: unless-stopped`), que só sobem após o `init` concluir; perfil opcional para frontend. O `CMD` do `Dockerfile` ainda executa `migrate` antes do `runserver` (útil ao rodar a imagem sozinha), mas o Compose sobrescreve o comando do serviço `backend` com apenas `runserver`; no Compose, as migrações rodam só no `init`. |
 | Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py`, `academic/migrations/0001_initial.py`, `theses/migrations/0001_initial.py`, `events/migrations/0001_initial.py`, `notifications/migrations/0001_initial.py` e `0002_seed_templates.py` (templates de e-mail). |
 
 ## 2. Autenticação e sessão
@@ -135,7 +135,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Repositório público de TCCs publicados | **Implementado** | `GET /api/v1/public/theses` (busca por título/resumo/autor/orientador/palavra-chave e filtros de curso/orientador/ano) e `GET /api/v1/public/theses/<id>` com payload público; acesso anônimo somente a publicados. |
 | Publicação condicionada | **Implementado** | `POST /api/v1/theses/<id>/publish` exige aprovação final, autorização de publicação validada e arquivo atual íntegro; remove versões antigas e publica apenas a versão atual. |
 | Proteção contra exclusão de publicado | **Implementado** | Não há endpoint de exclusão de monografia; publicação/arquivamento são transições controladas e o histórico/auditoria é preservado. |
-| Recursos públicos (TCCs, cursos, orientadores) | **Parcial** | TCCs publicados e download estão disponíveis publicamente; faltam endpoints públicos dedicados de cursos e orientadores para filtros do repositório. |
+| Recursos públicos (TCCs, cursos, orientadores) | **Parcial** | TCCs publicados, download e orientadores (`GET /api/v1/public/advisors`) estão disponíveis publicamente; falta o endpoint público dedicado de cursos para os filtros do repositório. |
 
 ## 10. Relatórios e dashboards
 
@@ -166,6 +166,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `PUT` | `/api/v1/theses/me` | Aluno | Cria/atualiza rascunho e metadados. |
 | `POST` | `/api/v1/theses/me/files` | Aluno | Upload de nova versão em PDF com SHA-256. |
 | `POST` | `/api/v1/theses/me/submit` | Aluno | Envia a versão atual ao orientador. |
+| `POST` | `/api/v1/theses/me/withdraw` | Aluno | Descarta o envio ainda não avaliado pelo orientador (só com status `SUBMITTED`) e devolve a monografia ao estado editável. |
 | `GET` | `/api/v1/theses` | Autenticado | Lista com escopo por papel e filtros (`scope`, `q`, `status`, `courseId`, `advisorId`, `year`, `pendingReview`). |
 | `GET` | `/api/v1/theses/<id>` | Autor/orientador/coordenação/admin | Detalhe com versões, pareceres, documentos e histórico. |
 | `POST` | `/api/v1/theses/<id>/reviews` | Orientador | Parecer: aprovar, solicitar ajustes ou reprovar. |
@@ -180,8 +181,9 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `GET` | `/api/v1/public/theses/<id>/download` | Anônimo | Download da versão publicada. |
 | `GET` | `/api/v1/public/advisors` | Anônimo | Lista de orientadores (somente ativos); busca por nome, paginado (`q`, `page`, `pageSize`); sem e-mail no payload público. |
 | `GET` | `/api/v1/users` | Coordenação/admin | Diretório paginado de usuários; filtro `role` (`STUDENT`/`ADVISOR`/`COORDINATOR`/`ADMIN`) e `q`; inclui e-mail. |
-| `GET` | `/api/v1/users/suggest` | Coordenação/orientador/admin | Autocomplete (máx. 3): qualificador `q`; orientador vê somente outros orientadores; coordenação/admin veem o diretório completo (ou `role=` para filtrar). |
-| `GET` | `/api/v1/users/suggest` | ADMIN/COORDINATOR/ADVISOR | Autocomplete de usuários institucionais (máx. 3): filtro `q` (mín. 2 caracteres; >80 ignorado), somente ativos, ordenado por nome/e-mail; throttle 60/min; resposta em cache curto (45 s). |
+| `GET` | `/api/v1/users/suggest` | ADMIN/COORDINATOR/ADVISOR | Autocomplete de usuários institucionais (máx. 3): filtro `q` (mín. 2 caracteres; >80 ignorado), somente ativos, ordenado por nome/e-mail; orientador vê somente outros orientadores; coordenação/admin veem o diretório completo (ou `role=` para filtrar); throttle 60/min; resposta em cache curto (45 s). |
+| `POST` | `/api/v1/auth/dev-login` | Anônimo, **só com `DEBUG=True`** | Login de teste em desenvolvimento (`name`, `email`, `roles`); sem `DEBUG` responde 404. |
+| `GET` | `/api/v1/auth/dev-users` | Anônimo, **só com `DEBUG=True`** | Lista usuários ativos e perfis para o login de teste; sem `DEBUG` responde 404. |
 | `GET` | `/api/v1/theses/<id>/defenses` | Institucional | Lista defesas da tese (escopo por papel). |
 | `POST` | `/api/v1/theses/<id>/defenses` | Admin/coord/orientador | Agenda nova defesa; exige status `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`. |
 | `GET` | `/api/v1/defenses` | Institucional | Lista paginada de bancas visíveis ao usuário; filtros `?q=`, `?status=` e `?pendingEvaluation=true`; inclui dados da tese, aluno, situação do usuário na banca (`viewerMembership`) e `viewerPermissions`. |
@@ -203,7 +205,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 ## 13. Prioridades sugeridas (próximos passos)
 
 1. **Fila assíncrona**: levar extração/indexação para a fila e desenhar o envio de token por e-mail (ver "Eventos assíncronos: melhorias futuras").
-2. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
+2. **Concluir integração do repositório público no frontend** e endpoint público de cursos (o de orientadores já existe).
 3. **Relatórios**: exportação CSV e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview` e exportados em PDF por `GET /api/v1/reports/overview/pdf`.
 4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
 5. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
@@ -225,7 +227,7 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 - **Repositório público incompleto para anônimos**: a listagem `GET /api/v1/public/theses` devolve `currentFile.downloadUrl`/`previewUrl` apontando para `/api/v1/theses/.../download`, que exige usuário autenticado (anônimo recebe 401). O detalhe público (`GET /api/v1/public/theses/<id>`) aponta para o endpoint anônimo. Uma correção mínima foi desenhada e discutida, mas não foi aplicada.
 - **Sem endpoint de filtros públicos**: não existe hoje rota para listar cursos/orientadores/anos/palavras-chave presentes em publicados nem cache versionado; a busca pública não é cacheada.
 - **Sem leitura de detalhe da tese para membro institucional da banca**: `theses_visible_to` e `user_can_access_thesis` não incluem o membro da comissão; ele precisa de acesso à monografia para avaliar, mas a auditoria não decidiu a regra.
-- **N+1 nas listagens**: a serialização aciona consultas por autor, palavra-chave e arquivo atual por monografia/banca.
+- **N+1 na listagem de monografias** (revisado em 2026-11-21): autores, palavras-chave e arquivo atual já vêm por prefetch, e a listagem de bancas (`GET /api/v1/defenses`) tem número de consultas constante. Em `GET /api/v1/theses`, porém, `thesis_permissions` consulta os papéis do leitor (`user_roles`, `user_is_admin`, `user_can_access_thesis`) a cada monografia: medido com 2 e 6 itens, +3 consultas por monografia para admin e +4 para orientador. Correção esperada: resolver os papéis do leitor uma vez por página, como a listagem de bancas faz.
 - **Sem rastreamento de upload em andamento** nem consolidação de rate limiting em Redis.
 
 ## Observações finais
