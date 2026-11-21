@@ -7,8 +7,10 @@ from __future__ import annotations
 import logging
 import random
 import re
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
+from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 LAST_ERROR_MAX_LENGTH = 500
 JITTER_RATIO = 0.1
+BROKER_RECONNECT_MAX_SECONDS = 60.0
 _BROKER_URL_PATTERN = re.compile(r"amqps?://\S+", re.IGNORECASE)
 _CREDENTIALS_PATTERN = re.compile(r"[^\s/@:]+:[^\s/@]+@")
 
@@ -162,3 +165,54 @@ def publish_pending_events(broker: EventBroker, batch_size: int) -> PublishSumma
             _mark_published(event)
             summary.published += 1
     return summary
+
+
+def run_publisher_loop(broker: EventBroker, stop_event: threading.Event, batch_size: int, poll_interval: float) -> None:
+    """
+    Publish batches until ``stop_event`` is set.
+
+    A full batch is followed immediately by the next one; otherwise the loop waits
+    ``poll_interval``. While the broker is unreachable the wait doubles up to
+    ``BROKER_RECONNECT_MAX_SECONDS``, without touching event attempts.
+
+    Args:
+        broker: Broker client used for every batch.
+        stop_event: Set by the signal handler to stop after the current batch.
+        batch_size: Maximum number of events per batch.
+        poll_interval: Seconds to wait when there is nothing more to publish.
+    """
+    unavailable_streak = 0
+    while not stop_event.is_set():
+        summary = publish_pending_events(broker, batch_size)
+        if summary.broker_unavailable:
+            unavailable_streak += 1
+            reconnect_delay = min(poll_interval * (2 ** unavailable_streak), BROKER_RECONNECT_MAX_SECONDS)
+            stop_event.wait(reconnect_delay)
+            continue
+        if unavailable_streak:
+            logger.info("Event broker reachable again after %s failed batch(es)", unavailable_streak)
+            unavailable_streak = 0
+        processed = summary.published + summary.retrying + summary.failed
+        if processed >= batch_size:
+            continue
+        stop_event.wait(poll_interval)
+
+
+def requeue_failed_events(event_id: UUID | None) -> int:
+    """
+    Put ``FAILED`` events back in the queue after the cause was fixed (manual operation).
+
+    Attempts are reset; ``last_error`` is kept for diagnosis until the next outcome.
+
+    Args:
+        event_id: Single event to requeue, or None for every failed event.
+
+    Returns:
+        int: Number of requeued events.
+    """
+    failed_events = OutboxEvent.objects.filter(status=OutboxStatus.FAILED)
+    if event_id is not None:
+        failed_events = failed_events.filter(pk=event_id)
+    requeued = failed_events.update(status=OutboxStatus.PENDING, attempts=0, failed_at=None, next_attempt_at=timezone.now())
+    logger.info("Requeued %s failed outbox event(s)", requeued)
+    return requeued
