@@ -195,6 +195,9 @@ def run_publisher_loop(broker: EventBroker, stop_event: threading.Event, batch_s
         processed = summary.published + summary.retrying + summary.failed
         if processed >= batch_size:
             continue
+        # Mantém a conexão ociosa viva (heartbeats) a cada ciclo; com poll_interval de
+        # poucos segundos e heartbeat de 60 s do RabbitMQ, nenhum heartbeat é perdido.
+        broker.keep_alive()
         stop_event.wait(poll_interval)
 
 

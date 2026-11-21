@@ -108,10 +108,22 @@ class PublisherLoopTests(TestCase):
         stop_event = MagicMock()
         stop_event.is_set.side_effect = [False, False, False, False, True]
         summaries = [PublishSummary(published=2), PublishSummary(broker_unavailable=True), PublishSummary(broker_unavailable=True), PublishSummary(published=1)]
+        broker = InMemoryEventBroker()
         with patch("events.publisher.publish_pending_events", side_effect=summaries), self.assertLogs("events.publisher", level="INFO") as captured:
-            run_publisher_loop(InMemoryEventBroker(), stop_event, batch_size=2, poll_interval=1.0)
+            run_publisher_loop(broker, stop_event, batch_size=2, poll_interval=1.0)
         self.assertEqual(stop_event.wait.call_args_list, [call(2.0), call(4.0), call(1.0)])
         self.assertTrue(any("reachable again" in line for line in captured.output))
+        # Só o ciclo ocioso (lote incompleto) mantém a conexão viva; lote cheio e broker fora do ar não.
+        self.assertEqual(broker.keep_alive_calls, 1)
+
+    def test_idle_loop_keeps_connection_alive_every_cycle(self) -> None:
+        stop_event = MagicMock()
+        stop_event.is_set.side_effect = [False, False, False, True]
+        broker = InMemoryEventBroker()
+        with patch("events.publisher.publish_pending_events", return_value=PublishSummary()):
+            run_publisher_loop(broker, stop_event, batch_size=10, poll_interval=2.0)
+        self.assertEqual(broker.keep_alive_calls, 3)
+        self.assertEqual(stop_event.wait.call_args_list, [call(2.0)] * 3)
 
     def test_reconnect_wait_is_capped(self) -> None:
         stop_event = MagicMock()

@@ -44,6 +44,14 @@ class EventBroker(Protocol):
         """
         ...
 
+    def keep_alive(self) -> None:
+        """
+        Service the idle connection (heartbeats) between batches; never raises.
+
+        A connection found dead is discarded so the next publish reconnects.
+        """
+        ...
+
     def close(self) -> None:
         """
         Release the connection held by the broker client, if any.

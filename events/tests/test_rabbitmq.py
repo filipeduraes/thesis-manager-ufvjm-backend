@@ -105,6 +105,28 @@ class PikaEventBrokerTests(SimpleTestCase):
         self.assertEqual(self.connection.channel.call_count, 2)
         self.connection_class.assert_called_once()
 
+    def test_keep_alive_without_connection_does_nothing(self) -> None:
+        self.broker.keep_alive()
+        self.connection_class.assert_not_called()
+        self.connection.process_data_events.assert_not_called()
+
+    def test_keep_alive_services_heartbeats_on_idle_connection(self) -> None:
+        self.broker.publish(build_envelope())
+        self.broker.keep_alive()
+        self.connection.process_data_events.assert_called_once_with(time_limit=0)
+
+    def test_connection_dropped_while_idle_is_reopened_without_outage(self) -> None:
+        # Regressão: o broker fecha a conexão ociosa ("missed heartbeats from client");
+        # a próxima publicação não pode virar BrokerUnavailableError.
+        self.broker.publish(build_envelope())
+        self.connection.process_data_events.side_effect = pika.exceptions.StreamLostError("missed heartbeats")
+        with self.assertLogs("events.rabbitmq", level="INFO"):
+            self.broker.keep_alive()
+        self.connection.process_data_events.side_effect = None
+        self.broker.publish(build_envelope())
+        self.assertEqual(self.connection_class.call_count, 2)
+        self.assertEqual(self.channel.basic_publish.call_count, 2)
+
     def test_close_closes_open_connection(self) -> None:
         self.broker.publish(build_envelope())
         self.broker.close()

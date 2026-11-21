@@ -104,6 +104,25 @@ class PikaEventBroker:
             self._channel = None
             raise EventBrokerError(f"Broker channel closed while publishing ({type(exc).__name__})") from exc
 
+    def keep_alive(self) -> None:
+        """
+        Process pending I/O on an idle connection so heartbeats are sent and read.
+
+        ``BlockingConnection`` only services heartbeats while its I/O loop runs; an
+        idle publisher waiting between batches would otherwise miss them and the
+        broker would close the connection ("missed heartbeats from client"). A
+        connection found dead here is discarded silently: no event was in flight,
+        so this is not a broker outage and the next publish simply reconnects.
+        """
+        connection = self._connection
+        if connection is None or not connection.is_open:
+            return
+        try:
+            connection.process_data_events(time_limit=0)
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as error:
+            logger.info("Idle event broker connection was closed (%s); reconnecting on next publish", type(error).__name__)
+            self._reset()
+
     def _reset(self) -> None:
         """
         Forget the current connection and channel so the next publish reconnects.

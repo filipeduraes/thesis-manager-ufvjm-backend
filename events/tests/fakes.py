@@ -19,6 +19,7 @@ class InMemoryEventBroker:
         failures: Errors to raise for specific event identifiers.
         unavailable: When True, every publish raises ``BrokerUnavailableError``.
         closed: Whether ``close`` was called.
+        keep_alive_calls: Number of idle keep-alive calls.
     """
 
     def __init__(self) -> None:
@@ -29,6 +30,7 @@ class InMemoryEventBroker:
         self.failures: dict[UUID, EventBrokerError] = {}
         self.unavailable = False
         self.closed = False
+        self.keep_alive_calls = 0
 
     def publish(self, envelope: EventEnvelope) -> None:
         """
@@ -47,6 +49,12 @@ class InMemoryEventBroker:
         if failure is not None:
             raise failure
         self.published.append(envelope)
+
+    def keep_alive(self) -> None:
+        """
+        Count idle keep-alive calls made by the publisher loop.
+        """
+        self.keep_alive_calls += 1
 
     def close(self) -> None:
         """
