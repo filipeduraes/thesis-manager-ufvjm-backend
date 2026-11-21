@@ -237,6 +237,10 @@ class ExternalInvitation(models.Model):
         related_name="revoked_external_invitations",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # Único evento da outbox autorizado a emitir o token por e-mail; eventos
+    # anteriores (reentregues ou fora de ordem) são ignorados pelo consumidor.
+    token_event_id = models.UUIDField(null=True, blank=True, editable=False)
+    token_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "external_invitation"

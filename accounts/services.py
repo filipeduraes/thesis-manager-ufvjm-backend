@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
 from datetime import timedelta
 from typing import Iterable
 from urllib.parse import urlsplit
@@ -552,6 +553,75 @@ def generate_external_token() -> str:
         for _ in range(TOKEN_GROUPS)
     ]
     return f"{TOKEN_PREFIX}-{'-'.join(groups)}"
+
+
+def unissued_token_hash() -> bytes:
+    """
+    Return a random digest that no token can match, used while no token was issued.
+
+    ``token_hash`` is unique and required, so an invitation whose token has not been
+    e-mailed yet (or was invalidated by a resend) holds the digest of random bytes
+    that are discarded immediately and never formatted as a token.
+
+    Returns:
+        bytes: 32-byte SHA-256 digest of discarded random bytes.
+    """
+    discarded_secret = secrets.token_bytes(32)
+    return hashlib.sha256(b"unissued:" + discarded_secret).digest()
+
+
+def invalidate_external_token(invitation: ExternalInvitation) -> None:
+    """
+    Make the current token of an invitation stop working immediately.
+
+    Clears ``token_sent_at`` too, so the UI shows the delivery as pending until
+    the consumer sends the next token. Sessions already opened with the previous
+    token are not affected (they depend on the invitation status, not on the hash).
+
+    Args:
+        invitation: Invitation to update; the caller should hold a row lock.
+    """
+    invitation.token_hash = unissued_token_hash()
+    invitation.token_sent_at = None
+    invitation.save(update_fields=["token_hash", "token_sent_at"])
+
+
+def issue_external_token(invitation: ExternalInvitation) -> str:
+    """
+    Generate a new readable token for an invitation and store only its hash.
+
+    The previous token stops working. The returned value must only be placed in
+    the e-mail sent to the invitee: never log it, audit it, persist it or put it in
+    an event payload.
+
+    Args:
+        invitation: Invitation to update; the caller should hold a row lock.
+
+    Returns:
+        str: Readable token ``UFVJM-XXXX-XXXX-XXXX-XXXX``.
+    """
+    token = generate_external_token()
+    invitation.token_hash = hash_external_token(token)
+    invitation.save(update_fields=["token_hash"])
+    return token
+
+
+def mark_external_token_sent(invitation_id: uuid.UUID, event_id: uuid.UUID) -> bool:
+    """
+    Record that the e-mail carrying the current token was accepted for delivery.
+
+    The update only applies while ``event_id`` is still the invitation's issuing
+    event, so a late confirmation never marks a token replaced by a resend as sent.
+
+    Args:
+        invitation_id: Invitation identifier.
+        event_id: Outbox event that issued the e-mailed token.
+
+    Returns:
+        bool: True when the invitation was updated.
+    """
+    updated = ExternalInvitation.objects.filter(pk=invitation_id, token_event_id=event_id).update(token_sent_at=timezone.now())
+    return updated == 1
 
 
 def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict[str, str]]:
