@@ -8,10 +8,10 @@ import logging
 import time
 
 import pika
-import pika.exceptions
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
+from events.rabbitmq import BROKER_CONNECTION_ERRORS
 from events.topology import EventTopology, declare_topology, event_topology
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class Command(BaseCommand):
         for attempt in range(1, attempts + 1):
             try:
                 self._declare(topology)
-            except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as error:
+            except BROKER_CONNECTION_ERRORS as error:
                 # Só a classe: exceções de conexão do pika podem conter host e usuário.
                 logger.warning("Event broker not ready (attempt %s/%s): %s", attempt, attempts, type(error).__name__)
                 if attempt < attempts:

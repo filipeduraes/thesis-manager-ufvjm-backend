@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 EXCHANGE_TYPE = "topic"
 
+# Falhas de conexão com o broker. O pika só embrulha parte delas em AMQPConnectionError:
+# com o host inexistente (ex.: container rabbitmq parado, nome sem DNS), o socket.gaierror
+# do resolvedor sai direto de BlockingConnection; por isso OSError também entra.
+BROKER_CONNECTION_ERRORS: tuple[type[BaseException], ...] = (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError, OSError)
+
 
 class PikaEventBroker:
     """
@@ -62,7 +67,7 @@ class PikaEventBroker:
             channel = self._connection.channel()
             channel.exchange_declare(exchange=self._exchange, exchange_type=EXCHANGE_TYPE, durable=True)
             channel.confirm_delivery()
-        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as exc:
+        except BROKER_CONNECTION_ERRORS as exc:
             self._reset()
             # Mensagem fixa: exceções de conexão do pika podem conter host e usuário.
             raise BrokerUnavailableError(f"Could not connect to the event broker ({type(exc).__name__})") from exc
@@ -97,7 +102,7 @@ class PikaEventBroker:
             raise EventBrokerError(f"Event returned as unroutable by exchange {self._exchange} (no bound queue)") from exc
         except pika.exceptions.NackError as exc:
             raise EventBrokerError("Event negatively acknowledged by the broker") from exc
-        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as exc:
+        except BROKER_CONNECTION_ERRORS as exc:
             self._reset()
             raise BrokerUnavailableError(f"Connection to the event broker lost ({type(exc).__name__})") from exc
         except pika.exceptions.AMQPChannelError as exc:
@@ -119,7 +124,7 @@ class PikaEventBroker:
             return
         try:
             connection.process_data_events(time_limit=0)
-        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as error:
+        except BROKER_CONNECTION_ERRORS as error:
             logger.info("Idle event broker connection was closed (%s); reconnecting on next publish", type(error).__name__)
             self._reset()
 
@@ -133,7 +138,7 @@ class PikaEventBroker:
         if connection is not None and connection.is_open:
             try:
                 connection.close()
-            except pika.exceptions.AMQPError:
+            except (pika.exceptions.AMQPError, OSError):
                 logger.debug("Ignoring error while closing a broken broker connection")
 
     def close(self) -> None:

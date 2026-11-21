@@ -5,6 +5,7 @@ Tests for the ``declare_event_topology`` command (``pika.BlockingConnection`` mo
 from __future__ import annotations
 
 import io
+import socket
 from unittest.mock import patch
 
 import pika.exceptions
@@ -48,6 +49,14 @@ class DeclareEventTopologyCommandTests(SimpleTestCase):
         self.sleep.assert_called_with(0.5)
         self.assertNotIn("segredo", "\n".join(captured.output))
         self.assertTrue(self.channel.queue_bind.called)
+
+    def test_retries_while_broker_host_does_not_resolve(self) -> None:
+        name_resolution_error = socket.gaierror(-3, "Temporary failure in name resolution")
+        self.connection_class.side_effect = [name_resolution_error, self.connection]
+        with self.assertLogs(COMMAND_MODULE, level="WARNING"):
+            call_command("declare_event_topology", stdout=io.StringIO())
+        self.assertEqual(self.connection_class.call_count, 2)
+        self.connection.close.assert_called_once()
 
     def test_gives_up_after_all_attempts_without_exposing_url(self) -> None:
         self.connection_class.side_effect = pika.exceptions.AMQPConnectionError(BROKER_URL)

@@ -9,13 +9,13 @@ import threading
 import time
 
 import pika
-import pika.exceptions
 from django.db import InterfaceError, OperationalError, close_old_connections
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.spec import Basic, BasicProperties
 
 from events.broker import BrokerUnavailableError
 from events.envelope import EventEnvelope, InvalidEnvelopeError
+from events.rabbitmq import BROKER_CONNECTION_ERRORS
 from events.topology import EventTopology, declare_topology
 from notifications.consumer import HandleOutcome, handle_event
 
@@ -111,7 +111,7 @@ class NotificationConsumer:
             logger.info("Notification consumer listening on queue %s", self._queue)
             while not stop_event.is_set():
                 connection.process_data_events(time_limit=PROCESS_EVENTS_TIME_LIMIT_SECONDS)
-        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionWrongStateError) as error:
+        except BROKER_CONNECTION_ERRORS as error:
             # Mensagem fixa: exceções de conexão do pika podem conter host e usuário.
             raise BrokerUnavailableError(f"Event broker connection failed ({type(error).__name__})") from error
         finally:

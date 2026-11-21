@@ -4,17 +4,21 @@ Tests for the pika broker adapter, with ``pika.BlockingConnection`` mocked (no s
 
 from __future__ import annotations
 
+import socket
 import uuid
 from unittest.mock import patch
 
 import pika.exceptions
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from events.broker import BrokerUnavailableError, EventBrokerError
 from events.envelope import EventEnvelope
+from events.models import OutboxStatus
+from events.publisher import publish_pending_events
 from events.rabbitmq import PikaEventBroker, build_event_broker
+from events.tests.test_publisher import create_event
 
 BROKER_URL = "amqp://thesis_events:segredo@rabbitmq:5672/thesis_manager"
 
@@ -81,6 +85,18 @@ class PikaEventBrokerTests(SimpleTestCase):
         self.assertNotIn("segredo", str(captured.exception))
         self.assertNotIn("amqp://", str(captured.exception))
 
+    def test_unresolvable_host_raises_unavailable(self) -> None:
+        # Regressão: com o container rabbitmq parado, o pika deixa escapar o socket.gaierror do resolvedor.
+        self.connection_class.side_effect = socket.gaierror(-3, "Temporary failure in name resolution")
+        with self.assertRaises(BrokerUnavailableError) as captured:
+            self.broker.publish(build_envelope())
+        self.assertIn("gaierror", str(captured.exception))
+
+    def test_socket_reset_while_publishing_raises_unavailable(self) -> None:
+        self.channel.basic_publish.side_effect = ConnectionResetError(104, "Connection reset by peer")
+        with self.assertRaises(BrokerUnavailableError):
+            self.broker.publish(build_envelope())
+
     def test_unroutable_and_nack_are_message_failures(self) -> None:
         for error in (pika.exceptions.UnroutableError([]), pika.exceptions.NackError([])):
             self.channel.basic_publish.side_effect = error
@@ -131,6 +147,20 @@ class PikaEventBrokerTests(SimpleTestCase):
         self.broker.publish(build_envelope())
         self.broker.close()
         self.connection.close.assert_called_once()
+
+
+class PikaBrokerOutageBatchTests(TestCase):
+    """With the broker host gone, a batch stops cleanly instead of crashing the publisher."""
+
+    def test_batch_with_unresolvable_broker_keeps_events_pending(self) -> None:
+        event = create_event()
+        broker = PikaEventBroker(BROKER_URL, "thesis.events")
+        name_resolution_error = socket.gaierror(-3, "Temporary failure in name resolution")
+        with patch("events.rabbitmq.pika.BlockingConnection", side_effect=name_resolution_error), self.assertLogs("events.publisher", level="WARNING"):
+            summary = publish_pending_events(broker, batch_size=10)
+        self.assertTrue(summary.broker_unavailable)
+        event.refresh_from_db()
+        self.assertEqual((event.status, event.attempts, event.last_error), (OutboxStatus.PENDING, 0, ""))
 
 
 class BuildEventBrokerTests(SimpleTestCase):

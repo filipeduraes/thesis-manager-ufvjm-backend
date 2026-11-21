@@ -5,6 +5,7 @@ Tests for the pika consumer adapter, its reconnection loop and the ``consume_not
 from __future__ import annotations
 
 import signal
+import socket
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -129,6 +130,12 @@ class ConsumeTests(SimpleTestCase):
         with self.assertRaises(BrokerUnavailableError) as captured:
             self.consumer.consume(threading.Event())
         self.assertNotIn("segredo", str(captured.exception))
+
+    def test_unresolvable_broker_host_is_unavailable_not_a_crash(self) -> None:
+        # Regressão: com o container rabbitmq parado, o socket.gaierror derrubava o consumidor.
+        self.connection_class.side_effect = socket.gaierror(-3, "Temporary failure in name resolution")
+        with self.assertRaises(BrokerUnavailableError):
+            self.consumer.consume(threading.Event())
 
     def test_lost_connection_closes_and_raises_unavailable(self) -> None:
         self.connection.process_data_events.side_effect = pika.exceptions.StreamLostError("lost")
