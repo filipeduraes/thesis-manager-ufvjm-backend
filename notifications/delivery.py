@@ -6,16 +6,21 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
-from notifications.models import Notification, NotificationStatus
+from notifications.models import Notification, NotificationChannel, NotificationStatus
 
 logger = logging.getLogger(__name__)
 
 ERROR_MESSAGE_MAX_LENGTH = 500
+PENDING_RETRY_GRACE = timedelta(minutes=5)
 _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -87,3 +92,46 @@ def send_notification(notification: Notification) -> bool:
     notification.save(update_fields=["status", "sent_at", "error_message", "attempts"])
     logger.info("Notification %s sent (template=%s, attempt %s)", notification.pk, notification.template_id, notification.attempts)
     return True
+
+
+@dataclass
+class RetrySummary:
+    """
+    Outcome counters of a manual retry run.
+
+    Attributes:
+        sent: Notifications delivered in this run.
+        failed: Notifications that failed again.
+    """
+
+    sent: int = 0
+    failed: int = 0
+
+
+def retry_pending_notifications(limit: int) -> RetrySummary:
+    """
+    Resend e-mail notifications left ``FAILED`` or stuck in ``PENDING`` (manual operation).
+
+    ``PENDING`` rows younger than ``PENDING_RETRY_GRACE`` are skipped because the
+    consumer may be sending them right now; rows are locked with ``SKIP LOCKED``
+    so two retry runs never send the same message.
+
+    Args:
+        limit: Maximum number of notifications in this run.
+
+    Returns:
+        RetrySummary: Counters for the run.
+    """
+    summary = RetrySummary()
+    now = timezone.now()
+    stale_pending = Q(status=NotificationStatus.PENDING, scheduled_at__lte=now - PENDING_RETRY_GRACE)
+    failed = Q(status=NotificationStatus.FAILED, scheduled_at__lte=now)
+    with transaction.atomic():
+        candidates = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("user", "external_invitation").filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit]
+        for notification in candidates:
+            if send_notification(notification):
+                summary.sent += 1
+            else:
+                summary.failed += 1
+    logger.info("Notification retry finished: %s sent, %s failed", summary.sent, summary.failed)
+    return summary

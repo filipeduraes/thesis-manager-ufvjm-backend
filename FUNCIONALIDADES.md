@@ -2,7 +2,7 @@
 
 Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
 
-> Atualizado em: 2026-11-16. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em: 2026-11-21. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
 
 ## Legenda
 - **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).
@@ -18,7 +18,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Django + DRF + Python | **Implementado** | Projeto `thesismanagerbackend`; apps `accounts` e `academic`. |
 | PostgreSQL | **Implementado** | Configuração via `DATABASE_URL`; Docker Compose com serviço `db`. |
 | Redis | **Parcial** | `REDIS_URL`/cache configurados (`CACHES`, sessão `cached_db`); falta validar/implementar todos os usos previstos (cache de busca/sessão, rastreamento de upload em andamento, rate limiting completo conforme requisitos). |
-| Fila de eventos (RabbitMQ/Kafka) | **Pendente** | Não há worker/broker/event bus implementado. Upload marca `processing_status=PENDING` e existe o comando `extract_thesis_text` para extração sob demanda; extração/indexação/notificações automáticas e envio de token/e-mail seguem pendentes. |
+| Fila de eventos (RabbitMQ/Kafka) | **Parcial** | RabbitMQ com *transactional outbox* (apps `events` e `notifications`, biblioteca `pika`). As transições gravam `outbox_event` na mesma transação; o comando `publish_outbox_events` publica na exchange `topic` `thesis.events` com *publisher confirms*, tentativas e backoff exponencial (`attempts`, `max_attempts`, `next_attempt_at`, `last_error`); o comando `consume_notifications` consome a fila `notifications.thesis-events` (DLQ `notifications.thesis-events.dlq`) de forma idempotente via `processed_event`. Variáveis `RABBITMQ_URL`, `EVENTS_EXCHANGE`, `OUTBOX_*`, `NOTIFICATIONS_*` no `.env.example`. **Falta:** serviços `rabbitmq`, publicador, consumidor e declaração da topologia no Docker Compose; extração/indexação de texto continuam fora da fila (comando `extract_thesis_text` sob demanda). |
 | Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios (inclui `THESIS_MAX_PDF_SIZE_MB`, `THESIS_MAX_DOCUMENT_SIZE_MB`, `THESIS_MAX_KEYWORDS`). |
 | Health check | **Implementado** | `GET /health` (`HealthView`). |
 | Docker Compose | **Implementado** | Backend + Postgres + Redis; perfil opcional para frontend. |
@@ -63,7 +63,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Login por token no frontend | **Implementado** | `LoginView` envia token; sessão externa direciona para fluxo de avaliação externa. |
 | Criação de token no frontend | **Implementado** | UI admin (`AdminUsers`) e integração na tela de bancas/agendamento (`DefenseScheduling`) para gerar token real (sem vínculo de defesa ainda). |
 | Escopo do convite à banca/defesa/membro | **Implementado** | Cada `DefenseMember` externo aponta para o seu `ExternalInvitation` (one-to-one). `POST /api/v1/defenses/<id>/members/external` devolve `accessToken` (e `accessTokenExpiresAt`) **uma única vez**, com `Cache-Control: no-store`; o banco guarda só o hash, e o token não vai para AuditLog, logs nem mensagens de erro. `POST /api/v1/defenses/<id>/members/<memberId>/regenerate-token` (mesma permissão de gerenciar a banca; banca `SCHEDULED`/`IN_PROGRESS`) revoga o convite atual, cria outro para o mesmo membro (mantém disponibilidade e avaliação) e devolve o token novo uma vez. `GET /api/v1/session` e `POST /api/v1/auth/external-token` incluem `externalInvitation.assignments` (`[{defenseId, memberId}]`). A sessão externa só lê o detalhe da própria banca, confirma disponibilidade e avalia; outras bancas e ações de gestão retornam 403. |
-| Envio do token por e-mail | **Pendente** | Sem fila/worker/notificação; planejamento discutido (assíncrono, sem token em logs/banco). |
+| Envio do token por e-mail | **Pendente** | A fila de eventos já existe, mas o token não pode passar pela outbox (que é persistida em claro) nem por logs; exige desenho próprio. Membros externos já recebem por e-mail o resultado da banca (`defense.completed`), sem token. |
 
 ## 5. Cursos e departamentos (cadastro acadêmico)
 
@@ -126,7 +126,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Foto dos membros da banca | **Implementado** | `defense_member_payload` inclui `avatarUrl`: foto da conta Google (`socialaccount`) do membro institucional, pelas mesmas regras de `_avatar_url` (só URL `https`), via `user_avatar_url` em `accounts/services.py`; `null` para membros externos e para quem não tem conta Google ou foto. Detalhe e listagem fazem prefetch das contas Google (`google_social_accounts_prefetch`) e calculam uma vez por banca se o leitor é admin, então o número de consultas não cresce com o número de membros. `GET /api/v1/admin/users/lookup` também devolve `user.avatarUrl` (campo novo). |
 | Permissões do usuário no payload da banca | **Implementado** | Detalhe (`GET /api/v1/defenses/<id>`) e listagem (`GET /api/v1/defenses`) incluem `viewerPermissions` com `canManage`, `canEdit`, `canCancel`, `canStart`, `canClose`, `canRevert` e `canManageMembers`. `canManage` usa a mesma regra de `_can_manage_defense` (que agora delega a `build_defense_viewer_context`); `canEdit`, `canCancel` e `canStart` exigem `canManage` e banca `SCHEDULED`; `canClose`, `canManage` e `IN_PROGRESS`; `canManageMembers`, `canManage` e `SCHEDULED`/`IN_PROGRESS` (remoção de membro continua só em `SCHEDULED`); `canRevert`, admin e `IN_PROGRESS`/`CANCELLED`. Pré-condições que não dependem do usuário não entram nas flags: iniciar também exige `allMembersConfirmed` e encerrar exige todas as avaliações. Sessão de convite externo recebe tudo `false`. Na listagem, os direitos são resolvidos uma vez para a página inteira (consultas fixas, sem consulta extra por banca). |
 | Privacidade da disponibilidade da banca | **Implementado** | Em todas as respostas que trazem membros (`defense_payload`/`defense_member_payload`: detalhe, listagem, `GET /api/v1/theses/<id>/defenses` e ações), `availabilityStatus`, `availabilityStatusLabel`, `availabilityRespondedAt` e `availabilityNote` só vêm preenchidos para quem tem `canManage` (admin, coordenador do curso, orientador da tese) e, para os demais, apenas no próprio membro (o mesmo de `viewerMembership`); nos outros membros vêm `null`. `pendingConfirmations` no detalhe só é enviado a quem tem `canManage` (demais recebem `null`); `allMembersConfirmed` continua para todos. Sessão externa vê só a própria disponibilidade. Coordenador de outro curso que integra a banca é tratado como membro comum. |
-| Eventos de banca/avaliação | **Pendente** | Submissão, agendamento, avaliação registrada, publicação — disparo assíncrono não implementado; histórico e auditoria síncronos já registram as transições. A verificação "avaliação registrada → todas lançadas → cálculo do resultado" roda de forma síncrona no backend; notificações por fila de eventos (RabbitMQ/Kafka) dependem da infraestrutura do projeto e ainda não existem. |
+| Eventos de banca/avaliação | **Parcial** | Implementado no backend; falta subir os workers no Docker Compose (ver "Fila de eventos"). Cada transição grava um `OutboxEvent` (versão `1.0`, payload só com identificadores e códigos, chaves fixas em `events/catalog.py`) na mesma transação, por helpers de `theses/events.py`: `thesis.submitted` (`submit_thesis`), `defense.scheduled` (`schedule_defense`), `defense.evaluation_recorded` (`record_committee_evaluation`, sem decisão/nota/parecer), `defense.completed` (`_finalize_defense`, encerramento manual e automático, com `result` e `automatic`; desfeito junto se o auto-close falhar), `thesis.defense_result_recorded` (`record_defense_result`, resultado manual sem banca) e `thesis.published` (`publish_thesis`). O cálculo do resultado continua síncrono. O consumidor envia e-mail pelo `EMAIL_BACKEND` com os templates de `notification_template` (migration `notifications/0002_seed_templates`): submissão → orientador; banca agendada → autores e orientador (sem local/link); avaliação registrada → orientador (só o progresso "X de Y"); banca concluída → autores, orientador e membros avaliadores (suplentes não avaliam nem recebem); resultado manual e publicação → autores e orientador. Coordenador não recebe. Reentrega é detectada por `processed_event` (sem e-mail duplicado); falhas de envio ficam `FAILED` em `notification` e são reenviadas manualmente com `consume_notifications --retry-pending`. Eventos `FAILED` na outbox voltam com `publish_outbox_events --requeue-failed <id|all>`. |
 
 ## 9. Repositório público e publicação
 
@@ -202,7 +202,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 ## 13. Prioridades sugeridas (próximos passos)
 
-1. **Fila assíncrona** (eventos de submissão/agendamento/avaliação/publicação, extração/indexação, notificações e envio de token/e-mail).
+1. **Fila assíncrona**: subir RabbitMQ, publicador, consumidor e topologia no Docker Compose; depois, levar extração/indexação para a fila e desenhar o envio de token por e-mail (ver "Eventos assíncronos: melhorias futuras").
 2. **Concluir integração do repositório público no frontend** e endpoints públicos de cursos/orientadores.
 3. **Relatórios**: exportação CSV e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview` e exportados em PDF por `GET /api/v1/reports/overview/pdf`.
 4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
@@ -210,6 +210,13 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
 
 ---
+
+### Eventos assíncronos: melhorias futuras (fora do escopo de `feat/async-events`)
+
+- **Novos eventos**: membro adicionado à banca (`defense.member_added`, para avisar cada membro, inclusive externos), banca cancelada, banca remarcada e parecer do orientador. Nenhum deles é emitido hoje.
+- **Envio do token do membro externo por e-mail**: exige desenho próprio, porque o token não pode passar pela outbox nem por logs.
+- **Retenção**: não há limpeza de `outbox_event` publicados nem de `processed_event`; definir prazo e rotina (a FK `notification.event` usa `SET_NULL` para não travar a limpeza).
+- **Reenvio automático de notificações**: hoje só manual (`--retry-pending`), por decisão do grupo.
 
 ## 14. Pendências identificadas na auditoria (2026-11-16, não implementadas)
 
