@@ -72,10 +72,8 @@ package "Enums" #EEEEEE {
   }
 
   enum defense_member_role {
-    CHAIR
-    ADVISOR
-    EXAMINER
-    EXTERNAL_EXAMINER
+    PRESIDENT
+    MEMBER
     ALTERNATE
   }
 
@@ -527,35 +525,38 @@ package "Defense Service" #FFE8F4 {
     * id : uuid <<PK>>
     --
     * defense_id : uuid <<FK>>
-    user_id : uuid <<FK>>
-    external_invitation_id : uuid <<FK>>
     * role : defense_member_role
-    * availability : availability_status = PENDING
-    invited_at : timestamptz = now()
-    responded_at : timestamptz
-    confirmed_at : timestamptz
-    notified_at : timestamptz
+    institutional_member_id : uuid <<FK>>
+    external_invitation_id : uuid <<FK,UK>>
+    * name : varchar(200)
+    * email : varchar(254)
+    * institution : varchar(200) = ''
+    * has_conflict : boolean = false
+    * conflict_reason : text = ''
+    * availability_status : availability_status = PENDING
+    availability_responded_at : timestamptz
+    * availability_note : text = ''
+    * created_at : timestamptz = now()
   }
 
-  entity defense_evaluation {
+  entity defense_member_evaluation {
     * id : uuid <<PK>>
     --
-    * defense_member_id : uuid <<FK>>
-    * grade : numeric(4,2)
+    * member_id : uuid <<FK,UK>>
     * decision : defense_result
-    * feedback : text
-    * private_comments : text
+    score : numeric(4,2)
+    * notes : text = ''
     * submitted_at : timestamptz = now()
-    ip_address : inet
-    * is_locked : boolean = false
+    * updated_at : timestamptz = now()
+    ' Uma por membro; editável enquanto a banca está IN_PROGRESS
   }
 
   thesis ||--o{ defense
   users_user |o--o{ defense : "created_by"
-  defense ||--|{ defense_member
-  users_user |o--o{ defense_member
+  defense ||--o{ defense_member
+  users_user |o--o{ defense_member : "institutional_member"
   external_invitation |o--o| defense_member
-  defense_member ||--o{ defense_evaluation
+  defense_member ||--o| defense_member_evaluation
   defense ||--o{ defense_status_history
   users_user |o--o{ defense_status_history : "changed_by"
 }
@@ -790,9 +791,9 @@ note as N_RULES
   - thesis_file: UNIQUE(thesis_id, version_number) + apenas 1 is_current
   - thesis_author: position >=1, UNIQUE(thesis_id, position), <= 5 autores
   - Agendamento requer thesis_review APPROVED na versão CURRENT
-  - defense_member: exatamente um entre user_id/external_invitation_id
+  - defense_member: exatamente um entre institutional_member_id/external_invitation_id; no máximo um PRESIDENT por defense
   - defense: fim = scheduled_datetime + duration_minutes; UNIQUE parcial por thesis com status SCHEDULED ou IN_PROGRESS
-  - defense_evaluation: grade BETWEEN 0 AND 10; imutável após locked
+  - defense_member_evaluation: score NULL ou BETWEEN 0 AND 10; suplentes não avaliam; só com a banca IN_PROGRESS, imutável após COMPLETED
   - Resultado calculado apenas após todos membros não-suplentes avaliados
   - PUBLICATION_AUTHORIZATION VALIDATED obrigatório p/ publicação
   - thesis PUBLISHED com deleted_at IS NULL mas proteção via trigger (não deletar)
