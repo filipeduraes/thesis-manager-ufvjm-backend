@@ -19,6 +19,7 @@ from django.db.models import Prefetch, TextChoices
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from accounts.audit_data import AuditActorData, AuditEntityData, AuditEventData, typed_metadata
 from accounts.audit_identifiers import (
     CATEGORY_LABELS,
     ENTITY_TYPE_LABELS,
@@ -1956,3 +1957,64 @@ class AuditPresenter:
                     continue
                 self._add_detail(entries, seen, label, formatted)
         return entries
+
+    def structured(self, log: AuditLog) -> AuditEventData:
+        """
+        Build a structured, presentation-free view of an audit record.
+
+        Args:
+            log: Audit entry to convert.
+
+        Returns:
+            AuditEventData: Raw codes, identifiers and resolved entity context.
+        """
+        actor_user = self._user(log.actor_user_id) or log.actor_user
+        invitation = self._invitation(log.actor_external_invitation_id) or log.actor_external_invitation
+        roles = tuple(self.role_codes(log))
+        actor = AuditActorData(
+            id=str(actor_user.pk) if actor_user is not None else (
+                str(invitation.pk) if invitation is not None else None
+            ),
+            name=self.actor_name(log),
+            email=self.actor_email(log),
+            roles=roles,
+            is_external=log.actor_external_invitation_id is not None,
+        )
+        entity_type = EntityType.parse(log.entity_type) or EntityType.AUDIT_LOG
+        exists = True
+        if entity_type in {EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT, EntityType.DEFENSE}:
+            exists = self._thesis_for_log(log) is not None
+        elif entity_type == EntityType.COURSE:
+            exists = log.entity_id in self._courses
+        elif entity_type == EntityType.DEPARTMENT:
+            exists = log.entity_id in self._departments
+        elif entity_type == EntityType.USER:
+            exists = log.entity_id in self._users
+        elif entity_type == EntityType.EXTERNAL_INVITATION:
+            exists = log.entity_id in self._invitations
+
+        name = self.entity_name(log)
+        reference = self.entity_reference(log)
+        if entity_type == EntityType.THESIS_FILE and reference.isdigit():
+            reference = ""
+        name = name or (log.entity_id if not exists else "")
+        reference = reference or (log.entity_id if not exists else "")
+        entity = AuditEntityData(
+            type=entity_type,
+            id=log.entity_id,
+            name=name,
+            reference=reference,
+            exists=exists,
+        )
+        return AuditEventData(
+            id=str(log.pk),
+            timestamp=log.occurred_at,
+            action=log.action,
+            category=AuditCategory(log.category) if log.category else AuditCategory.ACCESS,
+            entity=entity,
+            actor=actor,
+            origin=log.origin,
+            ip_address=str(log.ip_address) if log.ip_address else None,
+            metadata=typed_metadata(self._metadata(log)),
+            changes=dict(self._changes(log)),
+        )

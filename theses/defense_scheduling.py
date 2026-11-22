@@ -15,6 +15,7 @@ from django.db.models import Prefetch, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
+from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
@@ -168,7 +169,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.DEFENSE_SCHEDULED, "scheduledDatetime": scheduled_datetime.isoformat()},
+        metadata=event_payload(AuditEvent.DEFENSE_SCHEDULED, scheduledDatetime=scheduled_datetime.isoformat()),
     )
     return defense
 
@@ -243,7 +244,7 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
         defense=defense,
         request=request,
         actor_user=None,
-        metadata={"event": AuditEvent.AUTO_STARTED_BY_SCHEDULE},
+        metadata=event_payload(AuditEvent.AUTO_STARTED_BY_SCHEDULE),
     )
     return defense
 
@@ -319,7 +320,7 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.DEFENSE_UPDATED, "availabilityReset": availability_reset},
+        metadata=event_payload(AuditEvent.DEFENSE_UPDATED, availabilityReset=availability_reset),
     )
     return defense
 
@@ -380,7 +381,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.DEFENSE_CANCELLED, "reason": reason},
+        metadata=event_payload(AuditEvent.DEFENSE_CANCELLED, reason=reason),
     )
     return defense
 
@@ -425,7 +426,7 @@ def start_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.DEFENSE_STARTED},
+        metadata=event_payload(AuditEvent.DEFENSE_STARTED),
     )
     return defense
 
@@ -550,7 +551,7 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
         defense=defense,
         request=request,
         actor_user=closed_by,
-        metadata={"event": AuditEvent.DEFENSE_CLOSED, "result": result, "thesisNewStatus": new_thesis_status, "trigger": "AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"},
+        metadata=event_payload(AuditEvent.DEFENSE_CLOSED, result=result, thesisNewStatus=new_thesis_status, trigger="AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"),
     )
     # Dentro do mesmo savepoint do encerramento: se o auto-close falhar, o evento é desfeito junto.
     record_defense_completed(defense, result, new_thesis_status, automatic)
@@ -586,7 +587,7 @@ def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | No
             action=AuditAction.EVALUATE,
             defense=defense,
             request=request,
-            metadata={"event": AuditEvent.AUTO_CLOSE_FAILED, "reason": error_message},
+            metadata=event_payload(AuditEvent.AUTO_CLOSE_FAILED, reason=error_message),
         )
         return error_message
     logger.info("Defense %s closed automatically after last evaluation", defense.pk)
@@ -669,7 +670,7 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.STATUS_REVERTED_BY_ADMIN, "from": from_status, "to": to_status, "reason": reason},
+        metadata=event_payload(AuditEvent.STATUS_REVERTED_BY_ADMIN, fromStatus=from_status, toStatus=to_status, reason=reason),
     )
     return defense
 

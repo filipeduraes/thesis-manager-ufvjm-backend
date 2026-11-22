@@ -20,6 +20,7 @@ from django.utils import timezone
 
 from academic.models import Course, UserCourseAssignment
 from academic.services import active_course_assignment
+from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent, EntityType
 from accounts.audit_entry import AuditEntry
 from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
@@ -297,7 +298,7 @@ def thesis_list_queryset() -> QuerySet[Thesis]:
     Returns:
         QuerySet[Thesis]: Query with list dependencies prefetched.
     """
-    return Thesis.objects.select_related(
+    return Thesis.objects.filter(deleted_at__isnull=True).select_related(
         "course",
         "course__department",
         "advisor",
@@ -565,6 +566,11 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     # lock, dois PUT concorrentes criam dois rascunhos para o mesmo autor.
     acquire_transaction_lock(THESIS_DRAFT_LOCK_KEY + (user.pk.int % 100000))
     _validate_course(course)
+    # A UI limita o curso ao vínculo ativo do aluno; a mesma regra precisa ser
+    # aplicada na escrita, senão um cliente pode escolher qualquer curso.
+    assignment = active_course_assignment(user)
+    if assignment is not None and assignment.course_id != course.pk:
+        raise ValidationError("Selecione o curso da sua matrícula.")
     _validate_advisor(advisor)
     clean_title = " ".join((title or "").split())
     if not clean_title:
@@ -846,7 +852,7 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
         thesis,
         request,
         user,
-        metadata={"event": AuditEvent.SUBMITTED, "versionNumber": current.version_number},
+        metadata=event_payload(AuditEvent.SUBMITTED, versionNumber=current.version_number),
     )
     return thesis
 
@@ -889,14 +895,14 @@ def withdraw_submission(user: User, thesis: Thesis, request: HttpRequest | None 
         target_status,
         user,
         "Envio descartado pelo aluno antes da avaliação do orientador.",
-        metadata={"event": AuditEvent.SUBMISSION_WITHDRAWN},
+        metadata=event_payload(AuditEvent.SUBMISSION_WITHDRAWN),
     )
     _audit_thesis(
         AuditAction.UPDATE,
         thesis,
         request,
         user,
-        metadata={"event": AuditEvent.SUBMISSION_WITHDRAWN, "targetStatus": target_status},
+        metadata=event_payload(AuditEvent.SUBMISSION_WITHDRAWN, targetStatus=target_status),
     )
     return thesis
 
@@ -1040,7 +1046,7 @@ def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: Ht
             thesis,
             request,
             actor,
-            metadata={"event": AuditEvent.VERSION_HISTORY_PURGED, "removedVersions": removed, "keptVersion": current.version_number},
+            metadata=event_payload(AuditEvent.VERSION_HISTORY_PURGED, removedVersions=removed, keptVersion=current.version_number),
         )
     return removed
 
@@ -1091,7 +1097,7 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
         thesis,
         request,
         user,
-        metadata={"event": AuditEvent.DEFENSE_RESULT, "result": result},
+        metadata=event_payload(AuditEvent.DEFENSE_RESULT, result=result),
     )
     return thesis
 
@@ -1144,7 +1150,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
         thesis,
         request,
         user,
-        metadata={"event": AuditEvent.PUBLISHED, "referenceCode": thesis.reference_code},
+        metadata=event_payload(AuditEvent.PUBLISHED, referenceCode=thesis.reference_code),
     )
     return thesis
 
@@ -1235,7 +1241,7 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
         thesis,
         request,
         user,
-        metadata={"documentType": document.type, "documentId": str(document.pk), "event": AuditEvent.DOCUMENT_VALIDATED},
+        metadata=event_payload(AuditEvent.DOCUMENT_VALIDATED, documentType=document.type, documentId=str(document.pk)),
     )
     return document
 

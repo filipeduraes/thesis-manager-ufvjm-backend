@@ -16,6 +16,7 @@ from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
+from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
@@ -445,7 +446,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.MEMBER_ADDED, "memberId": str(member.pk), "memberName": member.name, "memberRole": role, "type": "institutional"},
+        metadata=event_payload(AuditEvent.MEMBER_ADDED, memberId=str(member.pk), memberName=member.name, memberRole=role, type="institutional"),
     )
     return member
 
@@ -520,7 +521,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.MEMBER_ADDED, "memberId": str(member.pk), "memberName": member.name, "memberRole": role, "type": "external", "invitationId": str(invitation.pk)},
+        metadata=event_payload(AuditEvent.MEMBER_ADDED, memberId=str(member.pk), memberName=member.name, memberRole=role, type="external", invitationId=str(invitation.pk)),
     )
     return member, access_token
 
@@ -571,7 +572,7 @@ def remove_member(defense: Defense, member: DefenseMember, *, actor: User, reque
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.MEMBER_REMOVED, "memberId": member_id, "memberName": member_name, "memberRole": role},
+        metadata=event_payload(AuditEvent.MEMBER_REMOVED, memberId=member_id, memberName=member_name, memberRole=role),
     )
 
 
@@ -684,7 +685,7 @@ def respond_availability(defense: Defense, member: DefenseMember, *, availabilit
         request=request,
         actor_user=actor_user,
         actor_external_invitation=actor_external,
-        metadata={"event": AuditEvent.AVAILABILITY_RESPONDED, "memberId": str(member.pk), "memberName": member.name, "memberRole": member.role, "from": previous_status, "to": availability_status},
+        metadata=event_payload(AuditEvent.AVAILABILITY_RESPONDED, memberId=str(member.pk), memberName=member.name, memberRole=member.role, fromStatus=previous_status, toStatus=availability_status),
     )
     return member
 
@@ -748,6 +749,6 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
         defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": AuditEvent.EXTERNAL_TOKEN_REGENERATED, "memberId": str(member.pk), "memberName": member.name, "memberRole": member.role, "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
+        metadata=event_payload(AuditEvent.EXTERNAL_TOKEN_REGENERATED, memberId=str(member.pk), memberName=member.name, memberRole=member.role, previousInvitationId=str(previous_invitation.pk), invitationId=str(new_invitation.pk)),
     )
     return member, access_token

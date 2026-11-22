@@ -12,6 +12,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.http import HttpRequest
 
+from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
@@ -105,7 +106,7 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             request=request,
             actor_user=actor_user,
             actor_external_invitation=actor_ext,
-            metadata={"event": AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE, "memberId": str(member.pk)},
+            metadata=event_payload(AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE, memberId=str(member.pk)),
         )
         raise ValidationError("A banca já foi encerrada. Avaliações não podem ser alteradas.")
 
@@ -162,12 +163,12 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
                 request=request,
                 actor_user=actor_user,
                 actor_external_invitation=actor_ext,
-                metadata={
-                    "event": AuditEvent.EVALUATION_SUBMITTED,
-                    "memberId": str(member.pk),
-                    "decision": decision,
-                    "score": str(score_value) if score_value is not None else None,
-                },
+                metadata=event_payload(
+                    AuditEvent.EVALUATION_SUBMITTED,
+                    memberId=str(member.pk),
+                    decision=decision,
+                    score=str(score_value) if score_value is not None else None,
+                ),
             )
     if blocked_after_close:
         # Auditoria após o commit, como o fluxo original pretendia.
@@ -177,7 +178,7 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             request=request,
             actor_user=actor_user,
             actor_external_invitation=actor_ext,
-            metadata={"event": AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE, "memberId": str(member.pk)},
+            metadata=event_payload(AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE, memberId=str(member.pk)),
         )
         raise ValidationError("A banca já foi encerrada. Avaliações não podem ser alteradas.")
     auto_close_error = auto_close_after_last_evaluation(defense, request=request)

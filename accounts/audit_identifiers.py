@@ -27,6 +27,22 @@ class EntityType(StrEnum):
     DEFENSE = "Defense"
     REPORT_OVERVIEW = "ReportOverview"
 
+    @classmethod
+    def parse(cls, value: str) -> "EntityType | None":
+        """
+        Return the enum member matching ``value``, or ``None`` when unknown.
+
+        Args:
+            value: Raw entity type stored in the audit row.
+
+        Returns:
+            EntityType | None: Matching member, or ``None`` for legacy values.
+        """
+        try:
+            return cls(value)
+        except ValueError:
+            return None
+
     @property
     def app_label(self) -> str:
         """

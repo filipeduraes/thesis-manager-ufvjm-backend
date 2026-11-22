@@ -26,7 +26,7 @@ from accounts.audit_entry import AuditEntry
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
-from accounts.services import record_audit
+from accounts.services import google_social_accounts_prefetch,  record_audit
 from academic.services import active_course_assignment
 from theses.filters import parse_year_filter
 from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
@@ -881,8 +881,8 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_token, remove_member, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
-from theses.defense_listing import DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
-from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
+from theses.defense_listing import DEFENSE_LIST_PREFETCH, DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
+from theses.defense_scheduling import cancel_defense, defense_close_entries_prefetch, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
 from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
@@ -909,16 +909,16 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
     - Student: only their authored (main) thesis.
     """
     if user_is_admin(user):
-        return get_object_or_404(Thesis, pk=thesis_id)
+        return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id)
     if user_is_coordinator(user):
         managed_thesis_ids = coordinator_managed_theses(user).values("pk")
         allowed = Q(pk__in=managed_thesis_ids)
         if user_is_advisor(user):
             allowed |= Q(advisor_id=user.pk)
-        return get_object_or_404(Thesis.objects.filter(allowed), pk=thesis_id)
+        return get_object_or_404(Thesis.objects.filter(allowed, deleted_at__isnull=True), pk=thesis_id)
     if user_is_advisor(user):
-        return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
-    return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)
+        return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, advisor_id=user.pk)
+    return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, authors__author=user, authors__is_main_author=True)
 
 
 def _external_token_response(member: DefenseMember, access_token: str, viewer: Any, status_code: int) -> Response:
@@ -1033,7 +1033,16 @@ class DefenseListCreateView(APIView):
             Response: List of defense payloads.
         """
         thesis = _scoped_thesis(request.user, thesis_id)
-        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation", "members__evaluation").order_by("-scheduled_datetime"))
+        defenses = list(
+            Defense.objects.filter(thesis=thesis)
+            .select_related("thesis", "thesis__course", "thesis__advisor")
+            .prefetch_related(
+                *DEFENSE_LIST_PREFETCH,
+                defense_close_entries_prefetch(),
+                google_social_accounts_prefetch("members__institutional_member__socialaccount_set"),
+            )
+            .order_by("-scheduled_datetime")
+        )
         viewer_context = defense_viewer_context_for(defenses, request.user)
         return Response({"defenses": [defense_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in defenses]})
 
@@ -1229,7 +1238,6 @@ class DefenseMemberCreateView(APIView):
             member = add_institutional_member(defense, data["role"], data["user"], conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        from theses.defense_committee import defense_member_payload
         return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
 
 

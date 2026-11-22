@@ -252,3 +252,17 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 - Rótulos de status/resultado da auditoria passaram a ser derivados dos `TextChoices` dos models (remove duplicação; "OTHER" agora usa o rótulo do model, "Outro").
 - Helpers extraídos: `actor_from_request`, `audit_defense`, `visible_thesis_or_404`, `parse_year_filter` e constantes de query params.
 - Exportação CSV usa os campos do serializer, mantendo os dois formatos alinhados.
+
+## Contrato estruturado de auditoria (2026-11-22)
+
+- A resposta de `/api/v1/admin/audit-logs` inclui `event`, objeto estruturado com `action`, `category`, `entity` (tipo/id/nome/referência), `actor` (id/nome/e-mail/perfis), `origin` e `metadata`/`changes` tipados. Os campos antigos (`summary`, `details`, rótulos) permanecem apenas como compatibilidade transitória.
+- `accounts/audit_data.py` resolve relacionamentos em lote e expõe dados sem frases; `accounts/audit_export.py` formata CSV/JSON sem depender de `AuditPresenter`.
+- Marcadores enum (`accounts/audit_identifiers.py`) são a fonte única de identificadores e rótulos no backend.
+
+## Auditoria geral (2026-11-22)
+
+- `TRUSTED_PROXY_CIDRS`: `X-Forwarded-For` só é aceito quando `REMOTE_ADDR` é um proxy configurado; sem isso, a restrição administrativa poderia ser burlada.
+- Monografias com `deleted_at` não aparecem mais em listagens nem em consultas de escopo.
+- Token de convite externo retornado com `Cache-Control: no-store`; e-mails de login falho não vão para logs de aplicação.
+- N+1 reduzido em `GET /api/v1/theses/<id>/defenses` (prefetches completos) e filtros de ano usam intervalos indexáveis.
+- Removidos `try/except Exception: pass` silenciosos no carregamento de usuários administrativos.

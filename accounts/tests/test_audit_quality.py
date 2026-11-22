@@ -10,7 +10,9 @@ from __future__ import annotations
 from rest_framework.test import APIClient
 
 from accounts.audit_identifiers import EntityType
+from accounts.audit_data import resolve_audit_events
 from accounts.audit_entry import AuditEntry
+from accounts.audit_identifiers import AuditCategory, AuditEvent, EntityType
 from accounts.audit_presentation import (
     CATEGORY_LABELS,
     COMMITTEE_ROLE_LABELS,
@@ -128,3 +130,78 @@ class AuditExportContractTests(TestCase):
             json.dumps({"event": AuditEvent.SUBMITTED}),
             '{"event": "SUBMITTED"}',
         )
+
+    def test_api_returns_structured_event(self) -> None:
+        from accounts.audit_identifiers import AuditCategory, AuditEvent, EntityType
+
+        record_audit(
+            AuditEntry(
+                action=AuditAction.CREATE,
+                entity_type=EntityType.COURSE,
+                entity_id="33333333-3333-3333-3333-333333333333",
+                metadata={"name": "Engenharia", "code": "ENG"},
+            )
+        )
+        response = self.client.get("/api/v1/admin/audit-logs?page_size=5")
+        self.assertEqual(response.status_code, 200)
+        event = response.json()["results"][0]["event"]
+        self.assertEqual(event["action"], "CREATE")
+        self.assertEqual(event["entity"]["type"], "Course")
+        self.assertEqual(event["entity"]["name"], "Engenharia")
+        self.assertEqual(event["category"], AuditCategory.MANAGEMENT.value)
+
+    def test_csv_export_uses_structured_layer(self) -> None:
+        from accounts.audit_export import build_export_row
+        from accounts.audit_data import resolve_audit_events
+
+        log = record_audit(
+            AuditEntry(
+                action=AuditAction.LOGIN,
+                entity_type=EntityType.USER,
+                entity_id="44444444-4444-4444-4444-444444444444",
+            )
+        )
+        event = resolve_audit_events([log])[0]
+        row = build_export_row(event, event.actor.name, event.actor.roles)
+        self.assertEqual(row["actionCode"], "LOGIN")
+        self.assertEqual(row["entityType"], "User")
+        self.assertEqual(row["category"], event.category.value)
+
+
+class TypedEventPayloadTests(TestCase):
+    """Event payloads have explicit contracts and deterministic serialization."""
+
+    def test_evaluation_payload_has_typed_fields(self) -> None:
+        from accounts.audit_events import EvaluationPayload, event_payload
+
+        payload = event_payload(
+            AuditEvent.EVALUATION_SUBMITTED,
+            memberId="m1",
+            decision="APPROVED",
+            score="9.50",
+        )
+        self.assertEqual(payload["memberId"], "m1")
+        self.assertEqual(payload["score"], "9.50")
+        self.assertEqual(set(payload), {"event", "schemaVersion", "memberId", "decision", "score"})
+
+    def test_unknown_field_is_rejected(self) -> None:
+        from accounts.audit_events import event_payload
+
+        with self.assertRaises(ValueError):
+            event_payload(AuditEvent.EVALUATION_SUBMITTED, typoField="x")
+
+    def test_payload_is_persisted_with_schema_version(self) -> None:
+        from accounts.audit_events import event_payload
+
+        metadata = event_payload(AuditEvent.EVALUATION_SUBMITTED, memberId="m1", decision="APPROVED")
+        entry = record_audit(
+            AuditEntry(
+                action=AuditAction.EVALUATE,
+                entity_type=EntityType.DEFENSE,
+                entity_id="55555555-5555-5555-5555-555555555555",
+                metadata=metadata,
+            )
+        )
+        entry.refresh_from_db()
+        self.assertEqual(entry.metadata["schemaVersion"], 2)
+        self.assertEqual(entry.metadata["event"], "EVALUATION_SUBMITTED")

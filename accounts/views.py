@@ -26,6 +26,8 @@ from rest_framework.views import APIView
 from accounts.audit_identifiers import AuditCategory, EntityType
 from accounts.audit_entry import AuditEntry
 from accounts.authentication import ExternalInvitationPrincipal
+from accounts.audit_data import resolve_audit_events
+from accounts.audit_export import build_export_row
 from accounts.audit_presentation import AuditPresenter
 from accounts.models import (
     AuditAction,
@@ -262,32 +264,25 @@ class AdminUsersView(APIView):
                 to_attr="active_role_records",
             ),
         ]
-        try:
-            from academic.models import UserCourseAssignment
+        from academic.models import UserCourseAssignment
+        from allauth.socialaccount.models import SocialAccount
 
-            prefetches.append(
-                Prefetch(
-                    "course_assignments",
-                    queryset=UserCourseAssignment.objects.filter(
-                        is_active=True, revoked_at__isnull=True
-                    ).select_related("course"),
-                    to_attr="active_course_assignment_records",
-                )
+        prefetches.append(
+            Prefetch(
+                "course_assignments",
+                queryset=UserCourseAssignment.objects.filter(
+                    is_active=True, revoked_at__isnull=True
+                ).select_related("course"),
+                to_attr="active_course_assignment_records",
             )
-        except Exception:
-            pass
-        try:
-            from allauth.socialaccount.models import SocialAccount
-
-            prefetches.append(
-                Prefetch(
-                    "socialaccount_set",
-                    queryset=SocialAccount.objects.filter(provider="google"),
-                    to_attr="google_social_accounts",
-                )
+        )
+        prefetches.append(
+            Prefetch(
+                "socialaccount_set",
+                queryset=SocialAccount.objects.filter(provider="google"),
+                to_attr="google_social_accounts",
             )
-        except Exception:
-            pass
+        )
         return User.objects.prefetch_related(*prefetches).order_by("email")
 
     def get(self, request) -> Response:
@@ -386,32 +381,25 @@ class AdminUserDetailView(APIView):
                 to_attr="active_role_records",
             ),
         ]
-        try:
-            from academic.models import UserCourseAssignment
+        from academic.models import UserCourseAssignment
+        from allauth.socialaccount.models import SocialAccount
 
-            prefetches.append(
-                Prefetch(
-                    "course_assignments",
-                    queryset=UserCourseAssignment.objects.filter(
-                        is_active=True, revoked_at__isnull=True
-                    ).select_related("course"),
-                    to_attr="active_course_assignment_records",
-                )
+        prefetches.append(
+            Prefetch(
+                "course_assignments",
+                queryset=UserCourseAssignment.objects.filter(
+                    is_active=True, revoked_at__isnull=True
+                ).select_related("course"),
+                to_attr="active_course_assignment_records",
             )
-        except Exception:
-            pass
-        try:
-            from allauth.socialaccount.models import SocialAccount
-
-            prefetches.append(
-                Prefetch(
-                    "socialaccount_set",
-                    queryset=SocialAccount.objects.filter(provider="google"),
-                    to_attr="google_social_accounts",
-                )
+        )
+        prefetches.append(
+            Prefetch(
+                "socialaccount_set",
+                queryset=SocialAccount.objects.filter(provider="google"),
+                to_attr="google_social_accounts",
             )
-        except Exception:
-            pass
+        )
         return get_object_or_404(
             User.objects.prefetch_related(*prefetches),
             pk=user_id,
@@ -555,7 +543,7 @@ class AdminExternalInvitationsView(APIView):
             invited_by=request.user,
             request=request,
         )
-        return Response(
+        response = Response(
             {
                 "id": str(invitation.pk),
                 "name": invitation.name,
@@ -566,6 +554,8 @@ class AdminExternalInvitationsView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class AdminExternalInvitationDetailView(APIView):
@@ -735,14 +725,15 @@ class AdminAuditLogsExportView(APIView):
         if error_response:
             return error_response
         logs = list(queryset[:10000])
-        presenter = AuditPresenter()
-        presenter.prime(logs)
+        events = resolve_audit_events(logs)
         data = [
-            AuditLogSerializer(
-                log,
-                context={"audit_presenter": presenter, "request": request},
-            ).data
-            for log in logs
+            build_export_row(
+                event,
+                event.actor.name,
+                event.actor.roles,
+                hash_hex=bytes(log.row_hash).hex()[:8] if log.row_hash else "",
+            )
+            for event, log in zip(events, logs)
         ]
         export_format = (
             request.query_params.get("export")
@@ -764,19 +755,7 @@ class AdminAuditLogsExportView(APIView):
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         for row in data:
-            writer.writerow(
-                {
-                    **{key: row.get(key, "") for key in fieldnames},
-                    "roles": "; ".join(
-                        item.get("label", "")
-                        for item in (row.get("roles") or [])
-                    ),
-                    "roleCodes": "; ".join(row.get("roleCodes") or []),
-                    "details": json.dumps(row.get("details") or [], ensure_ascii=False),
-                    "changes": json.dumps(row.get("changes") or {}, ensure_ascii=False),
-                    "metadata": json.dumps(row.get("metadata") or {}, ensure_ascii=False),
-                }
-            )
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
         response = HttpResponse(
             "\ufeff" + output.getvalue(),
             content_type="text/csv; charset=utf-8",

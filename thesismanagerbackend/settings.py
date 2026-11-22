@@ -264,6 +264,7 @@ CSRF_COOKIE_SECURE = env.bool("CSRF_COOKIE_SECURE", default=not DEBUG)
 # Só considere cabeçalhos de encaminhamento quando a quantidade de proxies for configurada.
 
 TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
+TRUSTED_PROXY_CIDRS = env.list("TRUSTED_PROXY_CIDRS", default=[])
 INSTITUTIONAL_NETWORK_CIDRS = env.list("INSTITUTIONAL_NETWORK_CIDRS", default=[])
 VPN_NETWORK_CIDRS = env.list("VPN_NETWORK_CIDRS", default=[])
 ADMIN_ALLOWED_CIDRS = env.list(

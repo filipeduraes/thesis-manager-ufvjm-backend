@@ -103,4 +103,4 @@ def handle_user_login_failed(sender, credentials, request, **kwargs) -> None:
         request=request,
         metadata={"provider": "credentials"},
     ))
-    logger.warning("Authentication failure recorded for identifier=%s", attempted_email)
+    logger.warning("Authentication failure recorded for a login attempt.")
