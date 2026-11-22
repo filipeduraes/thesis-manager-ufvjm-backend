@@ -208,6 +208,8 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
+        # Reenvio e novo convite de membro externo: cada pedido dispara um e-mail com token novo.
+        "invitation_resend": "5/min",
         "reports": "60/min",
         "reports_export": "10/min",
         "session": "120/min",

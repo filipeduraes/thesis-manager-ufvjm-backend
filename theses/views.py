@@ -863,7 +863,7 @@ class PublicThesisDownloadView(APIView):
 
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
-from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_invitation, remove_member, resolve_committee_member, respond_availability  # noqa: E402
+from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_invitation, remove_member, resend_external_member_invitation, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
 from theses.defense_listing import DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
 from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
@@ -1232,12 +1232,46 @@ class DefenseExternalMemberCreateView(APIView):
         return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
 
 
+class DefenseExternalMemberInvitationResendView(APIView):
+    """
+    E-mail an external member a new token for the same, still valid invitation.
+    """
+
+    throttle_scope = "invitation_resend"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request, defense_id, member_id) -> Response:
+        """
+        Resend the invitation (same permission as managing the defense).
+
+        The previous token stops working immediately and a new one is e-mailed
+        asynchronously; it is never returned. Revoked, used or expired invitations
+        are refused (400) and need a new invitation instead.
+
+        Args:
+            request: HTTP request.
+            defense_id: Defense primary key from URL.
+            member_id: DefenseMember primary key from URL.
+
+        Returns:
+            Response: ``{"member": ...}`` with the delivery marked as pending (202).
+        """
+        defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
+        defense = sync_defense_status(defense, request=request)
+        member = get_object_or_404(DefenseMember, pk=member_id, defense=defense)
+        try:
+            member = resend_external_member_invitation(defense, member, actor=request.user, request=request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_202_ACCEPTED)
+
+
 class DefenseExternalMemberTokenView(APIView):
     """
     Replace an external member's invitation and e-mail a token for the new one.
     """
 
-    throttle_scope = "thesis"
+    throttle_scope = "invitation_resend"
     permission_classes = [IsInstitutionalUser]
 
     def post(self, request, defense_id, member_id) -> Response:

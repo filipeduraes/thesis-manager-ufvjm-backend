@@ -771,6 +771,80 @@ def reset_committee_availability(defense: Defense) -> int:
     return defense.members.update(availability_status=AvailabilityStatus.PENDING, availability_responded_at=None, availability_note="")
 
 
+def _resend_refusal_message(invitation: ExternalInvitation) -> str | None:
+    """
+    Explain why an invitation cannot be resent, if it cannot.
+
+    Args:
+        invitation: Locked invitation.
+
+    Returns:
+        str | None: Portuguese message for the API, or None when it can be resent.
+    """
+    status = effective_invitation_status(invitation)
+    if status == InvitationStatus.REVOKED:
+        return "Convite revogado não pode ser reenviado. Gere um novo convite."
+    if status == InvitationStatus.USED:
+        return "Convite já utilizado não pode ser reenviado. Gere um novo convite."
+    if status == InvitationStatus.EXPIRED:
+        return "Convite expirado não pode ser reenviado. Gere um novo convite."
+    if not invitation.is_usable:
+        return "Este convite não pode ser reenviado. Gere um novo convite."
+    return None
+
+
+@transaction.atomic
+def resend_external_member_invitation(defense: Defense, member: DefenseMember, *, actor: User, request: HttpRequest | None = None) -> DefenseMember:
+    """
+    E-mail the external member a new token for the same, still valid invitation.
+
+    The current token stops working immediately; the notification consumer issues
+    the new one and e-mails it. The expiration is not extended. Revoked, used or
+    expired invitations cannot be resent (``regenerate_external_member_invitation``
+    replaces them instead).
+
+    Args:
+        defense: Defense session (must be SCHEDULED or IN_PROGRESS).
+        member: External committee member.
+        actor: Admin, coordinator, or thesis advisor managing the defense.
+        request: HTTP request used for audit context.
+
+    Returns:
+        DefenseMember: Member whose invitation was resent.
+
+    Raises:
+        PermissionDenied: When the actor is not authorized to manage this defense.
+        ValidationError: When the member is not external, the defense is not active
+            or the invitation can no longer be resent.
+    """
+    if not _can_manage_defense(actor, defense.thesis_id):
+        raise PermissionDenied()
+    if member.defense_id != defense.pk:
+        raise ValidationError("Membro não pertence a esta banca.")
+    locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
+    if locked_defense.status not in ACTIVE_DEFENSE_STATUSES:
+        raise ValidationError("Só é possível reenviar convites de bancas agendadas ou em andamento.")
+    member = DefenseMember.objects.select_for_update().get(pk=member.pk)
+    if member.external_invitation_id is None:
+        raise ValidationError("Somente membros externos recebem convite por e-mail.")
+    invitation = ExternalInvitation.objects.select_for_update().get(pk=member.external_invitation_id)
+    refusal = _resend_refusal_message(invitation)
+    if refusal is not None:
+        raise ValidationError(refusal)
+    member.external_invitation = invitation
+    event = record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.RESENT)
+    record_audit(
+        action=AuditAction.INVITE,
+        entity_type="Defense",
+        entity_id=str(defense.pk),
+        entity_app_label="theses",
+        request=request,
+        actor_user=actor,
+        metadata={"event": "INVITATION_RESEND_REQUESTED", "memberId": str(member.pk), "invitationId": str(invitation.pk), "eventId": str(event.pk)},
+    )
+    return member
+
+
 @transaction.atomic
 def regenerate_external_member_invitation(defense: Defense, member: DefenseMember, *, actor: User, request: HttpRequest | None = None) -> DefenseMember:
     """
