@@ -22,7 +22,15 @@ x-backend-environment: &backend-environment
   INSTITUTIONAL_EMAIL_DOMAIN: ${INSTITUTIONAL_EMAIL_DOMAIN:-ufvjm.edu.br}
   TRUSTED_PROXY_COUNT: "0"
   ADMIN_ALLOWED_CIDRS: "127.0.0.1/32,::1/128,172.16.0.0/12"
-  EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+  # E-mail de desenvolvimento: tudo vai para o Mailpit (serviço mailpit), nunca para o
+  # log. O backend de console imprimiria o token do membro externo no stdout dos
+  # containers. Produção configura o SMTP institucional à parte (ver README).
+  EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+  EMAIL_HOST: mailpit
+  EMAIL_PORT: "1025"
+  EMAIL_USE_TLS: "False"
+  EMAIL_HOST_USER: ""
+  EMAIL_HOST_PASSWORD: ""
 
 services:
   db:
@@ -73,6 +81,21 @@ services:
       timeout: 10s
       retries: 12
       start_period: 20s
+
+  # Caixa de e-mail local: captura todas as mensagens (inclusive o token do membro
+  # externo) sem entregá-las a ninguém. A interface web fica só em 127.0.0.1:8025;
+  # a porta SMTP 1025 não é publicada e só é alcançável pelos containers do Compose.
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    environment:
+      MP_MAX_MESSAGES: "500"
+    ports:
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # Passo único: migrações do banco e topologia do RabbitMQ, nessa ordem.
   # backend e workers só sobem depois que ele termina com sucesso.
@@ -140,6 +163,8 @@ services:
       db:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      mailpit:
         condition: service_healthy
 
   frontend:

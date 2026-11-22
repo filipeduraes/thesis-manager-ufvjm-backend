@@ -286,8 +286,10 @@ EXTERNAL_SESSION_TTL_MINUTES = env.int("EXTERNAL_SESSION_TTL_MINUTES", default=2
 
 
 # Email
+# Padrão SMTP, e não console: o backend de console imprimiria no log o token de acesso
+# enviado aos membros externos da banca (ver notifications.checks).
 EMAIL_BACKEND = env(
-    "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
+    "EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend"
 )
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="nao-responda@ufvjm.edu.br")
 EMAIL_HOST = env("EMAIL_HOST", default="")

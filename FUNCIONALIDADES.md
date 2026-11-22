@@ -2,7 +2,7 @@
 
 Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
 
-> Atualizado em: 2026-11-21. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em: 2026-11-22. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
 
 ## Legenda
 - **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).
@@ -21,8 +21,8 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Fila de eventos (RabbitMQ/Kafka) | **Implementado** | RabbitMQ com *transactional outbox* (apps `events` e `notifications`, biblioteca `pika`). As transições gravam `outbox_event` na mesma transação; o comando `publish_outbox_events` publica na exchange `topic` `thesis.events` com *publisher confirms*, tentativas e backoff exponencial (`attempts`, `max_attempts`, `next_attempt_at`, `last_error`); o comando `consume_notifications` consome a fila `notifications.thesis-events` (DLQ `notifications.thesis-events.dlq`) de forma idempotente via `processed_event`. Variáveis `RABBITMQ_*`, `EVENTS_EXCHANGE`, `OUTBOX_*`, `NOTIFICATIONS_*` no `.env.example`. Conexões ociosas mantidas por heartbeat (`keep_alive`); queda do broker (inclusive host sem DNS) interrompe o lote sem gastar tentativas e os workers reconectam sozinhos com backoff até 60 s (validado com o RabbitMQ parado e religado). Extração/indexação de texto ainda não usam a fila (comando `extract_thesis_text` sob demanda). |
 | Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios (inclui `THESIS_MAX_PDF_SIZE_MB`, `THESIS_MAX_DOCUMENT_SIZE_MB`, `THESIS_MAX_KEYWORDS`). |
 | Health check | **Implementado** | `GET /health` (`HealthView`). |
-| Docker Compose | **Implementado** | Postgres, Redis, RabbitMQ (`rabbitmq:4.1-management-alpine`, painel só em `127.0.0.1:15672`), serviço one-shot `init` (`migrate` + `declare_event_topology`), backend e workers `event-publisher`/`notification-consumer` (`restart: unless-stopped`), que só sobem após o `init` concluir; perfil opcional para frontend. O `CMD` do `Dockerfile` ainda executa `migrate` antes do `runserver` (útil ao rodar a imagem sozinha), mas o Compose sobrescreve o comando do serviço `backend` com apenas `runserver`; no Compose, as migrações rodam só no `init`. |
-| Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py`, `academic/migrations/0001_initial.py`, `theses/migrations/0001_initial.py`, `events/migrations/0001_initial.py`, `notifications/migrations/0001_initial.py` e `0002_seed_templates.py` (templates de e-mail). |
+| Docker Compose | **Implementado** | Postgres, Redis, RabbitMQ (`rabbitmq:4.1-management-alpine`, painel só em `127.0.0.1:15672`), Mailpit (`axllent/mailpit:v1.32.0`, caixa de e-mail de desenvolvimento: interface só em `127.0.0.1:8025`, SMTP 1025 sem porta publicada; o compose envia todos os e-mails para ele, nunca para o console), serviço one-shot `init` (`migrate` + `declare_event_topology`), backend e workers `event-publisher`/`notification-consumer` (`restart: unless-stopped`), que só sobem após o `init` concluir; perfil opcional para frontend. O `CMD` do `Dockerfile` ainda executa `migrate` antes do `runserver` (útil ao rodar a imagem sozinha), mas o Compose sobrescreve o comando do serviço `backend` com apenas `runserver`; no Compose, as migrações rodam só no `init`. |
+| Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py` e `0002_external_invitation_token_delivery.py`, `academic/migrations/0001_initial.py`, `theses/migrations/0001_initial.py` a `0006`, `events/migrations/0001_initial.py`, `notifications/migrations/0001_initial.py`, `0002_seed_templates.py` (templates de e-mail), `0003_seed_external_member_invited_template.py` e `0004_notification_status_cancelled.py`. |
 
 ## 2. Autenticação e sessão
 
@@ -54,16 +54,17 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 | Item | Status | Observações |
 |---|---|---|
-| Modelo de convite externo | **Implementado** | `ExternalInvitation`: dados do convidado, `token_hash` SHA-256, status, expiração, uso/revogação; sem armazenar token legível. |
-| Geração de token temporário | **Implementado** | Token humano `UFVJM-XXXX-...`; `POST /api/v1/admin/external-invitations` cria convite e retorna token **uma vez**. TTL configurável. |
-| Restrição de cargos para criar convite | **Implementado** | Criação permitida para **Administrador, Coordenador, Orientador** (`CanInviteExternalCommitteeMember`). Listagem global e revogação permanecem administrativas. |
-| Listar/revogar convites | **Implementado** | `GET /api/v1/admin/external-invitations` (admin), `DELETE /api/v1/admin/external-invitations/<id>` (admin). |
+| Modelo de convite externo | **Implementado** | `ExternalInvitation`: dados do convidado, `token_hash` SHA-256, status, expiração, uso/revogação, `token_event_id` (único evento autorizado a emitir o token) e `token_sent_at` (envio do e-mail); sem armazenar token legível. |
+| Geração de token temporário | **Implementado** | Token humano `UFVJM-XXXX-...`, gerado pelo consumidor de notificações e enviado só por e-mail (ver "Envio do token por e-mail"); nenhuma resposta da API devolve o token. TTL configurável (`EXTERNAL_INVITATION_TOKEN_TTL_HOURS`). Uso único: a troca por sessão marca o convite como `USED`. |
+| Restrição de cargos para criar convite | **Implementado** | Convites só nascem pela inclusão de membro externo na banca, por quem gerencia a banca (admin, coordenador do curso, orientador da tese). A criação avulsa `POST /api/v1/admin/external-invitations` foi removida (405), junto com `CanInviteExternalCommitteeMember`. |
+| Listar/revogar convites | **Implementado** | `GET /api/v1/admin/external-invitations` (admin; inclui `sentAt`, nunca o token), `DELETE /api/v1/admin/external-invitations/<id>` (admin). |
 | Troca de token por sessão externa | **Implementado** | `POST /api/v1/auth/external-token`; valida hash/estado/expiração, `flush` da sessão, TTL da sessão externa, auditoria `TOKEN_ACCESS`. |
 | Autenticação de sessão externa | **Implementado** | `ExternalInvitationSessionAuthentication` + `ExternalInvitationPrincipal`; CSRF em métodos não seguros; bloqueio por expiração/revogação. |
 | Login por token no frontend | **Implementado** | `LoginView` envia token; sessão externa direciona para fluxo de avaliação externa. |
-| Criação de token no frontend | **Implementado** | UI admin (`AdminUsers`) e integração na tela de bancas/agendamento (`DefenseScheduling`) para gerar token real (sem vínculo de defesa ainda). |
-| Escopo do convite à banca/defesa/membro | **Implementado** | Cada `DefenseMember` externo aponta para o seu `ExternalInvitation` (one-to-one). `POST /api/v1/defenses/<id>/members/external` devolve `accessToken` (e `accessTokenExpiresAt`) **uma única vez**, com `Cache-Control: no-store`; o banco guarda só o hash, e o token não vai para AuditLog, logs nem mensagens de erro. `POST /api/v1/defenses/<id>/members/<memberId>/regenerate-token` (mesma permissão de gerenciar a banca; banca `SCHEDULED`/`IN_PROGRESS`) revoga o convite atual, cria outro para o mesmo membro (mantém disponibilidade e avaliação) e devolve o token novo uma vez. `GET /api/v1/session` e `POST /api/v1/auth/external-token` incluem `externalInvitation.assignments` (`[{defenseId, memberId}]`). A sessão externa só lê o detalhe da própria banca, confirma disponibilidade e avalia; outras bancas e ações de gestão retornam 403. |
-| Envio do token por e-mail | **Pendente** | A fila de eventos já existe, mas o token não pode passar pela outbox (que é persistida em claro) nem por logs; exige desenho próprio. Membros externos já recebem por e-mail o resultado da banca (`defense.completed`), sem token. |
+| Convite no frontend | **Implementado** | Branch `feat/external-invite-email` do frontend: a tela da banca e o agendamento mostram "Convite enviado para <e-mail>" (ou envio em processamento), com "Reenviar convite" e "Gerar novo convite"; nenhuma tela exibe o token. A criação avulsa saiu de `AdminUsers`. |
+| Escopo do convite à banca/defesa/membro | **Implementado** | Cada `DefenseMember` externo aponta para o seu `ExternalInvitation` (one-to-one). `POST /api/v1/defenses/<id>/members/external` cria o convite e o membro (201, só `member`, sem token). `POST /api/v1/defenses/<id>/members/<memberId>/regenerate-token` ("Gerar novo convite"; mesma permissão de gerenciar a banca; banca `SCHEDULED`/`IN_PROGRESS`) revoga o convite atual, cria outro com validade nova para o mesmo membro (mantém disponibilidade e avaliação; serve para convites usados, expirados ou revogados) e responde 202. O payload do membro traz, só para quem gerencia a banca, `invitationStatus`/`invitationStatusLabel` (expirado é informado mesmo antes de alguém tentar o token), `invitationExpiresAt`, `invitationSentAt` e `canResendInvitation`. `GET /api/v1/session` e `POST /api/v1/auth/external-token` incluem `externalInvitation.assignments` (`[{defenseId, memberId}]`). A sessão externa só lê o detalhe da própria banca, confirma disponibilidade e avalia; outras bancas e ações de gestão retornam 403. |
+| Envio do token por e-mail | **Implementado** | Evento `defense.external_member_invited` (payload só com ids e `trigger` `CREATED`/`RESENT`/`REGENERATED`) gravado na mesma transação da inclusão, do reenvio e do novo convite; o token anterior deixa de valer na hora. O consumidor gera o token, grava só o hash, envia o e-mail (template `EXTERNAL_MEMBER_INVITED`: papel, data/hora da banca, código, validade e instruções; sem local/link) e guarda em `notification` só a cópia mascarada (`UFVJM-****`). Reentrega ou evento substituído não geram token nem e-mail. `--retry-pending` gera token novo (nunca reenvia o corpo salvo) e cancela (`CANCELLED`) envios de convites substituídos ou inválidos. Auditoria `INVITE` do envio/reenvio (ator Sistema) e do pedido de reenvio (ator), só com ids. Testes garantem que o token não aparece na outbox, no envelope publicado, em `notification`, no `audit_log` nem nos logs. |
+| Reenvio do convite | **Implementado** | `POST /api/v1/defenses/<id>/members/<memberId>/resend-invitation` (202): quem gerencia a banca; banca `SCHEDULED`/`IN_PROGRESS`; convite `PENDING`/`ACCEPTED`, não expirado nem revogado (revogado, usado ou expirado → 400 orientando a gerar novo convite). Não renova a validade. Throttle `invitation_resend` (5/min por usuário, compartilhado com "Gerar novo convite"). |
 
 ## 5. Cursos e departamentos (cadastro acadêmico)
 
@@ -152,7 +153,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Login Google + sessão | **Implementado** | Integração com `/api/v1/session` e início OAuth. |
 | Login por token externo | **Implementado** | Troca de token e rota para avaliação externa. |
 | Área admin: usuários/cursos/auditoria | **Implementado** | Integrada aos endpoints administrativos; multi-papéis e navegação combinada. |
-| Criação de convite externo | **Implementado** | Admin e tela de bancas; convite da banca vinculado ao membro, com token devolvido uma vez e regeneração. |
+| Convite de membro externo | **Implementado** | Tela de bancas e agendamento: convite vinculado ao membro, enviado por e-mail, com status, "Reenviar convite" e "Gerar novo convite"; o token não aparece em nenhuma tela. |
 | Fluxos de TCC/orientação | **Implementado** | Submissão do aluno, acompanhamento, upload de PDF/versões/documentos, parecer do orientador (aprovar/ajustes/reprovar), leitor de PDF com zoom/download, resultado da banca e publicação. |
 | Fluxos de banca/avaliação | **Implementado** | Agendamento (`DefenseScheduling`), gestão da banca (`DefenseCommittee`), avaliação individual (`DefenseEvaluation`) e avaliação externa (`ExternalEvaluation`) consomem os endpoints de `/api/v1/defenses`. |
 | Relatórios e dashboards | **Implementado** | `ReportsView` e os dashboards de coordenação/administração consomem `GET /api/v1/reports/overview`; o botão "Exportar PDF" baixa `GET /api/v1/reports/overview/pdf` com os filtros atuais. |
@@ -194,8 +195,9 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | `POST` | `/api/v1/defenses/<id>/start` | Admin/coord/orientador da própria tese | Inicia a defesa (transição para `IN_PROGRESS`); exige confirmação de todos os membros não suplentes. |
 | `POST` | `/api/v1/defenses/<id>/close` | Admin/coord/orientador da própria tese | Encerra a defesa, calcula resultado e transita status da tese. |
 | `POST` | `/api/v1/defenses/<id>/members` | Institucional | Adiciona membro institucional à banca. |
-| `POST` | `/api/v1/defenses/<id>/members/external` | Admin/coord do curso/orientador da própria tese | Cria convite externo, adiciona membro externo à banca e devolve `accessToken` uma única vez. |
-| `POST` | `/api/v1/defenses/<id>/members/<memberId>/regenerate-token` | Admin/coord do curso/orientador da própria tese | Revoga o convite do membro externo e devolve um novo `accessToken` uma única vez. |
+| `POST` | `/api/v1/defenses/<id>/members/external` | Admin/coord do curso/orientador da própria tese | Cria convite externo e adiciona membro externo à banca (201); o token vai só por e-mail. |
+| `POST` | `/api/v1/defenses/<id>/members/<memberId>/regenerate-token` | Admin/coord do curso/orientador da própria tese | "Gerar novo convite": revoga o convite do membro externo, cria outro e envia o token por e-mail (202). Throttle `invitation_resend`. |
+| `POST` | `/api/v1/defenses/<id>/members/<memberId>/resend-invitation` | Admin/coord do curso/orientador da própria tese | Reenvia o convite ainda válido com token novo por e-mail (202); o anterior deixa de valer. Throttle `invitation_resend` (5/min). |
 | `DELETE` | `/api/v1/defenses/<id>/members/<memberId>` | Institucional | Remove membro da banca (exige status `SCHEDULED` e sem avaliação). |
 | `POST` | `/api/v1/defenses/<id>/members/<memberId>/availability` | O próprio membro (institucional ou convite externo) | Confirma (`CONFIRMED`) ou recusa (`DECLINED`) disponibilidade; só com a banca `SCHEDULED`. |
 | `GET` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Institucional ou membro da banca | Lê avaliação; nota/notas visíveis somente ao próprio membro. |
@@ -204,7 +206,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 ## 13. Prioridades sugeridas (próximos passos)
 
-1. **Fila assíncrona**: levar extração/indexação para a fila e desenhar o envio de token por e-mail (ver "Eventos assíncronos: melhorias futuras").
+1. **Fila assíncrona**: levar extração/indexação para a fila (ver "Eventos assíncronos: melhorias futuras").
 2. **Concluir integração do repositório público no frontend** e endpoint público de cursos (o de orientadores já existe).
 3. **Relatórios**: exportação CSV e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview` e exportados em PDF por `GET /api/v1/reports/overview/pdf`.
 4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
@@ -216,7 +218,6 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 ### Eventos assíncronos: melhorias futuras (fora do escopo de `feat/async-events`)
 
 - **Novos eventos**: membro adicionado à banca (`defense.member_added`, para avisar cada membro, inclusive externos), banca cancelada, banca remarcada e parecer do orientador. Nenhum deles é emitido hoje.
-- **Envio do token do membro externo por e-mail**: exige desenho próprio, porque o token não pode passar pela outbox nem por logs.
 - **Retenção**: não há limpeza de `outbox_event` publicados nem de `processed_event`; definir prazo e rotina (a FK `notification.event` usa `SET_NULL` para não travar a limpeza).
 - **Reenvio automático de notificações**: hoje só manual (`--retry-pending`), por decisão do grupo.
 

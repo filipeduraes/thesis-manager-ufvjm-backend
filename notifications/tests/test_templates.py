@@ -126,3 +126,18 @@ class NotificationConstraintTests(TestCase):
     def test_notification_requires_a_recipient(self) -> None:
         with self.assertRaises(IntegrityError), transaction.atomic():
             self._create()
+
+
+class EmailBackendCheckTests(TestCase):
+    """The system check flags e-mail backends that would print invitation tokens to the logs."""
+
+    def test_console_backend_is_flagged(self) -> None:
+        from django.test import override_settings
+
+        from notifications.checks import check_email_backend_does_not_log_messages
+
+        with override_settings(EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend"):
+            [warning] = check_email_backend_does_not_log_messages()
+        self.assertEqual(warning.id, "notifications.W001")
+        with override_settings(EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"):
+            self.assertEqual(check_email_backend_does_not_log_messages(), [])
