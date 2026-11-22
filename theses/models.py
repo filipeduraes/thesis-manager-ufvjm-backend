@@ -47,6 +47,15 @@ class ThesisStatus(models.TextChoices):
     ARCHIVED = "ARCHIVED", "Arquivada"
 
 
+class ThesisOrigin(models.TextChoices):
+    """
+    How a thesis entered the system.
+    """
+
+    WORKFLOW = "WORKFLOW", "Fluxo do sistema"
+    LEGACY_IMPORT = "LEGACY_IMPORT", "Cadastro manual de acervo"
+
+
 class ReviewDecision(models.TextChoices):
     """
     Advisor decisions for a submitted thesis version.
@@ -401,6 +410,12 @@ class Thesis(models.Model):
         db_index=True,
     )
     is_public = models.BooleanField(default=False, db_index=True)
+    origin = models.CharField(
+        max_length=20,
+        choices=ThesisOrigin.choices,
+        default=ThesisOrigin.WORKFLOW,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
@@ -501,11 +516,16 @@ class ThesisAuthor(models.Model):
         on_delete=models.CASCADE,
         related_name="authors",
     )
+    # Nulo só em monografias do acervo cadastradas manualmente cujo autor não tem
+    # conta; nesse caso `name` guarda o nome exibido.
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="authored_theses",
+        null=True,
+        blank=True,
     )
+    name = models.CharField(max_length=200, blank=True, default="")
     position = models.PositiveSmallIntegerField(default=1)
     is_main_author = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -537,6 +557,10 @@ class ThesisAuthor(models.Model):
                 condition=Q(position__gte=1),
                 name="thesis_author_position_gte_1",
             ),
+            models.CheckConstraint(
+                condition=Q(author__isnull=False) | ~Q(name=""),
+                name="thesis_author_has_identity",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -546,7 +570,21 @@ class ThesisAuthor(models.Model):
         Returns:
             str: Author representation.
         """
-        return f"{self.author_id}:{self.thesis_id}"
+        return f"{self.author_id or self.name}:{self.thesis_id}"
+
+    @property
+    def display_name(self) -> str:
+        """
+        Return the name shown for this author.
+
+        Returns:
+            str: Stored name, or the linked user's name.
+        """
+        if self.name:
+            return self.name
+        if self.author is not None:
+            return self.author.name or ""
+        return ""
 
 
 class ThesisKeyword(models.Model):

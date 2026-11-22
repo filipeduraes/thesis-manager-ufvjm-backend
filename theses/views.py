@@ -33,6 +33,7 @@ from theses.models import (
     Thesis,
     ThesisDocument,
     ThesisFile,
+    ThesisOrigin,
     ThesisStatus,
 )
 from theses.permissions import IsAcademicManager, IsAdvisorUser, IsStudentUser
@@ -46,10 +47,11 @@ from theses.repository import (
     search_public_theses,
 )
 from theses.repository_cache import cached_payload, courses_cache_key, detail_cache_key, filters_cache_key, search_cache_key
-from theses.repository_management import delete_thesis, unpublish_thesis
+from theses.repository_management import delete_thesis, import_legacy_thesis, unpublish_thesis
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
+    LegacyThesisSerializer,
     PublicThesisSearchSerializer,
     UnpublishThesisSerializer,
     ThesisMetadataSerializer,
@@ -252,7 +254,7 @@ def _student_thesis(user) -> Thesis | None:
     """
     return (
         Thesis.objects.select_related("course", "advisor")
-        .filter(authors__author=user, authors__is_main_author=True)
+        .filter(origin=ThesisOrigin.WORKFLOW, authors__author=user, authors__is_main_author=True)
         .order_by("-created_at")
         .first()
     )
@@ -510,6 +512,38 @@ class ThesisDetailView(APIView):
         except DjangoValidationError as exc:
             return _validation_response(exc)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LegacyThesisCreateView(APIView):
+    """
+    Register a legacy (already approved) thesis directly in the public repository.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis_upload"
+
+    def post(self, request) -> Response:
+        """
+        Create a published thesis with origin ``LEGACY_IMPORT`` from multipart data.
+
+        Args:
+            request: HTTP request (multipart) with ``title``, ``abstract``, ``keywords``,
+                ``authors`` (JSON list of ``{name, userId}``), ``advisorId``, ``courseId``,
+                ``defenseYear`` and/or ``defenseDate``, ``result``, optional ``type`` and
+                ``journal``, and the PDF in ``file``.
+
+        Returns:
+            Response: 201 with the thesis payload; 400 for invalid data; 403 outside
+                the coordinator's courses.
+        """
+        serializer = LegacyThesisSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis = import_legacy_thesis(request.user, serializer.to_metadata(), serializer.validated_data["result"], serializer.validated_data["file"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)}, status=status.HTTP_201_CREATED)
 
 
 class ThesisUnpublishView(APIView):

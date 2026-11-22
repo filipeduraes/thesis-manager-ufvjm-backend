@@ -4,13 +4,16 @@ Serializers for the thesis submission and review API.
 
 from __future__ import annotations
 
+import json
+
 from django.conf import settings
 from rest_framework import serializers
 
 from academic.models import Course
-from accounts.models import User
+from accounts.models import ProfileRole, User
 from theses.models import AvailabilityStatus, CommitteeRole, DefenseModality, DefenseResult, DocumentType, ReviewDecision, ThesisType
 from theses.repository import ORDERING_CHOICES, PublicSearchFilters
+from theses.repository_management import LegacyAuthor, ThesisMetadataInput
 from theses.services import available_advisors, normalize_keyword_names
 
 
@@ -275,3 +278,129 @@ class UnpublishThesisSerializer(serializers.Serializer):
     """
 
     reason = serializers.CharField(max_length=1000, allow_blank=False, trim_whitespace=True)
+
+
+class JsonListField(serializers.ListField):
+    """
+    List field that also accepts a JSON-encoded list.
+
+    Multipart requests (needed for the PDF) cannot nest objects, so clients may
+    send ``authors``/``keywords`` as a JSON string or as repeated form fields.
+    """
+
+    default_error_messages = {"invalid_json": "Envie uma lista JSON válida."}
+
+    def to_internal_value(self, data):
+        """
+        Decode a JSON string before the regular list validation.
+
+        Args:
+            data: List, JSON string or single-item list holding a JSON string.
+
+        Returns:
+            list: Validated items.
+        """
+        if isinstance(data, list) and len(data) == 1 and isinstance(data[0], str) and data[0].lstrip().startswith("["):
+            data = data[0]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                self.fail("invalid_json")
+        return super().to_internal_value(data)
+
+
+class RepositoryAuthorSerializer(serializers.Serializer):
+    """
+    Validate an author of a repository entry: a name and an optional user link.
+    """
+
+    name = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    userId = serializers.PrimaryKeyRelatedField(source="user", queryset=User.objects.all(), required=False, allow_null=True, default=None)
+
+    def validate(self, attrs: dict) -> dict:
+        """
+        Require a name or a linked user.
+
+        Args:
+            attrs: Validated attributes.
+
+        Returns:
+            dict: Validated attributes.
+
+        Raises:
+            serializers.ValidationError: When both are missing.
+        """
+        if not (attrs.get("name") or "").strip() and attrs.get("user") is None:
+            raise serializers.ValidationError("Informe o nome do autor ou vincule um usuário.")
+        return attrs
+
+
+def _advisor_candidates():
+    """
+    Return users who have or had the advisor role.
+
+    Returns:
+        QuerySet[User]: Candidate advisors for repository entries.
+    """
+    return User.objects.filter(profile_roles__role=ProfileRole.ADVISOR).distinct()
+
+
+class LegacyThesisSerializer(serializers.Serializer):
+    """
+    Validate the manual registration of a legacy (already approved) thesis.
+    """
+
+    title = serializers.CharField(max_length=500)
+    abstract = serializers.CharField()
+    keywords = JsonListField(child=serializers.CharField(max_length=50), allow_empty=False)
+    authors = JsonListField(child=RepositoryAuthorSerializer(), allow_empty=False)
+    advisorId = serializers.PrimaryKeyRelatedField(source="advisor", queryset=_advisor_candidates())
+    courseId = serializers.PrimaryKeyRelatedField(source="course", queryset=Course.objects.all())
+    defenseYear = serializers.IntegerField(source="defense_year", required=False, allow_null=True, default=None)
+    defenseDate = serializers.DateField(source="defense_date", required=False, allow_null=True, default=None)
+    result = serializers.ChoiceField(choices=[DefenseResult.APPROVED, DefenseResult.APPROVED_WITH_REMARKS])
+    type = serializers.ChoiceField(choices=ThesisType.choices, required=False, default=ThesisType.MONOGRAPH)
+    journal = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    file = serializers.FileField()
+
+    def validate(self, attrs: dict) -> dict:
+        """
+        Derive the defense year from the date when only the date is sent.
+
+        Args:
+            attrs: Validated attributes.
+
+        Returns:
+            dict: Attributes with ``defense_year`` filled.
+
+        Raises:
+            serializers.ValidationError: When neither year nor date is sent.
+        """
+        if attrs.get("defense_year") is None:
+            if attrs.get("defense_date") is None:
+                raise serializers.ValidationError({"defenseYear": "Informe o ano ou a data de defesa."})
+            attrs["defense_year"] = attrs["defense_date"].year
+        return attrs
+
+    def to_metadata(self) -> ThesisMetadataInput:
+        """
+        Build the service input from the validated data.
+
+        Returns:
+            ThesisMetadataInput: Repository metadata.
+        """
+        data = self.validated_data
+        authors = [LegacyAuthor(name=item.get("name", ""), user=item.get("user")) for item in data["authors"]]
+        return ThesisMetadataInput(
+            title=data["title"],
+            abstract=data["abstract"],
+            keywords=data["keywords"],
+            authors=authors,
+            advisor=data["advisor"],
+            course=data["course"],
+            defense_year=data["defense_year"],
+            defense_date=data["defense_date"],
+            thesis_type=data["type"],
+            journal=data["journal"],
+        )

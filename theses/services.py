@@ -50,6 +50,7 @@ from theses.models import (
     ThesisDocument,
     ThesisFile,
     ThesisKeyword,
+    ThesisOrigin,
     ThesisReview,
     ThesisStatus,
     ThesisStatusHistory,
@@ -528,7 +529,7 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
         "advisorId": str(thesis.advisor_id),
     }
     author_names = [
-        link.author.name or link.author.email
+        link.display_name or (link.author.email if link.author else "")
         for link in thesis.authors.select_related("author").order_by("position")
     ]
     if author_names:
@@ -580,7 +581,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     if not clean_abstract:
         raise ValidationError("Informe o resumo da monografia.")
 
-    thesis = Thesis.objects.select_for_update().filter(authors__author=user, authors__is_main_author=True).first()
+    thesis = Thesis.objects.select_for_update().filter(origin=ThesisOrigin.WORKFLOW, authors__author=user, authors__is_main_author=True).first()
     created = thesis is None
     if thesis is not None:
         _ensure_student_owner(user, thesis)
@@ -1690,6 +1691,8 @@ def thesis_summary_payload(thesis: Thesis, include_file_urls: bool = True) -> di
         "status": thesis.status,
         "statusLabel": ThesisStatus(thesis.status).label,
         "isPublic": thesis.is_public,
+        "origin": thesis.origin,
+        "originLabel": ThesisOrigin(thesis.origin).label,
         "course": course_brief(thesis.course),
         "advisor": user_brief(thesis.advisor),
         "student": user_brief(main_author),
@@ -1781,6 +1784,8 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
         "statusDescription": STATUS_DESCRIPTIONS.get(thesis.status, ""),
         "progressStep": WORKFLOW_STEPS.get(thesis.status, 1),
         "isPublic": thesis.is_public,
+        "origin": thesis.origin,
+        "originLabel": ThesisOrigin(thesis.origin).label,
         "course": course_brief(thesis.course),
         "advisor": user_brief(thesis.advisor),
         "student": user_brief(main_author),
@@ -1789,6 +1794,7 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
                 "id": str(author.pk),
                 "position": author.position,
                 "isMainAuthor": author.is_main_author,
+                "name": author.display_name,
                 "user": user_brief(author.author),
             }
             for author in thesis.authors.all()
@@ -1841,6 +1847,8 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str,
         "statusDescription": STATUS_DESCRIPTIONS.get(thesis.status, ""),
         "progressStep": WORKFLOW_STEPS.get(thesis.status, 1),
         "isPublic": thesis.is_public,
+        "origin": thesis.origin,
+        "originLabel": ThesisOrigin(thesis.origin).label,
         "course": course_brief(thesis.course),
         "advisor": user_brief(thesis.advisor),
         "student": user_brief(main_author),

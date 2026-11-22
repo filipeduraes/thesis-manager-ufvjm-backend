@@ -16,7 +16,7 @@ from django.db.models.functions import Coalesce, ExtractYear, Lower
 
 from academic.models import Course
 from accounts.models import User
-from theses.models import Thesis, ThesisAuthor, ThesisFile, ThesisKeyword, ThesisStatus, ThesisType
+from theses.models import Thesis, ThesisAuthor, ThesisFile, ThesisKeyword, ThesisOrigin, ThesisStatus, ThesisType
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     STATUS_DESCRIPTIONS,
@@ -160,7 +160,7 @@ def _author_name_match(value: str) -> Exists:
     Returns:
         Exists: Correlated subquery over ``thesis_author``.
     """
-    author_links = ThesisAuthor.objects.filter(thesis=OuterRef("pk"), author__name__icontains=value)
+    author_links = ThesisAuthor.objects.filter(thesis=OuterRef("pk")).filter(Q(name__icontains=value) | Q(author__name__icontains=value))
     return Exists(author_links)
 
 
@@ -310,7 +310,7 @@ def _public_authors(thesis: Thesis) -> list[dict[str, Any]]:
                 "id": str(link.pk),
                 "position": link.position,
                 "isMainAuthor": link.is_main_author,
-                "name": person["name"] if person else "",
+                "name": link.display_name,
                 "user": person,
             }
         )
@@ -388,6 +388,8 @@ def _public_common_payload(thesis: Thesis) -> dict[str, Any]:
         "statusDescription": STATUS_DESCRIPTIONS.get(thesis.status, ""),
         "progressStep": WORKFLOW_STEPS.get(thesis.status, 1),
         "isPublic": thesis.is_public,
+        "origin": thesis.origin,
+        "originLabel": ThesisOrigin(thesis.origin).label,
         "course": course_brief(thesis.course),
         "advisor": public_person_payload(thesis.advisor),
         "student": _public_main_author(authors),

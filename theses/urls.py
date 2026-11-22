@@ -40,6 +40,7 @@ urlpatterns = [
         name="api_student_thesis_withdraw",
     ),
     path("api/v1/theses", views.ThesisListView.as_view(), name="api_theses"),
+    path("api/v1/theses/legacy", views.LegacyThesisCreateView.as_view(), name="api_thesis_legacy_create"),
     path(
         "api/v1/theses/<uuid:thesis_id>",
         views.ThesisDetailView.as_view(),

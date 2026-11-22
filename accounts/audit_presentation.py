@@ -899,7 +899,7 @@ class AuditPresenter:
                 authors = list(thesis.authors.select_related("author").order_by("position"))
             names = []
             for link in authors:
-                name = _text(getattr(link.author, "name", "")) or _text(getattr(link.author, "email", ""))
+                name = _text(getattr(link, "name", "")) or _text(getattr(link.author, "name", "")) or _text(getattr(link.author, "email", ""))
                 if name:
                     names.append(name)
             if names:
