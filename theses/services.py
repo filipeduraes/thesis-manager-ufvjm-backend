@@ -496,6 +496,10 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
     """
     Record an audit entry for a thesis action.
 
+    The thesis title, reference code, course, advisor and author names are added
+    to the metadata so old entries stay readable even after the thesis is no
+    longer available for lookup.
+
     Args:
         action: Audit action code.
         thesis: Thesis instance.
@@ -504,6 +508,19 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
         metadata: Optional non-sensitive metadata.
         changes: Optional field changes.
     """
+    enriched_metadata: dict[str, object] = {
+        "thesisTitle": thesis.title,
+        "thesisReference": thesis.reference_code,
+        "courseId": str(thesis.course_id),
+        "advisorId": str(thesis.advisor_id),
+    }
+    author_names = [
+        link.author.name or link.author.email
+        for link in thesis.authors.select_related("author").order_by("position")
+    ]
+    if author_names:
+        enriched_metadata["thesisAuthorNames"] = author_names
+    enriched_metadata.update(metadata or {})
     record_audit(
         action=action,
         entity_type="Thesis",
@@ -511,7 +528,7 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata=metadata or {},
+        metadata=enriched_metadata,
         changes=changes or {},
     )
 

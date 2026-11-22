@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.authentication import ExternalInvitationPrincipal
+from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS, TRACE_ACTIONS
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -149,20 +150,6 @@ class SessionView(APIView):
                 )
         else:
             if user and user.is_authenticated:
-                try:
-                    record_audit(
-                        action=AuditAction.LOGOUT,
-                        entity_type="User",
-                        entity_id=str(user.pk),
-                        entity_app_label="accounts",
-                        request=request,
-                        actor_user=user,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to record logout audit: user_id=%s",
-                        getattr(user, "pk", None),
-                    )
                 logout(request)
             else:
                 request.session.flush()
@@ -604,6 +591,43 @@ def _filtered_audit_logs(request):
     to_date = request.query_params.get("to")
     role_filter = request.query_params.get("role")
     query = request.query_params.get("q")
+    raw_filter = (
+        request.query_params.get("category")
+        or request.query_params.get("verbosity")
+        or "all"
+    ).strip().lower()
+    valid_categories = {c.lower() for c in CATEGORY_LABELS}
+    valid_categories |= {"trace", "relevant", "all", "none"}
+    if raw_filter not in {"all", "none"}:
+        tokens = {token.strip() for token in raw_filter.split(",") if token.strip()}
+        normalized: set[str] = set()
+        for token in tokens:
+            if token == "trace":
+                normalized.add("access")
+            elif token == "relevant":
+                normalized.update({"management", "thesis", "publication"})
+            elif token in {"auth", "access"}:
+                normalized.add("access")
+            elif token in {"admin", "management"}:
+                normalized.add("management")
+            elif token in {"thesis", "defense"}:
+                normalized.add("thesis")
+            elif token in {"repository", "report", "publication"}:
+                normalized.add("publication")
+            elif token == "error":
+                normalized.add("error")
+            else:
+                normalized.add(token)
+        tokens = normalized
+        if not tokens or not tokens.issubset(valid_categories - {"all", "none", "trace", "relevant"}):
+            return None, Response(
+                {"category": "Use all, none ou códigos de categoria separados por vírgula."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from django.db.models import Q as _Q
+        queryset = queryset.filter(_Q(category="") | _Q(category__in=[t.upper() for t in tokens]))
+    elif raw_filter == "none":
+        queryset = queryset.none()
 
     if from_date:
         if parse_date(from_date) is None:
@@ -633,7 +657,9 @@ def _filtered_audit_logs(request):
                     role_code = role.value
                     break
             if role_code:
-                queryset = queryset.filter(actor_role=role_code)
+                queryset = queryset.filter(
+                    Q(actor_role=role_code) | Q(actor_roles__contains=[role_code])
+                )
 
     if query:
         term = query.strip()
@@ -662,8 +688,16 @@ class AdminAuditLogsView(APIView):
         if error_response:
             return error_response
         page = self._paginate(request, queryset)
-        serializer = AuditLogSerializer(page, many=True)
-        return self._paginated_response(request, serializer.data, page, queryset)
+        presenter = AuditPresenter()
+        presenter.prime(page)
+        serializer_data = [
+            AuditLogSerializer(
+                log,
+                context={"audit_presenter": presenter, "request": request},
+            ).data
+            for log in page
+        ]
+        return self._paginated_response(request, serializer_data, page, queryset)
 
     def _paginate(self, request, queryset):
         from rest_framework.pagination import PageNumberPagination
@@ -695,7 +729,15 @@ class AdminAuditLogsExportView(APIView):
         if error_response:
             return error_response
         logs = list(queryset[:10000])
-        data = AuditLogSerializer(logs, many=True).data
+        presenter = AuditPresenter()
+        presenter.prime(logs)
+        data = [
+            AuditLogSerializer(
+                log,
+                context={"audit_presenter": presenter, "request": request},
+            ).data
+            for log in logs
+        ]
         export_format = (
             request.query_params.get("export")
             or request.query_params.get("format")
@@ -714,15 +756,27 @@ class AdminAuditLogsExportView(APIView):
         fieldnames = [
             "timestamp",
             "actor",
+            "actorEmail",
             "role",
+            "roles",
+            "roleCodes",
             "action",
             "actionCode",
+            "actionLabel",
+            "category",
+            "categoryLabel",
+            "verbosity",
+            "verbosityLabel",
+            "summary",
             "entityType",
+            "entityTypeLabel",
             "entityAppLabel",
             "entityId",
+            "entityName",
+            "entityReference",
             "origin",
             "hash",
-            "summary",
+            "details",
             "changes",
             "metadata",
         ]
@@ -732,6 +786,12 @@ class AdminAuditLogsExportView(APIView):
             writer.writerow(
                 {
                     **{key: row.get(key, "") for key in fieldnames},
+                    "roles": "; ".join(
+                        item.get("label", "")
+                        for item in (row.get("roles") or [])
+                    ),
+                    "roleCodes": "; ".join(row.get("roleCodes") or []),
+                    "details": json.dumps(row.get("details") or [], ensure_ascii=False),
                     "changes": json.dumps(row.get("changes") or {}, ensure_ascii=False),
                     "metadata": json.dumps(row.get("metadata") or {}, ensure_ascii=False),
                 }

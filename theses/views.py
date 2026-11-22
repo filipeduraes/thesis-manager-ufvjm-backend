@@ -645,7 +645,12 @@ class ThesisFileDownloadView(APIView):
             entity_id=str(thesis_file.pk),
             entity_app_label="theses",
             request=request,
-            metadata={"thesisId": str(thesis.pk), "versionNumber": thesis_file.version_number, "disposition": disposition},
+            metadata={
+                "thesisId": str(thesis.pk),
+                "versionNumber": thesis_file.version_number,
+                "disposition": disposition,
+                "fileName": thesis_file.stored_file.original_filename,
+            },
         )
         return _download_response(thesis_file.stored_file, thesis, disposition, thesis_file.version_number)
 
@@ -750,7 +755,11 @@ class ThesisDocumentDownloadView(APIView):
             entity_id=str(document.pk),
             entity_app_label="theses",
             request=request,
-            metadata={"thesisId": str(thesis.pk), "documentType": document.type},
+            metadata={
+                "thesisId": str(thesis.pk),
+                "documentType": document.type,
+                "fileName": document.stored_file.original_filename,
+            },
         )
         return _download_response(document.stored_file, thesis, "attachment")
 

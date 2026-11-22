@@ -80,9 +80,9 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 
 | Item | Status | Observações |
 |---|---|---|
-| Auditoria append-only com hash chain | **Implementado** | `AuditLog` com SHA-256 encadeado, proteção contra update/delete em nível de modelo/queryset. |
+| Auditoria append-only com hash chain | **Implementado** | `AuditLog` com SHA-256 encadeado, proteção contra update/delete em nível de modelo/queryset. Snapshot de todos os papéis ativos do ator (`actor_roles`) e campos legíveis (`summary`, `details`, `entityName`, `entityReference`, `verbosity`). Mensagens de alto nível e detalhes em português, nomes de TCC/curso/usuário em vez de códigos; título do TCC truncado no resumo e completo no detalhe. |
 | Auditoria de sessão | **Implementado** | `SessionAudit` com IP, user agent, origem de rede, login/logout/atividade. |
-| Endpoints de auditoria admin | **Implementado** | `GET /api/v1/admin/audit-logs` (filtros/paginação) e `GET /api/v1/admin/audit-logs?export=csv|json` / `/api/v1/admin/audit-logs/export`. |
+| Endpoints de auditoria admin | **Implementado** | `GET /api/v1/admin/audit-logs` (filtros por data, cargo, texto, `verbosity=all|trace|relevant`) e `GET /api/v1/admin/audit-logs?export=csv|json` / `/api/v1/admin/audit-logs/export`. Resposta inclui `verbosity`, `verbosityLabel`, `roles`, `roleCodes`, `entityTypeLabel`, `entityName`, `entityNameShort`, `entityReference`, `details`. |
 | Resumos descritivos e antes/depois | **Implementado** | Serializer gera resumos legíveis; atualizações de usuário podem registrar transições (ex.: perfil de X para Y, curso/status); UI mostra detalhes, canal e origem da rede/IP. |
 | Restrição IP/VPN para áreas admin | **Implementado** | Middleware/CIDRs confiáveis para `/admin/` e `/api/v1/admin/`; nega sem vazar detalhes. |
 | Rate limiting | **Parcial** | Throttles DRF presentes em views (ex.: sessão, token externo); falta consolidar política completa (incl. Redis/rate limiting global de uploads conforme requisito). |

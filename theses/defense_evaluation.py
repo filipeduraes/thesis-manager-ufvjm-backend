@@ -153,7 +153,12 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             request=request,
             actor_user=actor_user,
             actor_external_invitation=actor_ext,
-            metadata={"event": "EVALUATION_SUBMITTED", "memberId": str(member.pk), "decision": decision},
+            metadata={
+                "event": "EVALUATION_SUBMITTED",
+                "memberId": str(member.pk),
+                "decision": decision,
+                "score": str(score_value) if score_value is not None else None,
+            },
         )
     auto_close_error = auto_close_after_last_evaluation(defense, request=request)
     return EvaluationOutcome(evaluation=evaluation, auto_close_error=auto_close_error)

@@ -439,7 +439,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "institutional"},
+        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "memberName": member.name, "memberRole": role, "type": "institutional"},
     )
     return member
 
@@ -511,7 +511,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "external", "invitationId": str(invitation.pk)},
+        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "memberName": member.name, "memberRole": role, "type": "external", "invitationId": str(invitation.pk)},
     )
     return member, access_token
 
@@ -550,6 +550,7 @@ def remove_member(defense: Defense, member: DefenseMember, *, actor: User, reque
 
     member_id = str(member.pk)
     role = member.role
+    member_name = member.name
     invitation = member.external_invitation
     member.delete()
 
@@ -563,7 +564,7 @@ def remove_member(defense: Defense, member: DefenseMember, *, actor: User, reque
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_REMOVED", "memberId": member_id, "role": role},
+        metadata={"event": "MEMBER_REMOVED", "memberId": member_id, "memberName": member_name, "memberRole": role},
     )
 
 
@@ -678,7 +679,7 @@ def respond_availability(defense: Defense, member: DefenseMember, *, availabilit
         request=request,
         actor_user=actor_user,
         actor_external_invitation=actor_external,
-        metadata={"event": "AVAILABILITY_RESPONDED", "memberId": str(member.pk), "from": previous_status, "to": availability_status},
+        metadata={"event": "AVAILABILITY_RESPONDED", "memberId": str(member.pk), "memberName": member.name, "memberRole": member.role, "from": previous_status, "to": availability_status},
     )
     return member
 
@@ -744,6 +745,6 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "EXTERNAL_TOKEN_REGENERATED", "memberId": str(member.pk), "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
+        metadata={"event": "EXTERNAL_TOKEN_REGENERATED", "memberId": str(member.pk), "memberName": member.name, "memberRole": member.role, "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
     )
     return member, access_token

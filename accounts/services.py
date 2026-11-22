@@ -274,8 +274,36 @@ def build_session_payload(request: HttpRequest) -> dict:
     }
 
 
-def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_label: str, actor_user_id: str | None, actor_external_invitation_id: str | None, actor_role: str | None, origin: str, ip_address: str | None, user_agent: str, changes: dict, metadata: dict, occurred_at: timezone.datetime, previous_hash_hex: str | None,) -> dict:
-    return {
+def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_label: str, actor_user_id: str | None, actor_external_invitation_id: str | None, actor_role: str | None, actor_roles: list[str], category: str, origin: str, ip_address: str | None, user_agent: str, changes: dict, metadata: dict, occurred_at: timezone.datetime, previous_hash_hex: str | None,) -> dict:
+    """
+    Build the canonical payload used to compute the audit row hash.
+
+    ``actor_roles`` is only added when the actor actually holds roles. Records
+    created before the field existed (and system/token sessions without roles)
+    keep the original payload shape, so the hash chain of historical rows can
+    still be verified.
+
+    Args:
+        action: Audit action code.
+        entity_type: Affected entity type.
+        entity_id: Affected entity identifier.
+        entity_app_label: Django app label of the entity.
+        actor_user_id: Institutional actor identifier, when present.
+        actor_external_invitation_id: External invitation actor identifier, when present.
+        actor_role: Primary role code of the actor, when present.
+        actor_roles: Every role code held by the actor.
+        origin: Network origin of the request.
+        ip_address: Client IP address.
+        user_agent: Client user agent.
+        changes: Field changes recorded by the operation.
+        metadata: Extra context recorded by the operation.
+        occurred_at: Moment of the operation.
+        previous_hash_hex: Hexadecimal hash of the previous row.
+
+    Returns:
+        dict: Payload with the canonical fields used by the hash.
+    """
+    payload = {
         "actor_user_id": actor_user_id,
         "actor_external_invitation_id": actor_external_invitation_id,
         "actor_role": actor_role,
@@ -291,15 +319,22 @@ def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_
         "occurred_at": occurred_at.isoformat(),
         "previous_hash": previous_hash_hex,
     }
+    if actor_roles:
+        payload["actor_roles"] = actor_roles
+    if category:
+        payload["category"] = category
+    return payload
 
 
-def record_audit(*, action: str, entity_type: str, entity_id: str, request: HttpRequest | None = None, actor_user: User | None = None, actor_external_invitation: ExternalInvitation | None = None, actor_role: str | None = None, origin: str | None = None, ip_address: str | None = None, user_agent: str | None = None, changes: dict | None = None, metadata: dict | None = None, entity_app_label: str = "accounts",) -> AuditLog:
+def record_audit(*, action: str, entity_type: str, entity_id: str, request: HttpRequest | None = None, actor_user: User | None = None, actor_external_invitation: ExternalInvitation | None = None, actor_role: str | None = None, actor_roles: Iterable[str] | None = None, origin: str | None = None, ip_address: str | None = None, user_agent: str | None = None, changes: dict | None = None, metadata: dict | None = None, entity_app_label: str = "accounts",) -> AuditLog:
     """
     Append a hash-chained audit entry.
     """
     occurred_at = timezone.now()
     changes = changes or {}
     metadata = metadata or {}
+    from accounts.audit_presentation import derive_audit_category
+    computed_category = derive_audit_category(str(action), entity_type, metadata)
 
     if actor_user is None and request is not None:
         candidate = getattr(request, "user", None)
@@ -308,6 +343,16 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
 
     if actor_role is None and actor_user is not None:
         actor_role = get_active_role(actor_user)
+
+    if actor_roles is None and actor_user is not None:
+        actor_roles = active_role_codes(actor_user)
+    if actor_roles is None:
+        actor_roles = [actor_role] if actor_role else []
+    normalized_actor_roles: list[str] = []
+    for role in actor_roles:
+        role_code = str(role)
+        if role_code and role_code not in normalized_actor_roles:
+            normalized_actor_roles.append(role_code)
 
     if request is not None:
         ip_address = ip_address or get_client_ip(request)
@@ -340,6 +385,8 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
                 else None
             ),
             actor_role=str(actor_role) if actor_role else None,
+            actor_roles=normalized_actor_roles,
+            category=computed_category,
             origin=origin,
             ip_address=ip_address,
             user_agent=user_agent,
@@ -356,6 +403,8 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
             actor_user=actor_user,
             actor_external_invitation=actor_external_invitation,
             actor_role=actor_role,
+            actor_roles=normalized_actor_roles,
+            category=computed_category,
             action=action,
             entity_type=entity_type,
             entity_id=str(entity_id),
@@ -480,7 +529,8 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
             entity_app_label="accounts",
             request=request,
             actor_user=assigned_by,
-            changes={"email": user.email, "roles": list(roles)},
+            changes={"name": user.name, "email": user.email, "roles": list(roles)},
+            metadata={"name": user.name, "email": user.email},
         )
     logger.info("Institutional user created: user_id=%s", user.pk)
     return user
@@ -505,6 +555,7 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
             request=request,
             actor_user=actor,
             changes={"is_active": False},
+            metadata={"name": user.name, "email": user.email},
         )
     logger.info("User deactivated: user_id=%s", user.pk)
     return user
@@ -528,6 +579,7 @@ def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: Us
             request=request,
             actor_user=actor,
             changes={"is_active": True},
+            metadata={"name": user.name, "email": user.email},
         )
     return user
 
@@ -602,7 +654,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             entity_app_label="accounts",
             request=request,
             actor_user=invited_by,
-            metadata={"email": invitation.email},
+            metadata={"name": invitation.name, "email": invitation.email, "institution": invitation.institution},
         )
     logger.info("External invitation created: invitation_id=%s", invitation.pk)
     return invitation, token
@@ -695,6 +747,7 @@ def revoke_external_invitation(invitation: ExternalInvitation, *, revoked_by: Us
         request=request,
         actor_user=revoked_by,
         changes={"status": InvitationStatus.REVOKED},
+        metadata={"name": invitation.name, "email": invitation.email},
     )
     return invitation
 

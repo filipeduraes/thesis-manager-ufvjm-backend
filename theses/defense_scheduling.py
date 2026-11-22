@@ -592,6 +592,14 @@ def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | No
     except ValidationError as exc:
         error_message = exc.messages[0] if exc.messages else "Não foi possível encerrar a banca automaticamente."
         logger.warning("Automatic close failed for defense %s after last evaluation: %s", defense.pk, error_message)
+        record_audit(
+            action=AuditAction.EVALUATE,
+            entity_type="Defense",
+            entity_id=str(defense.pk),
+            entity_app_label="theses",
+            request=request,
+            metadata={"event": "AUTO_CLOSE_FAILED", "reason": error_message},
+        )
         return error_message
     logger.info("Defense %s closed automatically after last evaluation", defense.pk)
     return None
