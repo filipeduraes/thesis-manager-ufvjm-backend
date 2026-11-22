@@ -10,20 +10,24 @@ exists only in the message handed to the e-mail backend.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 
 from accounts.models import AuditAction, ExternalInvitation
 from accounts.services import issue_external_token, mark_external_token_sent, record_audit
 from events.catalog import ExternalInvitationTrigger
 from events.outbox import EventPayload
-from notifications.models import Notification, NotificationTemplateCode
+from notifications.models import Notification, NotificationStatus, NotificationTemplateCode
 from notifications.plans import EntityNotFoundError, NotificationPlan
 from notifications.recipients import Recipient
-from notifications.rendering import TemplateContext
+from notifications.rendering import RenderedMessage, TemplateContext, render_notification
 from theses.models import ACTIVE_DEFENSE_STATUSES, CommitteeRole, DefenseMember
 
 logger = logging.getLogger(__name__)
@@ -131,6 +135,7 @@ def record_invitation_delivery(notification: Notification, event_id: UUID, trigg
         "event": AUDIT_EVENT_BY_TRIGGER.get(trigger, "INVITATION_EMAIL_SENT"),
         "trigger": trigger,
         "notificationId": str(notification.pk),
+        "attempts": notification.attempts,
         "eventId": str(event_id),
         "defenseId": str(member.defense_id) if member else None,
         "memberId": str(member.pk) if member else None,
@@ -172,3 +177,95 @@ def plan_external_member_invited(event_id: UUID, payload: EventPayload) -> Notif
 
     context = invitation_context(invitation, member)
     return NotificationPlan(NotificationTemplateCode.EXTERNAL_MEMBER_INVITED, thesis, [recipient], context, {"access_token": token}, after_send)
+
+
+@dataclass
+class PreparedInvitationRetry:
+    """
+    Invitation e-mail ready to be resent after the new token hash was committed.
+
+    Attributes:
+        notification: Notification updated with the masked copy (or cancelled).
+        content: Message with the readable token, kept only in memory; None when cancelled.
+        event_id: Outbox event that authorizes the token.
+        trigger: ``ExternalInvitationTrigger`` code of that event.
+    """
+
+    notification: Notification
+    content: RenderedMessage | None
+    event_id: UUID | None
+    trigger: str
+
+    @property
+    def cancelled(self) -> bool:
+        """
+        Tell whether the notification was cancelled instead of prepared.
+
+        Returns:
+            bool: True when nothing must be sent.
+        """
+        return self.content is None
+
+
+def _cancel_invitation_notification(notification: Notification, block_reason: str) -> PreparedInvitationRetry:
+    """
+    Mark an invitation e-mail as never to be resent.
+
+    Args:
+        notification: Locked notification.
+        block_reason: Short reason code, also stored on the row.
+
+    Returns:
+        PreparedInvitationRetry: Cancelled retry.
+    """
+    notification.status = NotificationStatus.CANCELLED
+    notification.error_message = f"Não reenviada: {block_reason}"
+    notification.save(update_fields=["status", "error_message"])
+    logger.info("Invitation notification %s cancelled (%s)", notification.pk, block_reason)
+    return PreparedInvitationRetry(notification, None, notification.event_id, "")
+
+
+def prepare_invitation_retry(notification_id: UUID, eligible: Q) -> PreparedInvitationRetry | None:
+    """
+    Issue a new token for a failed or stale invitation e-mail, never reusing the stored body.
+
+    Runs in its own transaction and commits the new hash before returning, so the
+    caller sends the e-mail only after the token is valid. The notification is moved
+    to a fresh ``PENDING`` so another retry run skips it while it is being sent.
+    Superseded events, unusable invitations and inactive defenses cancel the row.
+
+    Args:
+        notification_id: Invitation notification to retry.
+        eligible: Filter that selects notifications still due for a retry.
+
+    Returns:
+        PreparedInvitationRetry | None: Prepared or cancelled retry; None when the row
+            is locked by another run or no longer due.
+    """
+    with transaction.atomic():
+        notification = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("template", "event").filter(eligible, pk=notification_id).first()
+        if notification is None:
+            return None
+        outbox_event = notification.event
+        if outbox_event is None or notification.external_invitation_id is None:
+            return _cancel_invitation_notification(notification, "superseded")
+        try:
+            invitation, member = lock_invitation_member(notification.external_invitation_id)
+        except EntityNotFoundError:
+            return _cancel_invitation_notification(notification, "member_not_found")
+        block_reason = issuance_block_reason(invitation, member, outbox_event.pk)
+        if block_reason is not None:
+            return _cancel_invitation_notification(notification, block_reason)
+        thesis = member.defense.thesis
+        context: TemplateContext = {"thesis_title": thesis.title, "reference_code": thesis.reference_code, "recipient_name": invitation.name, **invitation_context(invitation, member)}
+        stored_copy = render_notification(notification.template, context)
+        token = issue_external_token(invitation)
+        content = render_notification(notification.template, {**context, "access_token": token})
+        notification.subject = stored_copy.subject
+        notification.body = stored_copy.body_text
+        notification.body_html = stored_copy.body_html
+        notification.status = NotificationStatus.PENDING
+        notification.scheduled_at = timezone.now()
+        notification.save(update_fields=["subject", "body", "body_html", "status", "scheduled_at"])
+    trigger = str(outbox_event.payload.get("trigger", ""))
+    return PreparedInvitationRetry(notification, content, outbox_event.pk, trigger)

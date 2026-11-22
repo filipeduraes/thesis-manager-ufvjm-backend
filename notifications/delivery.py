@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from uuid import UUID
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
@@ -15,7 +16,8 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from notifications.models import Notification, NotificationChannel, NotificationStatus
+from notifications.invitations import prepare_invitation_retry, record_invitation_delivery
+from notifications.models import Notification, NotificationChannel, NotificationStatus, NotificationTemplateCode
 from notifications.rendering import RenderedMessage
 
 logger = logging.getLogger(__name__)
@@ -109,10 +111,49 @@ class RetrySummary:
     Attributes:
         sent: Notifications delivered in this run.
         failed: Notifications that failed again.
+        cancelled: Invitation e-mails cancelled because the invitation was reissued or is no longer valid.
     """
 
     sent: int = 0
     failed: int = 0
+    cancelled: int = 0
+
+
+def _retry_eligible(now: datetime) -> Q:
+    """
+    Build the filter of notifications due for a manual retry.
+
+    Args:
+        now: Reference time of the run.
+
+    Returns:
+        Q: Failed rows, and pending rows older than ``PENDING_RETRY_GRACE``, on the e-mail channel.
+    """
+    stale_pending = Q(status=NotificationStatus.PENDING, scheduled_at__lte=now - PENDING_RETRY_GRACE)
+    failed = Q(status=NotificationStatus.FAILED, scheduled_at__lte=now)
+    return (stale_pending | failed) & Q(channel=NotificationChannel.EMAIL)
+
+
+def _retry_invitation(notification_id: UUID, eligible: Q, summary: RetrySummary) -> None:
+    """
+    Resend an invitation e-mail with a newly issued token, never the stored body.
+
+    Args:
+        notification_id: Invitation notification.
+        eligible: Filter of notifications still due.
+        summary: Counters updated in place.
+    """
+    prepared = prepare_invitation_retry(notification_id, eligible)
+    if prepared is None:
+        return
+    if prepared.cancelled:
+        summary.cancelled += 1
+        return
+    if not send_notification(prepared.notification, content=prepared.content):
+        summary.failed += 1
+        return
+    summary.sent += 1
+    record_invitation_delivery(prepared.notification, prepared.event_id, prepared.trigger)
 
 
 def retry_pending_notifications(limit: int) -> RetrySummary:
@@ -121,7 +162,9 @@ def retry_pending_notifications(limit: int) -> RetrySummary:
 
     ``PENDING`` rows younger than ``PENDING_RETRY_GRACE`` are skipped because the
     consumer may be sending them right now; rows are locked with ``SKIP LOCKED``
-    so two retry runs never send the same message.
+    so two retry runs never send the same message. Invitation e-mails are never
+    resent from the stored (masked) body: each one gets a new token, committed in
+    its own transaction before the message is sent.
 
     Args:
         limit: Maximum number of notifications in this run.
@@ -130,15 +173,19 @@ def retry_pending_notifications(limit: int) -> RetrySummary:
         RetrySummary: Counters for the run.
     """
     summary = RetrySummary()
-    now = timezone.now()
-    stale_pending = Q(status=NotificationStatus.PENDING, scheduled_at__lte=now - PENDING_RETRY_GRACE)
-    failed = Q(status=NotificationStatus.FAILED, scheduled_at__lte=now)
+    eligible = _retry_eligible(timezone.now())
+    invitation_ids: list[UUID] = []
     with transaction.atomic():
-        candidates = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("user", "external_invitation").filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit]
+        candidates = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("user", "external_invitation", "template").filter(eligible).order_by("scheduled_at")[:limit]
         for notification in candidates:
+            if notification.template.code == NotificationTemplateCode.EXTERNAL_MEMBER_INVITED:
+                invitation_ids.append(notification.pk)
+                continue
             if send_notification(notification):
                 summary.sent += 1
             else:
                 summary.failed += 1
-    logger.info("Notification retry finished: %s sent, %s failed", summary.sent, summary.failed)
+    for notification_id in invitation_ids:
+        _retry_invitation(notification_id, eligible, summary)
+    logger.info("Notification retry finished: %s sent, %s failed, %s cancelled", summary.sent, summary.failed, summary.cancelled)
     return summary

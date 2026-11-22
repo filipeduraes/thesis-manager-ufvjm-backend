@@ -48,6 +48,8 @@ class NotificationStatus(models.TextChoices):
     DELIVERED = "DELIVERED", "Entregue"
     FAILED = "FAILED", "Falhou"
     READ = "READ", "Lida"
+    # Não será reenviada: o convite foi substituído por um envio mais novo ou deixou de valer.
+    CANCELLED = "CANCELLED", "Cancelada"
 
 
 class NotificationTemplate(models.Model):

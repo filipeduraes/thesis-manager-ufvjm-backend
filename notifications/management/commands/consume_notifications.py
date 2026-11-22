@@ -83,3 +83,5 @@ class Command(BaseCommand):
             raise CommandError("--limit deve ser maior que zero.")
         summary = retry_pending_notifications(limit)
         self.stdout.write(f"Reenviadas: {summary.sent}; falharam novamente: {summary.failed}.")
+        if summary.cancelled:
+            self.stdout.write(f"Convites cancelados (substituídos ou inválidos): {summary.cancelled}.")
