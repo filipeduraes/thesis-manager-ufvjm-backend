@@ -21,11 +21,15 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
 from accounts.services import record_audit
 from academic.services import active_course_assignment
+from theses.filters import parse_year_filter
+from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
 from theses.models import (
     REVIEWABLE_STATUSES,
     StoredFile,
@@ -132,6 +136,26 @@ def _validation_response(exc: DjangoValidationError) -> Response:
     return Response({"detail": detail, "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
+def visible_thesis_or_404(user: User, thesis_id: str) -> Thesis:
+    """
+    Return a thesis visible to ``user`` or raise 404.
+
+    Args:
+        user: Authenticated user requesting the thesis.
+        thesis_id: Identifier of the requested thesis.
+
+    Returns:
+        Thesis: The visible thesis.
+
+    Raises:
+        Http404: When the thesis does not exist or is not visible to the user.
+    """
+    thesis = theses_visible_to(user).filter(pk=thesis_id).first()
+    if thesis is None:
+        raise Http404("Monografia não encontrada.")
+    return thesis
+
+
 class ThesisPagination(PageNumberPagination):
     """
     Pagination with frontend-friendly metadata for thesis lists.
@@ -216,14 +240,11 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
         queryset = queryset.filter(advisor_id=advisor_id)
     year = (request.query_params.get("year") or "").strip()
     if year:
-        try:
-            parsed_year = int(year)
-        except (TypeError, ValueError):
-            parsed_year = None
+        parsed_year = parse_year_filter(year)
         if parsed_year is not None:
             queryset = queryset.filter(Q(submitted_at__year=parsed_year) | Q(published_at__year=parsed_year))
     pending_review = (request.query_params.get("pendingReview") or "").strip().lower()
-    if pending_review in {"1", "true", "yes"}:
+    if pending_review in TRUTHY_QUERY_VALUES:
         queryset = queryset.filter(status__in=REVIEWABLE_STATUSES)
     return queryset.distinct().order_by("-updated_at")
 
@@ -468,9 +489,7 @@ class ThesisDetailView(APIView):
         Returns:
             Response: Thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         thesis = get_accessible_thesis(request.user, str(thesis.pk))
         return Response({"thesis": thesis_payload(thesis, request.user)})
 
@@ -494,9 +513,7 @@ class ThesisReviewView(APIView):
         Returns:
             Response: Updated thesis and review payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = ThesisReviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -534,9 +551,7 @@ class ThesisDefenseResultView(APIView):
         Returns:
             Response: Updated thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = DefenseResultSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -596,9 +611,7 @@ class ThesisPublishView(APIView):
         Returns:
             Response: Updated thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         try:
             thesis = publish_thesis(request.user, thesis, request)
         except DjangoValidationError as exc:
@@ -639,11 +652,10 @@ class ThesisFileDownloadView(APIView):
         disposition = (request.query_params.get("disposition") or "attachment").strip().lower()
         if disposition not in {"inline", "attachment"}:
             disposition = "attachment"
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DOWNLOAD,
-            entity_type="ThesisFile",
+            entity_type=EntityType.THESIS_FILE,
             entity_id=str(thesis_file.pk),
-            entity_app_label="theses",
             request=request,
             metadata={
                 "thesisId": str(thesis.pk),
@@ -651,7 +663,7 @@ class ThesisFileDownloadView(APIView):
                 "disposition": disposition,
                 "fileName": thesis_file.stored_file.original_filename,
             },
-        )
+        ))
         return _download_response(thesis_file.stored_file, thesis, disposition, thesis_file.version_number)
 
 
@@ -674,9 +686,7 @@ class ThesisDocumentUploadView(APIView):
         Returns:
             Response: Document payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = DocumentUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -707,9 +717,7 @@ class ThesisDocumentValidateView(APIView):
         Returns:
             Response: Document payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         document = ThesisDocument.objects.filter(pk=document_id, thesis=thesis).first()
         if document is None:
             raise Http404("Documento não encontrado.")
@@ -749,18 +757,17 @@ class ThesisDocumentDownloadView(APIView):
         document = ThesisDocument.objects.select_related("stored_file").filter(pk=document_id, thesis=thesis).first()
         if document is None:
             raise Http404("Documento não encontrado.")
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DOWNLOAD,
-            entity_type="ThesisDocument",
+            entity_type=EntityType.THESIS_DOCUMENT,
             entity_id=str(document.pk),
-            entity_app_label="theses",
             request=request,
             metadata={
                 "thesisId": str(thesis.pk),
                 "documentType": document.type,
                 "fileName": document.stored_file.original_filename,
             },
-        )
+        ))
         return _download_response(document.stored_file, thesis, "attachment")
 
 

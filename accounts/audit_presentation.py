@@ -15,56 +15,59 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from django.db.models import Prefetch
+from django.db.models import Prefetch, TextChoices
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from accounts.models import AuditAction, AuditLog, ExternalInvitation, ProfileRole, User, UserProfileRole
+from accounts.audit_identifiers import (
+    CATEGORY_LABELS,
+    ENTITY_TYPE_LABELS,
+    FIELD_LABELS,
+    AuditCategory,
+    AuditEvent,
+    AuditField,
+    EntityType,
+)
+from accounts.models import AuditAction, AuditLog, ExternalInvitation, InvitationStatus, ProfileRole, User, UserProfileRole
 from accounts.services import ROLE_PRIORITY, role_label
+from theses.models import AvailabilityStatus, CommitteeRole, DefenseResult, DefenseStatus, DocumentType, ReviewDecision, ThesisStatus
 
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 THESIS_TITLE_SUMMARY_LIMIT = 80
 
-# Granular audit categories. Each audit entry belongs to exactly one of them,
-# so the administrative UI can filter and colour-code events independently.
-CATEGORY_ACCESS = "ACCESS"          # Autenticação e acesso/consulta
-CATEGORY_MANAGEMENT = "MANAGEMENT"  # Cadastros e administração
-CATEGORY_THESIS = "THESIS"          # Monografia e defesa
-CATEGORY_PUBLICATION = "PUBLICATION"  # Publicação e relatórios
-CATEGORY_ERROR = "ERROR"              # Falhas reais
-CATEGORY_LABELS = {
-    CATEGORY_ACCESS: "Acesso",
-    CATEGORY_MANAGEMENT: "Gestão",
-    CATEGORY_THESIS: "Monografia e defesa",
-    CATEGORY_PUBLICATION: "Publicação",
-    CATEGORY_ERROR: "Erro",
-}
+# Categories, entity types, fields and events are typed identifiers shared with
+# the writers. The label maps are defined next to their enums.
+CATEGORY_ACCESS = AuditCategory.ACCESS
+CATEGORY_MANAGEMENT = AuditCategory.MANAGEMENT
+CATEGORY_THESIS = AuditCategory.THESIS
+CATEGORY_PUBLICATION = AuditCategory.PUBLICATION
+CATEGORY_ERROR = AuditCategory.ERROR
 
-def derive_audit_category(action: str, entity_type: str, metadata: dict | None = None) -> str:
+def derive_audit_category(action: str, entity_type: EntityType, metadata: dict | None = None) -> AuditCategory:
     """
     Derive the audit category from the stored action, entity type and metadata.
 
     Args:
         action: Audit action code.
-        entity_type: Affected entity type.
+        entity_type: Typed affected entity type.
         metadata: Audit metadata mapping.
 
     Returns:
-        str: One of the ``CATEGORY_*`` codes.
+        AuditCategory: The derived verbosity category.
     """
     metadata = metadata if isinstance(metadata, dict) else {}
     event = str(metadata.get("event") or "").upper()
-    if event in {"AUTO_CLOSE_FAILED"} or "ERROR" in event:
+    if event == AuditEvent.AUTO_CLOSE_FAILED or "ERROR" in event:
         return CATEGORY_ERROR
     if action in {AuditAction.READ.value, AuditAction.DOWNLOAD.value}:
         return CATEGORY_ACCESS
     if action in {AuditAction.LOGIN.value, AuditAction.LOGOUT.value, AuditAction.LOGIN_FAILED.value, AuditAction.TOKEN_ACCESS.value}:
         return CATEGORY_ACCESS
-    if action == AuditAction.PUBLISH.value or event == "PUBLISHED":
+    if action == AuditAction.PUBLISH.value or event == AuditEvent.PUBLISHED:
         return CATEGORY_PUBLICATION
-    if entity_type == "ReportOverview":
+    if entity_type == EntityType.REPORT_OVERVIEW:
         return CATEGORY_PUBLICATION
-    if entity_type in {"Thesis", "ThesisFile", "ThesisDocument", "Defense"}:
+    if entity_type in {EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT, EntityType.DEFENSE}:
         return CATEGORY_THESIS
     return CATEGORY_MANAGEMENT
 
@@ -79,122 +82,47 @@ TRACE_ACTIONS = frozenset(
     }
 )
 
-ENTITY_TYPE_LABELS = {
-    "User": "Usuário",
-    "Course": "Curso",
-    "Department": "Departamento",
-    "UserCourseAssignment": "Vínculo de curso",
-    "ExternalInvitation": "Convite externo",
-    "SessionAudit": "Sessão",
-    "AuditLog": "Auditoria",
-    "Thesis": "TCC",
-    "ThesisFile": "TCC",
-    "ThesisDocument": "Documento do TCC",
-    "Defense": "Defesa",
-    "ReportOverview": "Relatório",
-}
-
 ACTION_VERBS = {
-    "CREATE": "Criou",
-    "READ": "Consultou",
-    "UPDATE": "Atualizou",
-    "DELETE": "Excluiu",
-    "LOGIN": "Entrou no sistema",
-    "LOGOUT": "Saiu do sistema",
-    "LOGIN_FAILED": "Tentou entrar no sistema",
-    "UPLOAD": "Enviou",
-    "DOWNLOAD": "Baixou",
-    "REVIEW": "Revisou",
-    "SCHEDULE": "Agendou",
-    "EVALUATE": "Avaliou",
-    "PUBLISH": "Publicou",
-    "INVITE": "Convidou",
-    "TOKEN_ACCESS": "Acessou por token",
-    "APPROVE": "Aprovou",
-    "REJECT": "Rejeitou",
+    AuditAction.CREATE: "Criou",
+    AuditAction.READ: "Consultou",
+    AuditAction.UPDATE: "Atualizou",
+    AuditAction.DELETE: "Excluiu",
+    AuditAction.LOGIN: "Entrou no sistema",
+    AuditAction.LOGOUT: "Saiu do sistema",
+    AuditAction.LOGIN_FAILED: "Tentou entrar no sistema",
+    AuditAction.UPLOAD: "Enviou",
+    AuditAction.DOWNLOAD: "Baixou",
+    AuditAction.REVIEW: "Revisou",
+    AuditAction.SCHEDULE: "Agendou",
+    AuditAction.EVALUATE: "Avaliou",
+    AuditAction.PUBLISH: "Publicou",
+    AuditAction.INVITE: "Convidou",
+    AuditAction.TOKEN_ACCESS: "Acessou por token",
+    AuditAction.APPROVE: "Aprovou",
+    AuditAction.REJECT: "Rejeitou",
 }
 
-FIELD_LABELS = {
-    "name": "Nome",
-    "email": "E-mail",
-    "userName": "Usuário",
-    "userEmail": "E-mail do usuário",
-    "roles": "Perfis",
-    "role": "Função",
-    "is_active": "Status",
-    "status": "Status",
-    "course": "Curso",
-    "courseId": "Curso",
-    "courseName": "Curso",
-    "code": "Código",
-    "department": "Departamento",
-    "departmentId": "Departamento",
-    "departmentName": "Departamento",
-    "coordinatorEmail": "Coordenador",
-    "coordinator_email": "Coordenador",
-    "coordinatorUserId": "Coordenador",
-    "coordinatorResolved": "Coordenador definido",
-    "institution": "Instituição",
-    "expiresAt": "Expira em",
-    "session_expires_at": "Sessão expira em",
-    "provider": "Provedor",
-    "title": "Título",
-    "thesisTitle": "TCC",
-    "thesisReference": "Código do TCC",
-    "thesisAuthorNames": "Autor(es)",
-    "advisorName": "Orientador",
-    "advisorId": "Orientador",
-    "versionNumber": "Versão",
-    "disposition": "Formato",
-    "sha256": "SHA-256",
-    "sizeBytes": "Tamanho",
-    "documentType": "Tipo de documento",
-    "documentId": "Documento",
-    "documentName": "Arquivo",
-    "decision": "Decisão",
-    "result": "Resultado",
-    "thesisNewStatus": "Novo status do TCC",
-    "targetStatus": "Status de destino",
-    "trigger": "Origem do encerramento",
-    "reason": "Motivo",
-    "scheduledDatetime": "Data da defesa",
-    "availabilityReset": "Disponibilidade redefinida",
-    "memberId": "Membro da banca",
-    "memberName": "Membro da banca",
-    "memberRole": "Função na banca",
-    "invitationId": "Convite",
-    "previousInvitationId": "Convite anterior",
-    "reviewId": "Parecer",
-    "referenceCode": "Código do TCC",
-    "removedVersions": "Versões removidas",
-    "keptVersion": "Versão mantida",
-    "scope": "Escopo",
-    "type": "Tipo de membro",
-    "year": "Ano",
-    "format": "Formato",
-    "from": "De",
-    "to": "Para",
-}
-
-THESIS_ENTITY_TYPES = frozenset({"Thesis", "ThesisFile", "ThesisDocument", "Defense"})
+THESIS_ENTITY_TYPES = frozenset({EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT, EntityType.DEFENSE})
 
 THESIS_DETAIL_SKIP_KEYS = frozenset({"title"})
 
-SKIP_DETAIL_KEYS = {
-    "event",
-    "session_key",
-    "thesisId",
-    "thesisTitle",
-    "thesisReference",
-    "referenceCode",
-    "memberId",
-    "documentId",
-    "invitationId",
-    "previousInvitationId",
-    "reviewId",
-    "defenseId",
-    "userId",
-}
+SKIP_DETAIL_KEYS = frozenset(
+    {
+        AuditField.EVENT,
+        AuditField.SESSION_KEY,
+        AuditField.THESIS_ID,
+        AuditField.THESIS_TITLE,
+        AuditField.THESIS_REFERENCE,
+        AuditField.REFERENCE_CODE,
+        AuditField.MEMBER_ID,
+        AuditField.DOCUMENT_ID,
+        AuditField.INVITATION_ID,
+        AuditField.PREVIOUS_INVITATION_ID,
+        AuditField.REVIEW_ID,
+        AuditField.DEFENSE_ID,
+        AuditField.USER_ID,
+    }
+)
 
 TRIGGER_LABELS = {
     "AUTO_AFTER_LAST_EVALUATION": "Automático após a última avaliação",
@@ -206,69 +134,27 @@ DISPOSITION_LABELS = {
     "attachment": "Download",
 }
 
-INVITATION_STATUS_LABELS = {
-    "PENDING": "Pendente",
-    "ACCEPTED": "Aceito",
-    "DECLINED": "Recusado",
-    "EXPIRED": "Expirado",
-    "REVOKED": "Revogado",
-    "USED": "Utilizado",
-}
+def choices_labels(enumeration: type[TextChoices]) -> dict[str, str]:
+    """
+    Build a code-to-label map from a Django ``TextChoices`` enumeration.
 
-DEFENSE_STATUS_LABELS = {
-    "SCHEDULED": "Agendada",
-    "IN_PROGRESS": "Em andamento",
-    "COMPLETED": "Realizada",
-    "CANCELLED": "Cancelada",
-}
+    Args:
+        enumeration: TextChoices class used as the source of labels.
 
-AVAILABILITY_STATUS_LABELS = {
-    "PENDING": "Pendente",
-    "CONFIRMED": "Confirmada",
-    "DECLINED": "Recusada",
-}
+    Returns:
+        dict[str, str]: Mapping of choice values to their labels.
+    """
+    return {code: label for code, label in enumeration.choices}
 
-THESIS_STATUS_LABELS = {
-    "DRAFT": "Rascunho",
-    "SUBMITTED": "Submetida",
-    "ADVISOR_REVIEW": "Em revisão do orientador",
-    "CHANGES_REQUESTED": "Ajustes solicitados",
-    "ADVISOR_APPROVED": "Aprovada pelo orientador",
-    "READY_FOR_DEFENSE": "Pronta para banca",
-    "DEFENSE_SCHEDULED": "Banca agendada",
-    "UNDER_EVALUATION": "Em avaliação pela banca",
-    "APPROVED": "Aprovada",
-    "APPROVED_WITH_REMARKS": "Aprovada com ressalvas",
-    "REJECTED": "Reprovada",
-    "CORRECTIONS_PENDING": "Correções pendentes",
-    "PUBLISHED": "Publicada",
-    "ARCHIVED": "Arquivada",
-}
 
-DEFENSE_RESULT_LABELS = {
-    "APPROVED": "Aprovada",
-    "APPROVED_WITH_REMARKS": "Aprovada com ressalvas",
-    "REJECTED": "Reprovada",
-}
-
-REVIEW_DECISION_LABELS = {
-    "APPROVED": "Aprovada",
-    "CHANGES_REQUESTED": "Ajustes solicitados",
-    "REJECTED": "Reprovada",
-}
-
-COMMITTEE_ROLE_LABELS = {
-    "PRESIDENT": "Presidente",
-    "MEMBER": "Membro",
-    "ALTERNATE": "Suplente",
-}
-
-DOCUMENT_TYPE_LABELS = {
-    "DEFENSE_MINUTES": "Ata de defesa",
-    "PUBLICATION_AUTHORIZATION": "Autorização de publicação",
-    "SPELLING_CHECK_PROOF": "Comprovante de revisão",
-    "OTHER": "Outro documento",
-}
+INVITATION_STATUS_LABELS = choices_labels(InvitationStatus)
+DEFENSE_STATUS_LABELS = choices_labels(DefenseStatus)
+AVAILABILITY_STATUS_LABELS = choices_labels(AvailabilityStatus)
+THESIS_STATUS_LABELS = choices_labels(ThesisStatus)
+DEFENSE_RESULT_LABELS = choices_labels(DefenseResult)
+REVIEW_DECISION_LABELS = choices_labels(ReviewDecision)
+COMMITTEE_ROLE_LABELS = choices_labels(CommitteeRole)
+DOCUMENT_TYPE_LABELS = choices_labels(DocumentType)
 
 
 def _uuid(value: Any) -> str | None:
@@ -434,6 +320,17 @@ def _label_from_map(value: Any, labels: dict[str, str]) -> str:
 class _AuditIdSets:
     """
     Identifier sets collected from a batch of audit entries.
+
+    Attributes:
+        users: User identifiers referenced by the batch.
+        courses: Course identifiers referenced by the batch.
+        departments: Department identifiers referenced by the batch.
+        invitations: External invitation identifiers referenced by the batch.
+        theses: Thesis identifiers referenced by the batch.
+        files: Thesis file identifiers referenced by the batch.
+        documents: Thesis document identifiers referenced by the batch.
+        defenses: Defense identifiers referenced by the batch.
+        members: Committee member identifiers referenced by the batch.
     """
     users: set[str]
     courses: set[str]
@@ -526,21 +423,21 @@ class AuditPresenter:
 
         entity_id = _uuid(log.entity_id)
         if entity_id:
-            if log.entity_type in {"User", "UserCourseAssignment"}:
+            if log.entity_type in {EntityType.USER, EntityType.USER_COURSE_ASSIGNMENT}:
                 ids.users.add(entity_id)
-            elif log.entity_type == "Course":
+            elif log.entity_type == EntityType.COURSE:
                 ids.courses.add(entity_id)
-            elif log.entity_type == "Department":
+            elif log.entity_type == EntityType.DEPARTMENT:
                 ids.departments.add(entity_id)
-            elif log.entity_type == "ExternalInvitation":
+            elif log.entity_type == EntityType.EXTERNAL_INVITATION:
                 ids.invitations.add(entity_id)
-            elif log.entity_type == "Thesis":
+            elif log.entity_type == EntityType.THESIS:
                 ids.theses.add(entity_id)
-            elif log.entity_type == "ThesisFile":
+            elif log.entity_type == EntityType.THESIS_FILE:
                 ids.files.add(entity_id)
-            elif log.entity_type == "ThesisDocument":
+            elif log.entity_type == EntityType.THESIS_DOCUMENT:
                 ids.documents.add(entity_id)
-            elif log.entity_type == "Defense":
+            elif log.entity_type == EntityType.DEFENSE:
                 ids.defenses.add(entity_id)
 
         for value in (metadata.get("thesisId"), changes.get("thesisId")):
@@ -821,17 +718,17 @@ class AuditPresenter:
             Any | None: Thesis when it can be resolved.
         """
         entity_id = _uuid(log.entity_id)
-        if log.entity_type == "Thesis" and entity_id:
+        if log.entity_type == EntityType.THESIS and entity_id:
             return self._theses.get(entity_id)
-        if log.entity_type == "ThesisFile" and entity_id:
+        if log.entity_type == EntityType.THESIS_FILE and entity_id:
             thesis_file = self._thesis_files.get(entity_id)
             if thesis_file is not None:
                 return self._theses.get(str(thesis_file.thesis_id))
-        if log.entity_type == "ThesisDocument" and entity_id:
+        if log.entity_type == EntityType.THESIS_DOCUMENT and entity_id:
             document = self._thesis_documents.get(entity_id)
             if document is not None:
                 return self._theses.get(str(document.thesis_id))
-        if log.entity_type == "Defense" and entity_id:
+        if log.entity_type == EntityType.DEFENSE and entity_id:
             defense = self._defenses.get(entity_id)
             if defense is not None:
                 return self._theses.get(str(defense.thesis_id))
@@ -848,7 +745,7 @@ class AuditPresenter:
             Any | None: Defense when it can be resolved.
         """
         entity_id = _uuid(log.entity_id)
-        if log.entity_type == "Defense" and entity_id:
+        if log.entity_type == EntityType.DEFENSE and entity_id:
             return self._defenses.get(entity_id)
         return None
 
@@ -1143,7 +1040,7 @@ class AuditPresenter:
             log: Audit entry.
 
         Returns:
-            str: One of the ``CATEGORY_*`` codes.
+            AuditCategory: The derived verbosity category.
         """
         stored = getattr(log, "category", "")
         if stored:
@@ -1212,39 +1109,39 @@ class AuditPresenter:
         metadata = self._metadata(log)
         changes = self._changes(log)
         entity_id = _uuid(log.entity_id)
-        if log.entity_type == "User" and entity_id:
+        if log.entity_type == EntityType.USER and entity_id:
             user = self._users.get(entity_id)
             if user is not None:
                 return _text(user.name) or _text(user.email)
             return _text(metadata.get("name")) or _text(metadata.get("email"))
-        if log.entity_type == "UserCourseAssignment":
+        if log.entity_type == EntityType.USER_COURSE_ASSIGNMENT:
             user = self._users.get(entity_id) if entity_id else None
             if user is not None:
                 return _text(user.name) or _text(user.email)
             return _text(metadata.get("userName")) or _text(metadata.get("userEmail"))
-        if log.entity_type == "Course":
+        if log.entity_type == EntityType.COURSE:
             course = self._courses.get(entity_id) if entity_id else None
             if course is not None:
                 return _text(course.name)
             return _text(changes.get("name")) or _text(metadata.get("name"))
-        if log.entity_type == "Department":
+        if log.entity_type == EntityType.DEPARTMENT:
             department = self._departments.get(entity_id) if entity_id else None
             if department is not None:
                 return _text(department.name)
             return _text(changes.get("name")) or _text(metadata.get("name"))
-        if log.entity_type == "ExternalInvitation":
+        if log.entity_type == EntityType.EXTERNAL_INVITATION:
             invitation = self._invitations.get(entity_id) if entity_id else None
             if invitation is not None:
                 return _text(invitation.name)
             return _text(metadata.get("name")) or _text(metadata.get("email"))
-        if log.entity_type in {"Thesis", "ThesisFile", "ThesisDocument", "Defense"}:
+        if log.entity_type in {EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT, EntityType.DEFENSE}:
             return self._thesis_title(log)
-        if log.entity_type == "ReportOverview":
+        if log.entity_type == EntityType.REPORT_OVERVIEW:
             return "Relatório geral"
-        if log.entity_type == "SessionAudit":
+        if log.entity_type == EntityType.SESSION_AUDIT:
             user = self._user(metadata.get("userId"))
             return _text(user.name) if user is not None else "Sessão"
-        if log.entity_type == "AuditLog":
+        if log.entity_type == EntityType.AUDIT_LOG:
             return "Registro de auditoria"
         return _text(metadata.get("name")) or _text(metadata.get("title")) or _text(log.entity_id)
 
@@ -1274,34 +1171,34 @@ class AuditPresenter:
         metadata = self._metadata(log)
         changes = self._changes(log)
         entity_id = _uuid(log.entity_id)
-        if log.entity_type == "User" and entity_id:
+        if log.entity_type == EntityType.USER and entity_id:
             user = self._users.get(entity_id)
             if user is not None:
                 return _text(user.email)
             return _text(metadata.get("email")) or _text(log.entity_id)
-        if log.entity_type == "UserCourseAssignment" and entity_id:
+        if log.entity_type == EntityType.USER_COURSE_ASSIGNMENT and entity_id:
             user = self._users.get(entity_id)
             if user is not None:
                 return _text(user.email)
             return _text(metadata.get("userEmail")) or _text(log.entity_id)
-        if log.entity_type == "Course":
+        if log.entity_type == EntityType.COURSE:
             course = self._courses.get(entity_id) if entity_id else None
             if course is not None:
                 return _text(course.code) or _text(course.name)
             return _text(changes.get("code")) or _text(metadata.get("code")) or _text(log.entity_id)
-        if log.entity_type == "Department":
+        if log.entity_type == EntityType.DEPARTMENT:
             department = self._departments.get(entity_id) if entity_id else None
             if department is not None:
                 return _text(department.name)
             return _text(changes.get("name")) or _text(log.entity_id)
-        if log.entity_type == "ExternalInvitation":
+        if log.entity_type == EntityType.EXTERNAL_INVITATION:
             invitation = self._invitations.get(entity_id) if entity_id else None
             if invitation is not None:
                 return _text(invitation.email)
             return _text(metadata.get("email")) or _text(log.entity_id)
-        if log.entity_type == "Thesis":
+        if log.entity_type == EntityType.THESIS:
             return self._thesis_reference(log) or _text(log.entity_id)
-        if log.entity_type == "ThesisFile":
+        if log.entity_type == EntityType.THESIS_FILE:
             reference = self._thesis_reference(log)
             thesis_file = self._thesis_files.get(entity_id) if entity_id else None
             version = _text(metadata.get("versionNumber"))
@@ -1310,7 +1207,7 @@ class AuditPresenter:
             if reference and version:
                 return f"{reference} · versão {version}"
             return reference or version or _text(log.entity_id)
-        if log.entity_type == "ThesisDocument":
+        if log.entity_type == EntityType.THESIS_DOCUMENT:
             reference = self._thesis_reference(log)
             document = self._thesis_documents.get(entity_id) if entity_id else None
             document_type = _text(metadata.get("documentType"))
@@ -1320,9 +1217,9 @@ class AuditPresenter:
             if reference and type_label:
                 return f"{reference} · {type_label}"
             return reference or type_label or _text(log.entity_id)
-        if log.entity_type == "Defense":
+        if log.entity_type == EntityType.DEFENSE:
             return self._thesis_reference(log) or _text(log.entity_id)
-        if log.entity_type == "ReportOverview":
+        if log.entity_type == EntityType.REPORT_OVERVIEW:
             return "Visão geral"
         return _text(log.entity_id)
 
@@ -1338,20 +1235,20 @@ class AuditPresenter:
         """
         name = self.entity_name(log)
         title = self._thesis_title_short(log)
-        if log.entity_type == "User":
+        if log.entity_type == EntityType.USER:
             base = name or "usuário não identificado"
             return f"o usuário {base}"
-        if log.entity_type == "Course":
+        if log.entity_type == EntityType.COURSE:
             return f"o curso \"{name}\"" if name else "o curso"
-        if log.entity_type == "Department":
+        if log.entity_type == EntityType.DEPARTMENT:
             return f"o departamento \"{name}\"" if name else "o departamento"
-        if log.entity_type == "UserCourseAssignment":
+        if log.entity_type == EntityType.USER_COURSE_ASSIGNMENT:
             return f"o vínculo do usuário {name}" if name else "o vínculo de curso"
-        if log.entity_type == "ExternalInvitation":
+        if log.entity_type == EntityType.EXTERNAL_INVITATION:
             return f"o convite externo de {name}" if name else "o convite externo"
-        if log.entity_type in {"Thesis", "ThesisFile"}:
+        if log.entity_type in {EntityType.THESIS, EntityType.THESIS_FILE}:
             return f"o TCC \"{title}\"" if title else "o TCC"
-        if log.entity_type == "ThesisDocument":
+        if log.entity_type == EntityType.THESIS_DOCUMENT:
             document = self._thesis_documents.get(_uuid(log.entity_id) or "")
             document_type = _text(self._metadata(log).get("documentType"))
             if document is not None:
@@ -1362,13 +1259,13 @@ class AuditPresenter:
             if title:
                 return f"o documento do TCC \"{title}\""
             return "o documento do TCC"
-        if log.entity_type == "Defense":
+        if log.entity_type == EntityType.DEFENSE:
             return f"a defesa do TCC \"{title}\"" if title else "a defesa"
-        if log.entity_type == "ReportOverview":
+        if log.entity_type == EntityType.REPORT_OVERVIEW:
             return "o relatório geral"
-        if log.entity_type == "SessionAudit":
+        if log.entity_type == EntityType.SESSION_AUDIT:
             return "a sessão"
-        if log.entity_type == "AuditLog":
+        if log.entity_type == EntityType.AUDIT_LOG:
             return "o registro de auditoria"
         return f"o registro de {self.entity_type_label(log).lower()}"
 
@@ -1586,7 +1483,7 @@ class AuditPresenter:
         title_with_quotes = f"\"{title}\"" if title else ""
         thesis_phrase = f"o TCC {title_with_quotes}" if title else "o TCC"
         thesis_of_phrase = f"do TCC {title_with_quotes}" if title else "do TCC"
-        if log.entity_type == "ThesisFile":
+        if log.entity_type == EntityType.THESIS_FILE:
             version = _text(metadata.get("versionNumber"))
             thesis_file = self._thesis_files.get(_uuid(log.entity_id) or "")
             if thesis_file is not None:
@@ -1596,7 +1493,7 @@ class AuditPresenter:
             if version:
                 return f"{verb} a versão {version} {thesis_of_phrase}"
             return f"{verb} {thesis_phrase}"
-        if log.entity_type == "ThesisDocument":
+        if log.entity_type == EntityType.THESIS_DOCUMENT:
             document = self._thesis_documents.get(_uuid(log.entity_id) or "")
             document_type = _text(metadata.get("documentType"))
             if document is not None:
@@ -1610,25 +1507,25 @@ class AuditPresenter:
             if log.action == AuditAction.APPROVE:
                 return f"Validou {document_phrase}"
             return f"{ACTION_VERBS.get(log.action, log.get_action_display())} {document_phrase}"
-        if event == "SUBMITTED":
+        if event == AuditEvent.SUBMITTED:
             advisor = self._advisor_name(log)
             suffix = f" para o orientador {advisor}" if advisor else ""
             return f"Submeteu {thesis_phrase}{suffix}"
-        if event == "SUBMISSION_WITHDRAWN":
+        if event == AuditEvent.SUBMISSION_WITHDRAWN:
             return f"Retirou a submissão {thesis_of_phrase}"
-        if event == "VERSION_HISTORY_PURGED":
+        if event == AuditEvent.VERSION_HISTORY_PURGED:
             removed = _text(metadata.get("removedVersions"))
             suffix = f" ({removed} versões antigas)" if removed else ""
             return f"Removeu versões antigas {thesis_of_phrase}{suffix}"
-        if event == "DEFENSE_RESULT":
+        if event == AuditEvent.DEFENSE_RESULT:
             result = self._result_label(metadata.get("result"))
             suffix = f": {result}" if result else ""
             return f"Registrou o resultado da defesa {thesis_of_phrase}{suffix}"
-        if event == "DOCUMENT_VALIDATED":
+        if event == AuditEvent.DOCUMENT_VALIDATED:
             type_label = self._document_type_label(metadata.get("documentType"))
             document_phrase = f"o documento {type_label} {thesis_of_phrase}" if type_label else f"o documento {thesis_of_phrase}"
             return f"Validou {document_phrase}"
-        if event == "PUBLISHED":
+        if event == AuditEvent.PUBLISHED:
             return f"Publicou {thesis_phrase} no repositório"
         if log.action == AuditAction.CREATE:
             return f"Criou {thesis_phrase}"
@@ -1681,48 +1578,48 @@ class AuditPresenter:
         defense_for_phrase = f"para a defesa {thesis_of_phrase}"
         committee_phrase = f"a banca {thesis_of_phrase}"
         committee_of_phrase = f"da banca {thesis_of_phrase}"
-        if event == "DEFENSE_SCHEDULED":
+        if event == AuditEvent.DEFENSE_SCHEDULED:
             scheduled = metadata.get("scheduledDatetime")
             suffix = f" para {_format_datetime(scheduled)}" if scheduled else ""
             return f"Agendou {defense_phrase}{suffix}"
-        if event == "AUTO_STARTED_BY_SCHEDULE":
+        if event == AuditEvent.AUTO_STARTED_BY_SCHEDULE:
             return f"Iniciou automaticamente {defense_phrase}"
-        if event == "DEFENSE_UPDATED":
+        if event == AuditEvent.DEFENSE_UPDATED:
             return f"Atualizou o agendamento {defense_of_phrase}"
-        if event == "DEFENSE_CANCELLED":
+        if event == AuditEvent.DEFENSE_CANCELLED:
             reason = _text(metadata.get("reason"))
             suffix = f". Motivo: {reason}" if reason else ""
             return f"Cancelou {defense_phrase}{suffix}"
-        if event == "DEFENSE_STARTED":
+        if event == AuditEvent.DEFENSE_STARTED:
             return f"Iniciou {defense_phrase}"
-        if event == "DEFENSE_CLOSED":
+        if event == AuditEvent.DEFENSE_CLOSED:
             result = self._result_label(metadata.get("result"))
             trigger = _text(metadata.get("trigger"))
             automatic = " automaticamente" if trigger == "AUTO_AFTER_LAST_EVALUATION" else ""
             suffix = f" com resultado {result}" if result else ""
             return f"Encerrou{automatic} {defense_phrase}{suffix}"
-        if event == "STATUS_REVERTED_BY_ADMIN":
+        if event == AuditEvent.STATUS_REVERTED_BY_ADMIN:
             before = _label_from_map(metadata.get("from"), DEFENSE_STATUS_LABELS)
             after = _label_from_map(metadata.get("to"), DEFENSE_STATUS_LABELS)
             reason = _text(metadata.get("reason"))
             suffix = f". Motivo: {reason}" if reason else ""
             return f"Reverteu o status {defense_of_phrase} de {before} para {after}{suffix}"
-        if event == "MEMBER_ADDED":
+        if event == AuditEvent.MEMBER_ADDED:
             member = self._member_text(log)
             if _text(metadata.get("type")) == "external":
                 return f"Convidou {member} para {committee_phrase}"
             return f"Adicionou {member} à banca {thesis_of_phrase}"
-        if event == "MEMBER_REMOVED":
+        if event == AuditEvent.MEMBER_REMOVED:
             member = self._member_text(log)
             return f"Removeu {member} {committee_of_phrase}"
-        if event == "AVAILABILITY_RESPONDED":
+        if event == AuditEvent.AVAILABILITY_RESPONDED:
             member = self._member_text(log)
             answer = _label_from_map(metadata.get("to"), AVAILABILITY_STATUS_LABELS).lower()
             return f"{member} respondeu à disponibilidade {defense_for_phrase}: {answer}"
-        if event == "EXTERNAL_TOKEN_REGENERATED":
+        if event == AuditEvent.EXTERNAL_TOKEN_REGENERATED:
             member = self._member_text(log)
             return f"Gerou um novo token de acesso para {member}, {committee_of_phrase}"
-        if event == "EVALUATION_SUBMITTED":
+        if event == AuditEvent.EVALUATION_SUBMITTED:
             evaluation = self._evaluation_for_log(log)
             score = ""
             decision = _text(metadata.get("decision"))
@@ -1740,7 +1637,7 @@ class AuditPresenter:
             elif decision:
                 parts.append(f"com decisão {self._decision_label(decision)}")
             return " ".join(parts)
-        if event == "EVALUATION_BLOCKED_AFTER_CLOSE":
+        if event == AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE:
             return f"Tentou avaliar {defense_to_phrase} após o encerramento"
         if log.action == AuditAction.SCHEDULE:
             return f"Agendou {defense_phrase}"
@@ -1803,21 +1700,21 @@ class AuditPresenter:
             if identifier and "@" in identifier:
                 return f"Tentou entrar no sistema sem sucesso com o e-mail {identifier}"
             return "Tentou entrar no sistema sem sucesso"
-        if log.entity_type == "User":
+        if log.entity_type == EntityType.USER:
             return self._user_summary(log)
-        if log.entity_type == "Course":
+        if log.entity_type == EntityType.COURSE:
             return self._course_summary(log)
-        if log.entity_type == "Department":
+        if log.entity_type == EntityType.DEPARTMENT:
             return self._department_summary(log)
-        if log.entity_type == "UserCourseAssignment":
+        if log.entity_type == EntityType.USER_COURSE_ASSIGNMENT:
             return self._assignment_summary(log)
-        if log.entity_type == "ExternalInvitation":
+        if log.entity_type == EntityType.EXTERNAL_INVITATION:
             return self._invitation_summary(log)
-        if log.entity_type in {"Thesis", "ThesisFile", "ThesisDocument"}:
+        if log.entity_type in {EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT}:
             return self._thesis_summary(log)
-        if log.entity_type == "Defense":
+        if log.entity_type == EntityType.DEFENSE:
             return self._defense_summary(log)
-        if log.entity_type == "ReportOverview":
+        if log.entity_type == EntityType.REPORT_OVERVIEW:
             return self._report_summary(log)
         return f"{ACTION_VERBS.get(log.action, log.get_action_display())} {self.entity_phrase(log)}"
 
@@ -1835,8 +1732,6 @@ class AuditPresenter:
         """
         if key in SKIP_DETAIL_KEYS:
             return None
-        if key == "session_key":
-            return None
         if value is None or value == "":
             return "—"
         if key in {"roles", "role"} and isinstance(value, (list, tuple)):
@@ -1845,9 +1740,9 @@ class AuditPresenter:
             return _label_from_map(value, COMMITTEE_ROLE_LABELS)
         if key == "is_active":
             return "Ativo" if bool(value) else "Inativo"
-        if key in {"decision"}:
+        if key == "decision":
             return self._decision_label(value)
-        if key in {"result"}:
+        if key == "result":
             return self._result_label(value)
         if key in {"thesisNewStatus", "targetStatus"}:
             return _label_from_map(value, THESIS_STATUS_LABELS)
@@ -1885,20 +1780,11 @@ class AuditPresenter:
             if isinstance(value, str) and value:
                 return value
             return None
-        if key in {"advisorId", "coordinatorUserId", "userId"}:
+        if key in {"advisorId", "coordinatorUserId"}:
             user = self._user(value)
             if user is not None:
                 return _text(user.name) or _text(user.email)
             return None
-        if key == "memberId":
-            member = self._members.get(_uuid(value) or "")
-            return _text(member.name) if member is not None else None
-        if key == "documentId":
-            document = self._thesis_documents.get(_uuid(value) or "")
-            return self._document_type_label(document.type) if document is not None else None
-        if key in {"invitationId", "previousInvitationId"}:
-            invitation = self._invitation(value)
-            return _text(invitation.name) if invitation is not None else None
         if key in {"thesisAuthorNames", "authorNames"} and isinstance(value, (list, tuple)):
             return _join_names(_text(item) for item in value)
         if isinstance(value, bool):
@@ -1957,24 +1843,22 @@ class AuditPresenter:
         member = self._member_for_log(log)
         evaluation = self._evaluation_for_log(log)
 
-        if entity_type == "User":
-            pass
-        elif entity_type == "Course":
+        if entity_type == EntityType.COURSE:
             course = self._course(log.entity_id)
             self._add_detail(entries, seen, "Curso", self.entity_name(log))
             if course is not None:
                 self._add_detail(entries, seen, "Código", course.code)
                 self._add_detail(entries, seen, "Departamento", getattr(course.department, "name", ""))
                 self._add_detail(entries, seen, "Coordenador", getattr(course.coordinator, "name", "") if getattr(course, "coordinator_id", None) else course.coordinator_email)
-        elif entity_type == "Department":
+        elif entity_type == EntityType.DEPARTMENT:
             self._add_detail(entries, seen, "Departamento", self.entity_name(log))
-        elif entity_type == "UserCourseAssignment":
+        elif entity_type == EntityType.USER_COURSE_ASSIGNMENT:
             user = self._user(log.entity_id)
             self._add_detail(entries, seen, "Usuário", self.entity_name(log))
             if user is not None:
                 self._add_detail(entries, seen, "E-mail", user.email)
             self._add_detail(entries, seen, "Curso", self._course_name(log))
-        elif entity_type == "ExternalInvitation":
+        elif entity_type == EntityType.EXTERNAL_INVITATION:
             invitation = self._invitation(log.entity_id)
             self._add_detail(entries, seen, "Convidado", self.entity_name(log))
             self._add_detail(entries, seen, "E-mail", _text(metadata.get("email")) or (invitation.email if invitation is not None else ""))
@@ -1982,7 +1866,7 @@ class AuditPresenter:
                 self._add_detail(entries, seen, "Instituição", invitation.institution)
                 self._add_detail(entries, seen, "Expira em", _format_datetime(invitation.expires_at))
                 self._add_detail(entries, seen, "Situação do convite", _label_from_map(invitation.status, INVITATION_STATUS_LABELS))
-        elif entity_type in {"Thesis", "ThesisFile", "ThesisDocument"}:
+        elif entity_type in {EntityType.THESIS, EntityType.THESIS_FILE, EntityType.THESIS_DOCUMENT}:
             if thesis is not None:
                 self._add_detail(entries, seen, "TCC", thesis.title)
                 self._add_detail(entries, seen, "Código do TCC", thesis.reference_code)
@@ -1994,7 +1878,7 @@ class AuditPresenter:
                 self._add_detail(entries, seen, "Código do TCC", self._thesis_reference(log))
                 self._add_detail(entries, seen, "Autor(es)", _join_names(self._author_names(log)))
                 self._add_detail(entries, seen, "Orientador", self._advisor_name(log))
-            if entity_type == "ThesisFile":
+            if entity_type == EntityType.THESIS_FILE:
                 thesis_file = self._thesis_files.get(_uuid(log.entity_id) or "")
                 version = thesis_file.version_number if thesis_file is not None else metadata.get("versionNumber")
                 self._add_detail(entries, seen, "Versão", version)
@@ -2003,7 +1887,7 @@ class AuditPresenter:
                 if thesis_file is not None:
                     file_name = thesis_file.stored_file.original_filename
                 self._add_detail(entries, seen, "Arquivo", file_name)
-            if entity_type == "ThesisDocument":
+            if entity_type == EntityType.THESIS_DOCUMENT:
                 document = self._thesis_documents.get(_uuid(log.entity_id) or "")
                 document_type = document.type if document is not None else metadata.get("documentType")
                 self._add_detail(entries, seen, "Tipo de documento", self._document_type_label(document_type))
@@ -2011,7 +1895,7 @@ class AuditPresenter:
                 if document is not None:
                     file_name = document.stored_file.original_filename
                 self._add_detail(entries, seen, "Arquivo", file_name)
-        elif entity_type == "Defense":
+        elif entity_type == EntityType.DEFENSE:
             if thesis is not None:
                 self._add_detail(entries, seen, "TCC", thesis.title)
                 self._add_detail(entries, seen, "Código do TCC", thesis.reference_code)
@@ -2030,7 +1914,7 @@ class AuditPresenter:
             if evaluation is not None:
                 self._add_detail(entries, seen, "Nota", _format_score(evaluation.score))
                 self._add_detail(entries, seen, "Decisão", self._decision_label(evaluation.decision))
-        elif entity_type == "ReportOverview":
+        elif entity_type == EntityType.REPORT_OVERVIEW:
             self._add_detail(entries, seen, "Relatório", "Visão geral dos TCCs")
             scope = _text(metadata.get("scope"))
             self._add_detail(entries, seen, "Escopo", "Cursos coordenados" if scope == "COORDINATED_COURSES" else "Todos os cursos")
@@ -2046,9 +1930,10 @@ class AuditPresenter:
             for key, value in source.items():
                 if entity_type in THESIS_ENTITY_TYPES and key in THESIS_DETAIL_SKIP_KEYS:
                     continue
-                if entity_type == "User" and key in {"name", "email"}:
+                if entity_type == EntityType.USER and key in {"name", "email"}:
                     continue
-                label = FIELD_LABELS.get(key, key)
+                field = AuditField.parse(key)
+                label = FIELD_LABELS.get(field, key) if field is not None else key
                 if isinstance(value, dict) and "from" in value and "to" in value:
                     before = self._format_value(log, key, value.get("from"))
                     after = self._format_value(log, key, value.get("to"))
@@ -2071,19 +1956,3 @@ class AuditPresenter:
                     continue
                 self._add_detail(entries, seen, label, formatted)
         return entries
-
-    def entity_user_email(self, log: AuditLog) -> str:
-        """
-        Return the user e-mail for a user entity.
-
-        Args:
-            log: Audit entry.
-
-        Returns:
-            str: User e-mail or metadata e-mail.
-        """
-        metadata = self._metadata(log)
-        user = self._user(log.entity_id)
-        if user is not None:
-            return _text(user.email)
-        return _text(metadata.get("email"))

@@ -22,6 +22,9 @@ from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from accounts.audit_entry import AuditEntry
+from accounts.audit_identifiers import EntityType
+from accounts.audit_payload import AuditPayload
 from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock
 from accounts.models import (
     AuditAction,
@@ -101,6 +104,14 @@ def active_role_codes(user: User) -> list[str]:
         user.active_profile_roles().values_list("role", flat=True)
     )
     return [role for role in ROLE_PRIORITY if role in assigned]
+
+
+def actor_from_request(request: HttpRequest | None) -> User | None:
+    """Return the authenticated institutional user of a request, if any."""
+    candidate = getattr(request, "user", None) if request is not None else None
+    if candidate is not None and candidate.is_authenticated and isinstance(candidate, User):
+        return candidate
+    return None
 
 
 def get_active_role(user: User) -> str | None:
@@ -275,65 +286,31 @@ def build_session_payload(request: HttpRequest) -> dict:
     }
 
 
-def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_label: str, actor_user_id: str | None, actor_external_invitation_id: str | None, actor_role: str | None, actor_roles: list[str], category: str, origin: str, ip_address: str | None, user_agent: str, changes: dict, metadata: dict, occurred_at: timezone.datetime, previous_hash_hex: str | None,) -> dict:
+def record_audit(entry: AuditEntry) -> AuditLog:
     """
-    Build the canonical payload used to compute the audit row hash.
-
-    ``actor_roles`` is only added when the actor actually holds roles. Records
-    created before the field existed (and system/token sessions without roles)
-    keep the original payload shape, so the hash chain of historical rows can
-    still be verified.
+    Append a hash-chained audit entry described by ``entry``.
 
     Args:
-        action: Audit action code.
-        entity_type: Affected entity type.
-        entity_id: Affected entity identifier.
-        entity_app_label: Django app label of the entity.
-        actor_user_id: Institutional actor identifier, when present.
-        actor_external_invitation_id: External invitation actor identifier, when present.
-        actor_role: Primary role code of the actor, when present.
-        actor_roles: Every role code held by the actor.
-        origin: Network origin of the request.
-        ip_address: Client IP address.
-        user_agent: Client user agent.
-        changes: Field changes recorded by the operation.
-        metadata: Extra context recorded by the operation.
-        occurred_at: Moment of the operation.
-        previous_hash_hex: Hexadecimal hash of the previous row.
+        entry: Audit context grouping entity, actor, HTTP context and content.
 
     Returns:
-        dict: Payload with the canonical fields used by the hash.
+        AuditLog: The appended audit entry.
     """
-    payload = {
-        "actor_user_id": actor_user_id,
-        "actor_external_invitation_id": actor_external_invitation_id,
-        "actor_role": actor_role,
-        "action": action,
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "entity_app_label": entity_app_label,
-        "origin": origin,
-        "ip_address": ip_address,
-        "user_agent": user_agent,
-        "changes": changes,
-        "metadata": metadata,
-        "occurred_at": occurred_at.isoformat(),
-        "previous_hash": previous_hash_hex,
-    }
-    if actor_roles:
-        payload["actor_roles"] = actor_roles
-    if category:
-        payload["category"] = category
-    return payload
-
-
-def record_audit(*, action: str, entity_type: str, entity_id: str, request: HttpRequest | None = None, actor_user: User | None = None, actor_external_invitation: ExternalInvitation | None = None, actor_role: str | None = None, actor_roles: Iterable[str] | None = None, origin: str | None = None, ip_address: str | None = None, user_agent: str | None = None, changes: dict | None = None, metadata: dict | None = None, entity_app_label: str = "accounts",) -> AuditLog:
-    """
-    Append a hash-chained audit entry.
-    """
+    action = entry.action
+    entity_type = EntityType(entry.entity_type)
+    entity_id = entry.entity_id
+    entity_app_label = entity_type.app_label
+    request = entry.request
+    actor_user = entry.actor_user
+    actor_external_invitation = entry.actor_external_invitation
+    actor_role = entry.actor_role
+    actor_roles = entry.actor_roles
+    origin = entry.origin
+    ip_address = entry.ip_address
+    user_agent = entry.user_agent
+    changes = entry.changes or {}
+    metadata = entry.metadata or {}
     occurred_at = timezone.now()
-    changes = changes or {}
-    metadata = metadata or {}
     from accounts.audit_presentation import derive_audit_category
     computed_category = derive_audit_category(str(action), entity_type, metadata)
 
@@ -375,20 +352,11 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
         previous_hash_hex = (
             bytes(previous_hash).hex() if previous_hash is not None else None
         )
-        payload = _audit_payload(
+        payload = AuditPayload(
             action=str(action),
             entity_type=entity_type,
             entity_id=str(entity_id),
             entity_app_label=entity_app_label,
-            actor_user_id=str(actor_user.pk) if actor_user else None,
-            actor_external_invitation_id=(
-                str(actor_external_invitation.pk)
-                if actor_external_invitation
-                else None
-            ),
-            actor_role=str(actor_role) if actor_role else None,
-            actor_roles=normalized_actor_roles,
-            category=computed_category,
             origin=origin,
             ip_address=ip_address,
             user_agent=user_agent,
@@ -396,9 +364,18 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
             metadata=metadata,
             occurred_at=occurred_at,
             previous_hash_hex=previous_hash_hex,
+            actor_user_id=str(actor_user.pk) if actor_user else None,
+            actor_external_invitation_id=(
+                str(actor_external_invitation.pk)
+                if actor_external_invitation
+                else None
+            ),
+            actor_role=str(actor_role) if actor_role else None,
+            actor_roles=tuple(normalized_actor_roles),
+            category=computed_category,
         )
         row_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(payload.as_dict(), sort_keys=True, default=str).encode("utf-8")
         ).digest()
 
         return AuditLog.objects.create(
@@ -529,16 +506,15 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
             logger.exception(
                 "Failed to resolve pending coordinators: user_id=%s", user.pk
             )
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.CREATE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=assigned_by,
             changes={"name": user.name, "email": user.email, "roles": list(roles)},
             metadata={"name": user.name, "email": user.email},
-        )
+        ))
     logger.info("Institutional user created: user_id=%s", user.pk)
     return user
 
@@ -554,16 +530,15 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
         if actor is not None and actor.pk == user.pk:
             raise ValidationError("O administrador não pode desativar a própria conta.")
         User.objects.deactivate(user)
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DELETE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=actor,
             changes={"is_active": False},
             metadata={"name": user.name, "email": user.email},
-        )
+        ))
     logger.info("User deactivated: user_id=%s", user.pk)
     return user
 
@@ -578,16 +553,15 @@ def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: Us
             user.save(update_fields=["is_active"])
         if roles is not None:
             set_user_roles(user, roles, assigned_by=actor)
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=actor,
             changes={"is_active": True},
             metadata={"name": user.name, "email": user.email},
-        )
+        ))
     return user
 
 
@@ -654,15 +628,14 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             token_hash=hash_external_token(token),
             expires_at=expires_at,
         )
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.INVITE,
-            entity_type="ExternalInvitation",
+            entity_type=EntityType.EXTERNAL_INVITATION,
             entity_id=str(invitation.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=invited_by,
             metadata={"name": invitation.name, "email": invitation.email, "institution": invitation.institution},
-        )
+        ))
     logger.info("External invitation created: invitation_id=%s", invitation.pk)
     return invitation, token
 
@@ -730,15 +703,14 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             now + timedelta(minutes=ttl_minutes),
             invitation.expires_at,
         )
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.TOKEN_ACCESS,
-            entity_type="ExternalInvitation",
+            entity_type=EntityType.EXTERNAL_INVITATION,
             entity_id=str(invitation.pk),
-            entity_app_label="accounts",
             request=request,
             actor_external_invitation=invitation,
             metadata={"session_expires_at": session_expires_at.isoformat()},
-        )
+        ))
 
     # Sessão/cache não são transacionais: aplicar o flush somente após o commit
     # evita uma sessão externa órfã se a gravação no banco falhar.
@@ -762,16 +734,15 @@ def revoke_external_invitation(invitation: ExternalInvitation, *, revoked_by: Us
     invitation.status = InvitationStatus.REVOKED
     invitation.revoked_by = revoked_by
     invitation.save(update_fields=["revoked_at", "status", "revoked_by"])
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.DELETE,
-        entity_type="ExternalInvitation",
+        entity_type=EntityType.EXTERNAL_INVITATION,
         entity_id=str(invitation.pk),
-        entity_app_label="accounts",
         request=request,
         actor_user=revoked_by,
         changes={"status": InvitationStatus.REVOKED},
         metadata={"name": invitation.name, "email": invitation.email},
-    )
+    ))
     return invitation
 
 

@@ -245,3 +245,10 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 - **Corrigido:** proteção do último administrador e atribuição de curso passaram a usar locks transacionais; avaliações de banca são revalidadas sob lock antes da escrita ( impedindo alteração após o encerramento).
 - **Corrigido:** convites expirados agora persistem `EXPIRED`; mutações de sessão externa ocorrem após o commit; exclusão física de PDFs usa `transaction.on_commit`; membros institucionais duplicados são bloqueados por constraint; extração de texto usa `SKIP LOCKED`.
 - **Novos testes:** `accounts/tests/test_concurrency.py` e `theses/tests/test_concurrency_integrity.py`.
+
+## Refatoração de qualidade (2026-11-22)
+
+- `AuditPayload` (dataclass) substitui os 15 parâmetros do cálculo do hash, sem alterar o conteúdo hashed.
+- Rótulos de status/resultado da auditoria passaram a ser derivados dos `TextChoices` dos models (remove duplicação; "OTHER" agora usa o rótulo do model, "Outro").
+- Helpers extraídos: `actor_from_request`, `audit_defense`, `visible_thesis_or_404`, `parse_year_filter` e constantes de query params.
+- Exportação CSV usa os campos do serializer, mantendo os dois formatos alinhados.

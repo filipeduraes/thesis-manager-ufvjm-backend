@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from rest_framework import serializers
 
-from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS, derive_audit_category
+from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS
 from accounts.models import (
     AuditLog,
     ProfileRole,

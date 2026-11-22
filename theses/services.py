@@ -20,11 +20,14 @@ from django.utils import timezone
 
 from academic.models import Course, UserCourseAssignment
 from academic.services import active_course_assignment
+from accounts.audit_identifiers import AuditEvent, EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
 from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted
+from theses.filters import parse_year_filter
 from theses.models import (
     APPROVED_DEFENSE_STATUSES,
     DEFENSE_RESULT_STATUSES,
@@ -525,16 +528,15 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
     if author_names:
         enriched_metadata["thesisAuthorNames"] = author_names
     enriched_metadata.update(metadata or {})
-    record_audit(
+    record_audit(AuditEntry(
         action=action,
-        entity_type="Thesis",
+        entity_type=EntityType.THESIS,
         entity_id=str(thesis.pk),
-        entity_app_label="theses",
         request=request,
         actor_user=actor,
         metadata=enriched_metadata,
         changes=changes or {},
-    )
+    ))
 
 
 @transaction.atomic
@@ -844,7 +846,7 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
         thesis,
         request,
         user,
-        metadata={"event": "SUBMITTED", "versionNumber": current.version_number},
+        metadata={"event": AuditEvent.SUBMITTED, "versionNumber": current.version_number},
     )
     return thesis
 
@@ -887,14 +889,14 @@ def withdraw_submission(user: User, thesis: Thesis, request: HttpRequest | None 
         target_status,
         user,
         "Envio descartado pelo aluno antes da avaliação do orientador.",
-        metadata={"event": "SUBMISSION_WITHDRAWN"},
+        metadata={"event": AuditEvent.SUBMISSION_WITHDRAWN},
     )
     _audit_thesis(
         AuditAction.UPDATE,
         thesis,
         request,
         user,
-        metadata={"event": "SUBMISSION_WITHDRAWN", "targetStatus": target_status},
+        metadata={"event": AuditEvent.SUBMISSION_WITHDRAWN, "targetStatus": target_status},
     )
     return thesis
 
@@ -975,7 +977,12 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
 
 
 def _delete_stored_paths(paths: Iterable[str]) -> None:
-    """Remove arquivos físicos órfãos após o commit da transação."""
+    """
+    Remove orphaned physical files after the database transaction commits.
+
+    Args:
+        paths: Storage paths whose database rows have already been deleted.
+    """
     for path in paths:
         try:
             if default_storage.exists(path):
@@ -1033,7 +1040,7 @@ def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: Ht
             thesis,
             request,
             actor,
-            metadata={"event": "VERSION_HISTORY_PURGED", "removedVersions": removed, "keptVersion": current.version_number},
+            metadata={"event": AuditEvent.VERSION_HISTORY_PURGED, "removedVersions": removed, "keptVersion": current.version_number},
         )
     return removed
 
@@ -1084,7 +1091,7 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
         thesis,
         request,
         user,
-        metadata={"event": "DEFENSE_RESULT", "result": result},
+        metadata={"event": AuditEvent.DEFENSE_RESULT, "result": result},
     )
     return thesis
 
@@ -1137,7 +1144,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
         thesis,
         request,
         user,
-        metadata={"event": "PUBLISHED", "referenceCode": thesis.reference_code},
+        metadata={"event": AuditEvent.PUBLISHED, "referenceCode": thesis.reference_code},
     )
     return thesis
 
@@ -1228,7 +1235,7 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
         thesis,
         request,
         user,
-        metadata={"documentType": document.type, "documentId": str(document.pk), "event": "DOCUMENT_VALIDATED"},
+        metadata={"documentType": document.type, "documentId": str(document.pk), "event": AuditEvent.DOCUMENT_VALIDATED},
     )
     return document
 
@@ -1693,10 +1700,7 @@ def public_theses_filtered(query: str = "", course_id: str = "", advisor_id: str
     if advisor_id:
         queryset = queryset.filter(advisor_id=advisor_id)
     if year:
-        try:
-            parsed_year = int(year)
-        except (TypeError, ValueError):
-            parsed_year = None
+        parsed_year = parse_year_filter(year)
         if parsed_year is not None:
             queryset = queryset.filter(published_at__year=parsed_year)
     if keyword:
