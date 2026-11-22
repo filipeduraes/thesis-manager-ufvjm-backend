@@ -5,6 +5,7 @@ Serializers for the thesis submission and review API.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from django.conf import settings
 from rest_framework import serializers
@@ -404,3 +405,61 @@ class LegacyThesisSerializer(serializers.Serializer):
             thesis_type=data["type"],
             journal=data["journal"],
         )
+
+
+class PublishedThesisUpdateSerializer(serializers.Serializer):
+    """
+    Validate a partial edit of a published thesis' metadata.
+
+    Every field is optional; omitted fields keep their current values.
+    """
+
+    title = serializers.CharField(max_length=500, required=False)
+    abstract = serializers.CharField(required=False)
+    keywords = JsonListField(child=serializers.CharField(max_length=50), required=False, allow_empty=False)
+    authors = JsonListField(child=RepositoryAuthorSerializer(), required=False, allow_empty=False)
+    advisorId = serializers.PrimaryKeyRelatedField(source="advisor", queryset=_advisor_candidates(), required=False)
+    courseId = serializers.PrimaryKeyRelatedField(source="course", queryset=Course.objects.all(), required=False)
+    defenseYear = serializers.IntegerField(source="defense_year", required=False)
+    defenseDate = serializers.DateField(source="defense_date", required=False, allow_null=True)
+    type = serializers.ChoiceField(choices=ThesisType.choices, required=False)
+    journal = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    reason = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="")
+
+    def merge_into(self, base: ThesisMetadataInput) -> ThesisMetadataInput:
+        """
+        Overlay the sent fields on the current metadata.
+
+        Sending only ``defenseDate`` also moves ``defenseYear`` to the date's year.
+
+        Args:
+            base: Current metadata of the thesis.
+
+        Returns:
+            ThesisMetadataInput: Complete metadata after the edit.
+        """
+        data = self.validated_data
+        overrides: dict[str, object] = {}
+        for source_name, target_name in (("title", "title"), ("abstract", "abstract"), ("keywords", "keywords"), ("advisor", "advisor"), ("course", "course"), ("defense_year", "defense_year"), ("defense_date", "defense_date"), ("type", "thesis_type"), ("journal", "journal")):
+            if source_name in data:
+                overrides[target_name] = data[source_name]
+        if "authors" in data:
+            overrides["authors"] = [LegacyAuthor(name=item.get("name", ""), user=item.get("user")) for item in data["authors"]]
+        defense_date = overrides.get("defense_date")
+        if "defense_year" not in overrides and defense_date is not None:
+            overrides["defense_year"] = defense_date.year
+        # Ano novo sem data nova: a data antiga de outro ano deixaria de valer,
+        # então é descartada em vez de bloquear a edição.
+        stale_date = base.defense_date is not None and base.defense_date.year != overrides.get("defense_year", base.defense_year)
+        if "defense_date" not in overrides and stale_date:
+            overrides["defense_date"] = None
+        return replace(base, **overrides)
+
+
+class PublishedFileSerializer(serializers.Serializer):
+    """
+    Validate the replacement PDF of a published thesis.
+    """
+
+    file = serializers.FileField()
+    changeDescription = serializers.CharField(source="change_description", max_length=2000, required=False, allow_blank=True, default="")

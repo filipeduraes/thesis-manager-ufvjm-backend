@@ -47,11 +47,13 @@ from theses.repository import (
     search_public_theses,
 )
 from theses.repository_cache import cached_payload, courses_cache_key, detail_cache_key, filters_cache_key, search_cache_key
-from theses.repository_management import delete_thesis, import_legacy_thesis, unpublish_thesis
+from theses.repository_management import current_metadata, delete_thesis, import_legacy_thesis, replace_published_file, unpublish_thesis, update_published_thesis
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
     LegacyThesisSerializer,
+    PublishedFileSerializer,
+    PublishedThesisUpdateSerializer,
     PublicThesisSearchSerializer,
     UnpublishThesisSerializer,
     ThesisMetadataSerializer,
@@ -544,6 +546,73 @@ class LegacyThesisCreateView(APIView):
             return _validation_response(exc)
         thesis = get_accessible_thesis(request.user, str(thesis.pk))
         return Response({"thesis": thesis_payload(thesis, request.user)}, status=status.HTTP_201_CREATED)
+
+
+class PublishedThesisUpdateView(APIView):
+    """
+    Edit the metadata of a published thesis.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis"
+
+    def patch(self, request, thesis_id) -> Response:
+        """
+        Apply a partial edit to a published thesis and record it.
+
+        Args:
+            request: HTTP request (JSON) with any of ``title``, ``abstract``, ``keywords``,
+                ``authors``, ``advisorId``, ``courseId``, ``defenseYear``, ``defenseDate``,
+                ``type``, ``journal`` and an optional ``reason``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: Updated thesis payload.
+        """
+        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
+        if thesis is None:
+            raise Http404("Monografia não encontrada.")
+        serializer = PublishedThesisUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        metadata = serializer.merge_into(current_metadata(thesis))
+        try:
+            thesis = update_published_thesis(request.user, thesis, metadata, serializer.validated_data["reason"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)})
+
+
+class PublishedThesisFileView(APIView):
+    """
+    Replace the PDF of a published thesis with a new version.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis_upload"
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Upload a new PDF version; the previous one stays in the history.
+
+        Args:
+            request: HTTP request (multipart) with ``file`` and optional ``changeDescription``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: 201 with the new ``file`` and the thesis payload.
+        """
+        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
+        if thesis is None:
+            raise Http404("Monografia não encontrada.")
+        serializer = PublishedFileSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis_file = replace_published_file(request.user, thesis, serializer.validated_data["file"], serializer.validated_data["change_description"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"file": thesis_file_payload(thesis_file), "thesis": thesis_payload(thesis, request.user)}, status=status.HTTP_201_CREATED)
 
 
 class ThesisUnpublishView(APIView):

@@ -1727,6 +1727,7 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
             "canUploadDocuments": False,
             "canUploadCorrection": False,
             "canUnpublish": False,
+            "canEditPublished": False,
             "canDelete": False,
         }
     roles = user_roles(viewer)
@@ -1751,6 +1752,7 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
         "canRecordDefenseResult": bool((is_admin or is_coordinator) and thesis.status in DEFENSE_RESULT_STATUSES),
         "canUploadDocuments": bool(user_can_access_thesis(viewer, thesis) and thesis.status not in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}),
         "canUnpublish": bool((is_admin or is_coordinator) and thesis.status == ThesisStatus.PUBLISHED),
+        "canEditPublished": bool((is_admin or is_coordinator) and thesis.status == ThesisStatus.PUBLISHED),
         "canDelete": bool((is_admin or is_coordinator) and not thesis_was_published(thesis) and thesis.deleted_at is None),
     }
 

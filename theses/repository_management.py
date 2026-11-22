@@ -27,6 +27,7 @@ from theses.repository_cache import invalidate_public_repository_cache
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     _add_status_history,
+    _add_thesis_version,
     _audit_thesis,
     _store_pdf,
     _sync_keywords,
@@ -316,6 +317,178 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     invalidate_public_repository_cache()
     logger.info("Legacy thesis %s imported by %s", thesis.pk, user.pk)
     return thesis
+
+
+def current_metadata(thesis: Thesis) -> ThesisMetadataInput:
+    """
+    Read the editable bibliographic metadata of a thesis.
+
+    Args:
+        thesis: Thesis with ``course`` and ``advisor`` loaded.
+
+    Returns:
+        ThesisMetadataInput: Current values, used as the base of a partial edit.
+    """
+    authors = [LegacyAuthor(name=link.display_name, user=link.author) for link in thesis.authors.select_related("author").order_by("position")]
+    keywords = [link.keyword.name for link in thesis.keyword_links.select_related("keyword").order_by("keyword__name")]
+    fallback_year = thesis.published_at.astimezone(REPOSITORY_TIME_ZONE).year if thesis.published_at else timezone.localdate().year
+    return ThesisMetadataInput(
+        title=thesis.title,
+        abstract=thesis.abstract,
+        keywords=keywords,
+        authors=authors,
+        advisor=thesis.advisor,
+        course=thesis.course,
+        defense_year=thesis.defense_year or fallback_year,
+        defense_date=thesis.defense_date,
+        thesis_type=thesis.type,
+        journal=thesis.journal,
+    )
+
+
+def _comparable_metadata(metadata: ThesisMetadataInput) -> dict[str, Any]:
+    """
+    Project metadata into JSON-friendly values used to diff and audit edits.
+
+    Args:
+        metadata: Repository metadata.
+
+    Returns:
+        dict[str, Any]: Values keyed by the API field names.
+    """
+    return {
+        "title": metadata.title,
+        "abstract": metadata.abstract,
+        "keywords": sorted(name.casefold() for name in metadata.keywords),
+        "authors": [{"name": author.name, "userId": str(author.user.pk) if author.user else None} for author in metadata.authors],
+        "advisorId": str(metadata.advisor.pk),
+        "courseId": str(metadata.course.pk),
+        "defenseYear": metadata.defense_year,
+        "defenseDate": metadata.defense_date.isoformat() if metadata.defense_date else None,
+        "type": metadata.thesis_type,
+        "journal": metadata.journal,
+    }
+
+
+def _ensure_published(thesis: Thesis) -> None:
+    """
+    Require a thesis that is currently in the public repository.
+
+    Args:
+        thesis: Thesis instance.
+
+    Raises:
+        ValidationError: When the thesis is not published.
+    """
+    if thesis.status != ThesisStatus.PUBLISHED or not thesis.is_public:
+        raise ValidationError("Apenas monografias publicadas podem ser editadas por esta rota.")
+
+
+@transaction.atomic
+def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadataInput, reason: str = "", request: HttpRequest | None = None) -> Thesis:
+    """
+    Edit the bibliographic metadata of a published thesis.
+
+    Records who changed what and when: a ``ThesisStatusHistory`` entry (status
+    unchanged) listing the changed fields and an ``AuditLog`` UPDATE with the
+    previous and new values. Moving the thesis to another course requires
+    managing both courses.
+
+    Args:
+        user: Administrator or coordinator of the course.
+        thesis: Published thesis.
+        metadata: Complete metadata after the edit (current values merged with the request).
+        reason: Optional justification.
+        request: HTTP request used for audit context.
+
+    Returns:
+        Thesis: Updated thesis.
+
+    Raises:
+        PermissionDenied: When the user does not manage the current or the new course.
+        ValidationError: When the thesis is not published, nothing changed or data is invalid.
+    """
+    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    ensure_manages_course(user, thesis.course)
+    _ensure_published(thesis)
+    if metadata.course.pk != thesis.course_id:
+        ensure_manages_course(user, metadata.course)
+    clean = _clean_metadata(metadata)
+    before = _comparable_metadata(current_metadata(thesis))
+    after = _comparable_metadata(clean)
+    changes = {field_name: {"from": before[field_name], "to": after[field_name]} for field_name in after if before[field_name] != after[field_name]}
+    if not changes:
+        raise ValidationError("Nenhuma alteração foi informada.")
+    thesis.title = clean.title
+    thesis.abstract = clean.abstract
+    thesis.type = clean.thesis_type
+    thesis.journal = clean.journal
+    thesis.advisor = clean.advisor
+    thesis.course = clean.course
+    thesis.defense_year = clean.defense_year
+    thesis.defense_date = clean.defense_date
+    thesis.save()
+    if "authors" in changes:
+        _replace_authors(thesis, clean.authors)
+    if "keywords" in changes:
+        _sync_keywords(thesis, clean.keywords)
+    changed_fields = sorted(changes)
+    clean_reason = " ".join((reason or "").split()) or "Metadados da monografia publicada atualizados."
+    _add_status_history(thesis, thesis.status, thesis.status, user, clean_reason, metadata={"event": "PUBLISHED_METADATA_UPDATED", "changedFields": changed_fields})
+    _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata={"event": "PUBLISHED_METADATA_UPDATED", "changedFields": changed_fields}, changes=changes)
+    invalidate_public_repository_cache()
+    logger.info("Published thesis %s updated by %s (fields=%s)", thesis.pk, user.pk, ",".join(changed_fields))
+    return thesis
+
+
+@transaction.atomic
+def replace_published_file(user: User, thesis: Thesis, uploaded_file: Any, change_description: str = "", request: HttpRequest | None = None) -> ThesisFile:
+    """
+    Publish a new PDF version of a published thesis, keeping the previous one.
+
+    The new file goes through the upload validation and gets its own SHA-256;
+    the previous version stays in the history (not current, no longer
+    downloadable publicly, hash still listed in the public detail).
+
+    Args:
+        user: Administrator or coordinator of the course.
+        thesis: Published thesis.
+        uploaded_file: New PDF.
+        change_description: Description of the change.
+        request: HTTP request used for audit context.
+
+    Returns:
+        ThesisFile: New current version.
+
+    Raises:
+        PermissionDenied: When the user does not manage the course.
+        ValidationError: When the thesis is not published or the file is invalid,
+            identical to the current version or already used by another thesis.
+    """
+    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    ensure_manages_course(user, thesis.course)
+    _ensure_published(thesis)
+    digest, _ = _validate_pdf_upload(uploaded_file, "THESIS_MAX_PDF_SIZE_MB", 50)
+    _ensure_pdf_not_in_other_thesis(digest, thesis)
+    previous = thesis.files.filter(is_current=True).select_related("stored_file").first()
+    stored_file = _store_pdf(uploaded_file, thesis, user, "THESIS_MAX_PDF_SIZE_MB", 50)
+    description = (change_description or "").strip() or "Substituição do PDF publicado."
+    thesis_file = _add_thesis_version(thesis, stored_file, user, description)
+    thesis_file.hash_verified_at = timezone.now()
+    thesis_file.save(update_fields=["hash_verified_at"])
+    thesis.save(update_fields=["updated_at"])
+    file_metadata = {
+        "event": "PUBLISHED_FILE_REPLACED",
+        "versionNumber": thesis_file.version_number,
+        "sha256": stored_file.sha256_hex,
+        "previousVersionNumber": previous.version_number if previous else None,
+        "previousSha256": previous.stored_file.sha256_hex if previous else None,
+    }
+    _add_status_history(thesis, thesis.status, thesis.status, user, description, metadata=file_metadata)
+    _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata={**file_metadata, "sizeBytes": stored_file.size_bytes})
+    invalidate_public_repository_cache()
+    logger.info("Published thesis %s received version %s", thesis.pk, thesis_file.version_number)
+    return thesis_file
 
 
 @transaction.atomic
