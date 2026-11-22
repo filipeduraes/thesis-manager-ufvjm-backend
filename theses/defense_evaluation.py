@@ -139,12 +139,40 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
         if not (Decimal("0") <= score_value <= Decimal("10")):
             raise ValidationError("A nota deve ser entre 0,00 e 10,00.")
 
+    blocked_after_close = False
     with transaction.atomic():
-        evaluation, created = DefenseMemberEvaluation.objects.update_or_create(
-            member=member,
-            defaults={"decision": decision, "score": score_value, "notes": notes.strip()},
-        )
-        record_defense_evaluation_recorded(defense, member, is_update=not created)
+        # A verificação inicial usa o objeto carregado pela view, que pode estar
+        # desatualizado: outra avaliação pode encerrar a banca nesse intervalo.
+        # O status é revalidado sob lock antes de qualquer escrita.
+        locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
+        if locked_defense.status == DefenseStatus.COMPLETED:
+            blocked_after_close = True
+        elif locked_defense.status != DefenseStatus.IN_PROGRESS:
+            raise ValidationError("Avaliações só podem ser submetidas durante a sessão de defesa.")
+        else:
+            defense = locked_defense
+            evaluation, created = DefenseMemberEvaluation.objects.update_or_create(
+                member=member,
+                defaults={"decision": decision, "score": score_value, "notes": notes.strip()},
+            )
+            record_defense_evaluation_recorded(defense, member, is_update=not created)
+            record_audit(
+                action=AuditAction.EVALUATE,
+                entity_type="Defense",
+                entity_id=str(defense.pk),
+                entity_app_label="theses",
+                request=request,
+                actor_user=actor_user,
+                actor_external_invitation=actor_ext,
+                metadata={
+                    "event": "EVALUATION_SUBMITTED",
+                    "memberId": str(member.pk),
+                    "decision": decision,
+                    "score": str(score_value) if score_value is not None else None,
+                },
+            )
+    if blocked_after_close:
+        # Auditoria após o commit, como o fluxo original pretendia.
         record_audit(
             action=AuditAction.EVALUATE,
             entity_type="Defense",
@@ -153,13 +181,9 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             request=request,
             actor_user=actor_user,
             actor_external_invitation=actor_ext,
-            metadata={
-                "event": "EVALUATION_SUBMITTED",
-                "memberId": str(member.pk),
-                "decision": decision,
-                "score": str(score_value) if score_value is not None else None,
-            },
+            metadata={"event": "EVALUATION_BLOCKED_AFTER_CLOSE", "memberId": str(member.pk)},
         )
+        raise ValidationError("A banca já foi encerrada. Avaliações não podem ser alteradas.")
     auto_close_error = auto_close_after_last_evaluation(defense, request=request)
     return EvaluationOutcome(evaluation=evaluation, auto_close_error=auto_close_error)
 

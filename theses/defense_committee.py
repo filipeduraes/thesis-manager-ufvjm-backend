@@ -11,7 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
@@ -422,16 +422,22 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
     _check_schedule_overlap(defense, user)
 
     has_conflict = bool(conflict_reason.strip())
-    member = DefenseMember.objects.create(
-        defense=defense,
-        role=role,
-        institutional_member=user,
-        name=user.name or user.email,
-        email=user.email,
-        institution="",
-        has_conflict=has_conflict,
-        conflict_reason=conflict_reason.strip(),
-    )
+    try:
+        with transaction.atomic():
+            member = DefenseMember.objects.create(
+                defense=defense,
+                role=role,
+                institutional_member=user,
+                name=user.name or user.email,
+                email=user.email,
+                institution="",
+                has_conflict=has_conflict,
+                conflict_reason=conflict_reason.strip(),
+            )
+    except IntegrityError as exc:
+        if role == CommitteeRole.PRESIDENT:
+            raise ValidationError("Esta banca já possui um presidente.") from exc
+        raise ValidationError("Este usuário já faz parte da banca.") from exc
     record_audit(
         action=AuditAction.CREATE,
         entity_type="Defense",
@@ -494,16 +500,21 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         request=request,
     )
     has_conflict = bool(conflict_reason.strip())
-    member = DefenseMember.objects.create(
-        defense=defense,
-        role=role,
-        external_invitation=invitation,
-        name=clean_name,
-        email=clean_email,
-        institution=institution.strip(),
-        has_conflict=has_conflict,
-        conflict_reason=conflict_reason.strip(),
-    )
+    try:
+        member = DefenseMember.objects.create(
+            defense=defense,
+            role=role,
+            external_invitation=invitation,
+            name=clean_name,
+            email=clean_email,
+            institution=institution.strip(),
+            has_conflict=has_conflict,
+            conflict_reason=conflict_reason.strip(),
+        )
+    except IntegrityError as exc:
+        if role == CommitteeRole.PRESIDENT:
+            raise ValidationError("Esta banca já possui um presidente.") from exc
+        raise ValidationError("Não foi possível adicionar o membro à banca.") from exc
     record_audit(
         action=AuditAction.CREATE,
         entity_type="Defense",

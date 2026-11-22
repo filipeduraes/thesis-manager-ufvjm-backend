@@ -651,6 +651,12 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
     from_status = defense.status
     to_status = defense.previous_status or DefenseStatus.SCHEDULED
 
+    if to_status in ACTIVE_DEFENSE_STATUSES and Defense.objects.filter(
+        thesis_id=defense.thesis_id,
+        status__in=ACTIVE_DEFENSE_STATUSES,
+    ).exclude(pk=defense.pk).exists():
+        raise ValidationError("Já existe outra banca ativa para esta monografia.")
+
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
     previous_thesis_status = thesis.status
     thesis.status = ThesisStatus.DEFENSE_SCHEDULED

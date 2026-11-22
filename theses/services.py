@@ -13,13 +13,14 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Max, Q, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
 from academic.models import Course, UserCourseAssignment
 from academic.services import active_course_assignment
+from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
@@ -452,9 +453,12 @@ def _sync_keywords(thesis: Thesis, keyword_names: Iterable[str]) -> None:
     keywords: list[Keyword] = []
     for name in normalize_keyword_names(keyword_names):
         normalized = name.casefold()
-        keyword = Keyword.objects.filter(normalized_name=normalized).first()
-        if keyword is None:
-            keyword = Keyword.objects.create(name=name, normalized_name=normalized)
+        try:
+            keyword, _ = Keyword.objects.get_or_create(
+                normalized_name=normalized, defaults={"name": name}
+            )
+        except IntegrityError:
+            keyword = Keyword.objects.get(normalized_name=normalized)
         keywords.append(keyword)
     existing_links = list(thesis.keyword_links.select_related("keyword"))
     desired_ids = {keyword.pk for keyword in keywords}
@@ -555,6 +559,9 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     Raises:
         ValidationError: When the user is not allowed to edit or data is invalid.
     """
+    # Um SELECT FOR UPDATE não PROTEGE linhas que ainda não existem: sem esse
+    # lock, dois PUT concorrentes criam dois rascunhos para o mesmo autor.
+    acquire_transaction_lock(THESIS_DRAFT_LOCK_KEY + (user.pk.int % 100000))
     _validate_course(course)
     _validate_advisor(advisor)
     clean_title = " ".join((title or "").split())
@@ -967,6 +974,16 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
     return review
 
 
+def _delete_stored_paths(paths: Iterable[str]) -> None:
+    """Remove arquivos físicos órfãos após o commit da transação."""
+    for path in paths:
+        try:
+            if default_storage.exists(path):
+                default_storage.delete(path)
+        except OSError:
+            logger.warning("Falha ao remover arquivo armazenado: path=%s", path)
+
+
 @transaction.atomic
 def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: HttpRequest | None = None) -> int:
     """
@@ -992,6 +1009,7 @@ def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: Ht
         raise ValidationError("A monografia não possui versão atual.")
     old_files = list(thesis.files.exclude(pk=current.pk).select_related("stored_file"))
     removed = 0
+    paths_to_delete: list[str] = []
     for thesis_file in old_files:
         stored_file_id = thesis_file.stored_file_id
         thesis_file.delete()
@@ -1004,9 +1022,11 @@ def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: Ht
         stored_file = StoredFile.objects.filter(pk=stored_file_id).first()
         if stored_file is None:
             continue
-        if default_storage.exists(stored_file.storage_path):
-            default_storage.delete(stored_file.storage_path)
+        paths_to_delete.append(stored_file.storage_path)
         stored_file.delete()
+    # Storage não participa da transação: excluir o PDF antes do commit pode
+    # apagar o arquivo de uma operação que depois é revertida.
+    transaction.on_commit(lambda paths=paths_to_delete: _delete_stored_paths(paths))
     if removed:
         _audit_thesis(
             AuditAction.DELETE,

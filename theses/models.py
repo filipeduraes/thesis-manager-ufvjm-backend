@@ -954,6 +954,12 @@ class DefenseMember(models.Model):
                 condition=Q(role="PRESIDENT"),
                 name="uniq_president_per_defense",
             ),
+            # Um mesmo usuário institucional não pode entrar duas vezes na banca.
+            models.UniqueConstraint(
+                fields=["defense", "institutional_member"],
+                condition=Q(institutional_member__isnull=False),
+                name="uniq_institutional_member_per_defense",
+            ),
             # Exatamente uma identidade por membro: institucional XOR externo.
             models.CheckConstraint(
                 condition=(

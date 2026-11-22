@@ -234,3 +234,14 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 - Itens marcados como **Implementado** referem-se ao estado observado no código; recomenda-se validar em ambiente integrado (Docker + frontend + Postgres/Redis reais) antes de considerar produção.
 - Após alterações de backend, reiniciar o serviço (`docker compose restart backend`) quando o autoreload não aplicar.
 - Restrições administrativas (`/api/v1/admin/*`) dependem de `ADMIN_ALLOWED_CIDRS`/configuração de rede confiável.
+## Testes End-to-End (Playwright)
+
+- **Implementado (suíte no repositório frontend)**: 20 testes em `../thesis-manager-ufvjm-frontend/e2e/`, executados com `npm run test:e2e`. Cobrem autenticação por usuário de teste, navegação por perfil, CRUD de cursos e usuários, auditoria (filtros, detalhes, exportação CSV), submissão de monografia pelo aluno, parecer do orientador, agendamento de banca e relatórios com exportação PDF.
+- **Configuração isolada**: `thesismanagerbackend/settings_e2e.py` permite executar o backend com SQLite, cache em memória e e-mail em memória, sem PostgreSQL/Redis/RabbitMQ. O login de teste exige `DEBUG=True`.
+
+## Auditoria de concorrência (2026-11-22)
+
+- **Corrigido:** cadeia de hash da auditoria serializada com `pg_advisory_xact_lock` em `record_audit` (`accounts/concurrency.py`), evitando bifurcação sob escritas simultâneas.
+- **Corrigido:** proteção do último administrador e atribuição de curso passaram a usar locks transacionais; avaliações de banca são revalidadas sob lock antes da escrita ( impedindo alteração após o encerramento).
+- **Corrigido:** convites expirados agora persistem `EXPIRED`; mutações de sessão externa ocorrem após o commit; exclusão física de PDFs usa `transaction.on_commit`; membros institucionais duplicados são bloqueados por constraint; extração de texto usa `SKIP LOCKED`.
+- **Novos testes:** `accounts/tests/test_concurrency.py` e `theses/tests/test_concurrency_integrity.py`.

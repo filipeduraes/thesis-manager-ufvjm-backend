@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.db import transaction
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils import timezone
@@ -54,14 +55,23 @@ def extract_pending_thesis_text(limit: int = 10) -> dict[str, int]:
     Returns:
         dict[str, int]: Counters for completed and failed files.
     """
-    pending = StoredFile.objects.filter(
-        processing_status__in=[ProcessingStatus.PENDING, ProcessingStatus.RETRYING],
-    ).order_by("uploaded_at")[:limit]
+    # SKIP LOCKED + mudança de status em transação curta: dois workers não
+    # podem processar o mesmo PDF, e a extração (potencialmente lenta) roda
+    # sem manter locks de banco.
+    with transaction.atomic():
+        claimed = list(
+            StoredFile.objects.select_for_update(skip_locked=True)
+            .filter(
+                processing_status__in=[ProcessingStatus.PENDING, ProcessingStatus.RETRYING],
+            )
+            .order_by("uploaded_at")[:limit]
+        )
+        for stored_file in claimed:
+            stored_file.processing_status = ProcessingStatus.PROCESSING
+            stored_file.save(update_fields=["processing_status"])
     completed = 0
     failed = 0
-    for stored_file in pending:
-        stored_file.processing_status = ProcessingStatus.PROCESSING
-        stored_file.save(update_fields=["processing_status"])
+    for stored_file in claimed:
         try:
             extract_stored_file_text(stored_file)
             completed += 1

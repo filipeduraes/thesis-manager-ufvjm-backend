@@ -95,10 +95,15 @@ Before changing code, read the settings and modules related to the task. Respect
 
 ### Changes and verification
 
+- **Tests are mandatory for every change.** Refactorings, new features, bug fixes, API contract changes, permission/validation rules, logging/audit changes and documentation-only changes that affect behavior must be accompanied by updated or new tests in the same change. Do not finish a task saying "tests not updated" unless the environment makes it impossible — in that case, state exactly why.
+- Backend behavior is verified in two layers: Django tests (`python manage.py test <app>`) for domain rules, permissions, validation, state transitions and API contracts, and the Playwright E2E suite in `../thesis-manager-ufvjm-frontend/e2e/` for flows that must be validated through the real UI. When a backend change alters what a user sees or does (`/api/v1` payload, status codes, audit/API fields), run the affected E2E specs too — `npm run test:e2e` from the frontend repository starts isolated servers automatically (`playwright.config.ts` + `thesismanagerbackend.settings_e2e`).
+- **Never claim a flow is covered without running it.** A test that only checks that a page opened or a button exists is not coverage of the underlying functionality. If a feature is not implemented (for example, the public repository search still uses mock data), mark the E2E test with `test.fixme("reason")` so the report shows `skipped` with the reason, and keep a separate smoke test clearly named as mock-only. Do not let an unimplemented feature be reported as passing.
+- When an E2E test fails, first determine whether it is an automation problem (ambiguous selector, missing wait, seed data) or a real application defect. Fix the test for the former; report and, when in scope, fix the latter. Never weaken an assertion just to make the suite green.
+- Keep E2E helpers (`e2e/helpers/auth.ts`, `e2e/helpers/seed.ts`) and fixtures aligned with the API contract; use unique identifiers per test so the suite is order-independent and repeatable, and prefer accessible selectors over internal implementation details.
 - When implementing or changing behavior, update affected documentation and configuration examples.
 - Keep `FUNCIONALIDADES.md` updated: when implementing, changing, or removing a feature, reflect its status (Implementado, Parcial, Pendente), affected area, and relevant observations/endpoints.
 - Create or update tests for domain rules, permissions, file validation, state transitions, and API contracts when the task involves those behaviors.
-- Before finishing, run checks appropriate to the change (for example, `python manage.py check` and targeted tests) when the environment allows. Clearly report any check that could not be run and why.
+- Before finishing, run checks appropriate to the change (for example, `python manage.py check`, targeted Django tests and the relevant Playwright specs) when the environment allows. Clearly report any check that could not be run and why, including the exact command and result for every check that was run.
 - Do not commit `.env`, local databases, user uploads, secrets, caches, or generated artifacts.
 
 

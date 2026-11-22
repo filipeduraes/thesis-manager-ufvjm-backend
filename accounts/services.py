@@ -22,6 +22,7 @@ from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -364,6 +365,7 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
     origin = str(origin)
 
     with transaction.atomic():
+        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY)
         previous = (
             AuditLog.objects.select_for_update()
             .order_by("-occurred_at", "-id")
@@ -461,39 +463,44 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     if ProfileRole.STUDENT in normalized_roles and len(normalized_roles) > 1:
         raise ValidationError("O perfil Aluno não pode ser combinado com outros perfis.")
 
-    if (
-        _is_admin_user(user)
-        and ProfileRole.ADMIN not in normalized_roles
-        and count_active_admins(exclude_user=user) == 0
-    ):
-        raise LastAdminError("Não é possível remover o último administrador.")
+    with transaction.atomic():
+        # A contagem de administradores e a revogação do papel precisam ser uma
+        # única seção crítica, senão dois administradores podem remover um ao
+        # outro e deixar o sistema sem acesso administrativo.
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        if (
+            _is_admin_user(user)
+            and ProfileRole.ADMIN not in normalized_roles
+            and count_active_admins(exclude_user=user) == 0
+        ):
+            raise LastAdminError("Não é possível remover o último administrador.")
 
-    current = set(user.active_profile_roles().values_list("role", flat=True))
-    requested = set(normalized_roles)
-    now = timezone.now()
+        current = set(user.active_profile_roles().values_list("role", flat=True))
+        requested = set(normalized_roles)
+        now = timezone.now()
 
-    user.profile_roles.filter(
-        role__in=current - requested,
-        revoked_at__isnull=True,
-    ).update(revoked_at=now)
+        user.profile_roles.filter(
+            role__in=current - requested,
+            revoked_at__isnull=True,
+        ).update(revoked_at=now)
 
-    for role in requested - current:
-        UserProfileRole.objects.create(
-            user=user,
-            role=role,
-            assigned_by=assigned_by,
-        )
+        for role in requested - current:
+            UserProfileRole.objects.create(
+                user=user,
+                role=role,
+                assigned_by=assigned_by,
+            )
 
-    if ProfileRole.ADMIN in requested and not user.is_staff:
-        user.is_staff = True
-        user.save(update_fields=["is_staff"])
-    elif (
-        ProfileRole.ADMIN not in requested
-        and user.is_staff
-        and not user.is_superuser
-    ):
-        user.is_staff = False
-        user.save(update_fields=["is_staff"])
+        if ProfileRole.ADMIN in requested and not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=["is_staff"])
+        elif (
+            ProfileRole.ADMIN not in requested
+            and user.is_staff
+            and not user.is_superuser
+        ):
+            user.is_staff = False
+            user.save(update_fields=["is_staff"])
 
     return normalized_roles
 
@@ -540,12 +547,12 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
     """
     Soft-delete a user, protecting the last administrative account.
     """
-    if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
-        raise LastAdminError("Não é possível desativar o último administrador.")
-    if actor is not None and actor.pk == user.pk:
-        raise ValidationError("O administrador não pode desativar a própria conta.")
-
     with transaction.atomic():
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
+            raise LastAdminError("Não é possível desativar o último administrador.")
+        if actor is not None and actor.pk == user.pk:
+            raise ValidationError("O administrador não pode desativar a própria conta.")
         User.objects.deactivate(user)
         record_audit(
             action=AuditAction.DELETE,
@@ -667,6 +674,27 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
     digest = hash_external_token(token)
     now = timezone.now()
 
+    # Um convite vencido deve ser marcado como EXPIRED mesmo que a troca falhe.
+    # Isso precisa acontecer em uma transação própria: um savepoint dentro da
+    # transação principal seria revertido junto com o ExternalTokenError.
+    expired = ExternalInvitation.objects.filter(
+        token_hash=digest,
+        expires_at__lte=now,
+    ).exclude(
+        status__in={
+            InvitationStatus.REVOKED,
+            InvitationStatus.USED,
+            InvitationStatus.DECLINED,
+            InvitationStatus.EXPIRED,
+        }
+    ).first()
+    if expired is not None:
+        with transaction.atomic():
+            ExternalInvitation.objects.filter(pk=expired.pk).update(
+                status=InvitationStatus.EXPIRED
+            )
+        raise ExternalTokenError("Token inválido ou expirado.")
+
     with transaction.atomic():
         try:
             invitation = ExternalInvitation.objects.select_for_update().get(
@@ -689,11 +717,6 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             )
             raise ExternalTokenError("Token inválido ou expirado.")
 
-        if invitation.expires_at <= now:
-            invitation.status = InvitationStatus.EXPIRED
-            invitation.save(update_fields=["status"])
-            raise ExternalTokenError("Token inválido ou expirado.")
-
         if invitation.accepted_at is None:
             invitation.accepted_at = now
         invitation.used_at = now
@@ -707,15 +730,6 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             now + timedelta(minutes=ttl_minutes),
             invitation.expires_at,
         )
-        request.session.flush()
-        request.session["external_invitation_id"] = str(invitation.pk)
-        request.session["external_session_expires_at"] = (
-            session_expires_at.isoformat()
-        )
-        request.session.set_expiry(
-            max(1, int((session_expires_at - now).total_seconds()))
-        )
-
         record_audit(
             action=AuditAction.TOKEN_ACCESS,
             entity_type="ExternalInvitation",
@@ -725,6 +739,15 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             actor_external_invitation=invitation,
             metadata={"session_expires_at": session_expires_at.isoformat()},
         )
+
+    # Sessão/cache não são transacionais: aplicar o flush somente após o commit
+    # evita uma sessão externa órfã se a gravação no banco falhar.
+    request.session.flush()
+    request.session["external_invitation_id"] = str(invitation.pk)
+    request.session["external_session_expires_at"] = session_expires_at.isoformat()
+    request.session.set_expiry(
+        max(1, int((session_expires_at - now).total_seconds()))
+    )
 
     logger.info("External token exchanged: invitation_id=%s", invitation.pk)
     return invitation

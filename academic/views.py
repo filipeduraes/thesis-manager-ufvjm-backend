@@ -148,7 +148,9 @@ class AdminDepartmentDetailView(APIView):
         Returns:
             Response: Updated department payload or validation error.
         """
-        department = get_object_or_404(Department, pk=department_id)
+        department = get_object_or_404(
+            Department.objects.select_for_update(), pk=department_id
+        )
         serializer = DepartmentWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         name = serializer.validated_data.get("name")
