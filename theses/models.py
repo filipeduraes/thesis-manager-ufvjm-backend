@@ -164,6 +164,10 @@ PUBLISHABLE_STATUSES = (
     ThesisStatus.APPROVED_WITH_REMARKS,
 )
 
+CORRECTION_UPLOAD_STATUSES = (
+    ThesisStatus.APPROVED_WITH_REMARKS,
+)
+
 APPROVED_DEFENSE_STATUSES = (
     ThesisStatus.APPROVED,
     ThesisStatus.APPROVED_WITH_REMARKS,
@@ -551,6 +555,9 @@ class ThesisFile(models.Model):
     )
     version_number = models.PositiveSmallIntegerField()
     is_current = models.BooleanField(default=False, db_index=True)
+    # Versão corrigida enviada após "aprovada com ressalvas"; é uma das condições
+    # da publicação automática nesse resultado.
+    is_correction = models.BooleanField(default=False)
     change_description = models.TextField(blank=True, default="")
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

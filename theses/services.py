@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,7 +16,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Max, Q, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
@@ -30,6 +31,7 @@ from theses.events import record_thesis_defense_result_recorded, record_thesis_p
 from theses.repository_cache import invalidate_public_repository_cache
 from theses.models import (
     APPROVED_DEFENSE_STATUSES,
+    CORRECTION_UPLOAD_STATUSES,
     DEFENSE_RESULT_STATUSES,
     EDITABLE_STATUSES,
     PUBLISHABLE_STATUSES,
@@ -751,10 +753,54 @@ def verify_thesis_file_integrity(thesis_file: ThesisFile) -> bool:
     return True
 
 
+def _add_thesis_version(thesis: Thesis, stored_file: StoredFile, user: User, change_description: str, is_correction: bool = False) -> ThesisFile:
+    """
+    Append a PDF version to a thesis and make it the current one.
+
+    Earlier versions are kept (only marked as not current); the caller holds the
+    thesis row lock.
+
+    Args:
+        thesis: Locked thesis.
+        stored_file: Validated, stored PDF.
+        user: User uploading the version.
+        change_description: Description of the changes.
+        is_correction: Whether this is the corrected version after an approval with remarks.
+
+    Returns:
+        ThesisFile: New current version.
+
+    Raises:
+        ValidationError: When the PDF is identical to the current version.
+    """
+    current = thesis.files.filter(is_current=True).select_related("stored_file").first()
+    if current is not None and bytes(current.stored_file.sha256) == bytes(stored_file.sha256):
+        raise ValidationError("O arquivo enviado é idêntico à versão atual.")
+    next_version = thesis.files.aggregate(max_version=Max("version_number"))["max_version"] or 0
+    next_version += 1
+    if current is not None:
+        current.is_current = False
+        current.save(update_fields=["is_current"])
+    return ThesisFile.objects.create(
+        thesis=thesis,
+        stored_file=stored_file,
+        version_number=next_version,
+        is_current=True,
+        is_correction=is_correction,
+        change_description=(change_description or "").strip(),
+        uploaded_by=user,
+    )
+
+
 @transaction.atomic
 def upload_thesis_file(user: User, thesis: Thesis, uploaded_file: Any, change_description: str = "", request: HttpRequest | None = None) -> ThesisFile:
     """
-    Upload a new PDF version for an editable thesis.
+    Upload a new PDF version for an editable thesis or the corrected version.
+
+    While the thesis is editable the upload is an ordinary new version. After an
+    approval with remarks the upload is recorded as the corrected version (status
+    history and audit) and the thesis is published automatically when the other
+    publication requirements are already met.
 
     Args:
         user: Student author performing the upload.
@@ -767,11 +813,13 @@ def upload_thesis_file(user: User, thesis: Thesis, uploaded_file: Any, change_de
         ThesisFile: Created version.
 
     Raises:
-        ValidationError: When the thesis is not editable or the file is invalid.
+        ValidationError: When the thesis does not accept uploads or the file is invalid.
     """
     thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     _ensure_student_owner(user, thesis)
-    _ensure_editable(thesis)
+    is_correction = thesis.status in CORRECTION_UPLOAD_STATUSES
+    if not is_correction:
+        _ensure_editable(thesis)
     stored_file = _store_pdf(
         uploaded_file,
         thesis,
@@ -779,34 +827,20 @@ def upload_thesis_file(user: User, thesis: Thesis, uploaded_file: Any, change_de
         "THESIS_MAX_PDF_SIZE_MB",
         50,
     )
-    current = thesis.files.filter(is_current=True).first()
-    if current is not None and bytes(current.stored_file.sha256) == bytes(stored_file.sha256):
-        raise ValidationError("O arquivo enviado é idêntico à versão atual.")
-    next_version = thesis.files.aggregate(max_version=Max("version_number"))["max_version"] or 0
-    next_version += 1
-    if current is not None:
-        current.is_current = False
-        current.save(update_fields=["is_current"])
-    thesis_file = ThesisFile.objects.create(
-        thesis=thesis,
-        stored_file=stored_file,
-        version_number=next_version,
-        is_current=True,
-        change_description=(change_description or "").strip(),
-        uploaded_by=user,
-    )
+    thesis_file = _add_thesis_version(thesis, stored_file, user, change_description, is_correction=is_correction)
     thesis.save(update_fields=["updated_at"])
-    _audit_thesis(
-        AuditAction.UPLOAD,
-        thesis,
-        request,
-        user,
-        metadata={
-            "versionNumber": next_version,
-            "sha256": stored_file.sha256_hex,
-            "sizeBytes": stored_file.size_bytes,
-        },
-    )
+    metadata: dict[str, object] = {
+        "versionNumber": thesis_file.version_number,
+        "sha256": stored_file.sha256_hex,
+        "sizeBytes": stored_file.size_bytes,
+    }
+    if is_correction:
+        metadata["event"] = "CORRECTED_VERSION_UPLOADED"
+        history_metadata = {"event": "CORRECTED_VERSION_UPLOADED", "versionNumber": thesis_file.version_number}
+        _add_status_history(thesis, thesis.status, thesis.status, user, "Versão corrigida enviada após a aprovação com ressalvas.", metadata=history_metadata)
+    _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata=metadata)
+    if is_correction:
+        publish_if_ready(thesis, trigger=PublicationTrigger.CORRECTED_VERSION, request=request)
     return thesis_file
 
 
@@ -1092,6 +1126,9 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
         user,
         metadata={"event": "DEFENSE_RESULT", "result": result},
     )
+    if new_status in APPROVED_DEFENSE_STATUSES:
+        publish_if_ready(thesis, trigger=PublicationTrigger.DEFENSE_RESULT, request=request)
+        thesis.refresh_from_db()
     return thesis
 
 
@@ -1118,10 +1155,184 @@ def resolve_defense_date(thesis: Thesis) -> date:
     return reference.astimezone(REPOSITORY_TIME_ZONE).date()
 
 
+class PublicationTrigger(models.TextChoices):
+    """
+    Workflow step that completed the publication requirements.
+    """
+
+    MANUAL = "MANUAL", "Publicação manual"
+    DEFENSE_CLOSED = "DEFENSE_CLOSED", "Encerramento da banca"
+    DEFENSE_RESULT = "DEFENSE_RESULT", "Registro do resultado da banca"
+    AUTHORIZATION_VALIDATED = "AUTHORIZATION_VALIDATED", "Validação do termo de autorização"
+    CORRECTED_VERSION = "CORRECTED_VERSION", "Envio da versão corrigida"
+
+
+@dataclass(frozen=True)
+class PublicationRequirements:
+    """
+    State of the three publication conditions of a thesis.
+
+    Attributes:
+        defense_approved: Final committee approval (with or without remarks).
+        correction_required: Whether the approval had remarks.
+        correction_submitted: Whether the current version is the corrected one.
+        authorization_validated: Whether a signed authorization was validated.
+        has_current_file: Whether there is a current PDF to publish.
+    """
+
+    defense_approved: bool
+    correction_required: bool
+    correction_submitted: bool
+    authorization_validated: bool
+    has_current_file: bool
+
+    @property
+    def ready(self) -> bool:
+        """
+        Return whether every condition is met.
+
+        Returns:
+            bool: ``True`` when the thesis can be published.
+        """
+        correction_ok = self.correction_submitted or not self.correction_required
+        return self.defense_approved and correction_ok and self.authorization_validated and self.has_current_file
+
+    def first_missing_message(self) -> str:
+        """
+        Return the message of the first unmet condition.
+
+        Returns:
+            str: Portuguese message for API errors, or an empty string when ready.
+        """
+        if not self.defense_approved:
+            return "A monografia precisa estar aprovada pela banca para ser publicada."
+        if not self.has_current_file:
+            return "A monografia não possui versão atual."
+        if self.correction_required and not self.correction_submitted:
+            return "Envie a versão corrigida antes da publicação (aprovação com ressalvas)."
+        if not self.authorization_validated:
+            return "Registre e valide a autorização de publicação antes de publicar."
+        return ""
+
+    def to_payload(self) -> dict[str, bool]:
+        """
+        Serialize the conditions for API payloads.
+
+        Returns:
+            dict[str, bool]: camelCase flags plus ``ready``.
+        """
+        return {
+            "defenseApproved": self.defense_approved,
+            "correctionRequired": self.correction_required,
+            "correctionSubmitted": self.correction_submitted,
+            "authorizationValidated": self.authorization_validated,
+            "hasCurrentFile": self.has_current_file,
+            "ready": self.ready,
+        }
+
+
+def publication_requirements(thesis: Thesis) -> PublicationRequirements:
+    """
+    Evaluate the publication conditions defined by the assignment.
+
+    A thesis is published after final committee approval, the corrected version
+    when the approval had remarks, and a validated publication authorization.
+
+    Args:
+        thesis: Thesis instance.
+
+    Returns:
+        PublicationRequirements: Current state of each condition.
+    """
+    current = thesis.files.filter(is_current=True).first()
+    authorization_exists = thesis.documents.filter(type=DocumentType.PUBLICATION_AUTHORIZATION, status=DocumentStatus.VALIDATED).exists()
+    return PublicationRequirements(
+        defense_approved=thesis.status in PUBLISHABLE_STATUSES,
+        correction_required=thesis.status == ThesisStatus.APPROVED_WITH_REMARKS,
+        correction_submitted=bool(current is not None and current.is_correction),
+        authorization_validated=authorization_exists,
+        has_current_file=current is not None,
+    )
+
+
+def _perform_publication(thesis: Thesis, current: ThesisFile, actor: User | None, trigger: str, request: HttpRequest | None) -> Thesis:
+    """
+    Move a locked, eligible thesis into the public repository.
+
+    Shared by the manual and the automatic paths so both record the same status
+    history, outbox event, cache invalidation, version purge and audit entry.
+
+    Args:
+        thesis: Thesis locked by the caller and already checked for eligibility.
+        current: Current version, already verified against its SHA-256.
+        actor: User who published, or ``None`` for the automatic publication.
+        trigger: ``PublicationTrigger`` code.
+        request: HTTP request used for audit context.
+
+    Returns:
+        Thesis: Published thesis.
+    """
+    automatic = trigger != PublicationTrigger.MANUAL
+    previous_status = thesis.status
+    defense_date = thesis.defense_date or resolve_defense_date(thesis)
+    thesis.status = ThesisStatus.PUBLISHED
+    thesis.is_public = True
+    thesis.published_at = timezone.now()
+    thesis.defense_date = defense_date
+    thesis.defense_year = defense_date.year
+    thesis.save(update_fields=["status", "is_public", "published_at", "defense_date", "defense_year", "updated_at"])
+    reason = "Monografia publicada automaticamente no repositório institucional." if automatic else "Monografia publicada no repositório institucional."
+    history_metadata = {"event": "PUBLISHED", "automatic": automatic, "trigger": trigger, "versionNumber": current.version_number, "sha256": current.stored_file.sha256_hex}
+    _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, actor, reason, metadata=history_metadata)
+    record_thesis_published(thesis)
+    invalidate_public_repository_cache()
+    purge_thesis_versions(thesis, actor=actor, request=request)
+    audit_metadata = {"event": "PUBLISHED", "referenceCode": thesis.reference_code, "automatic": automatic, "trigger": trigger}
+    _audit_thesis(AuditAction.PUBLISH, thesis, request, actor, metadata=audit_metadata)
+    return thesis
+
+
+@transaction.atomic
+def publish_if_ready(thesis: Thesis, trigger: str, request: HttpRequest | None = None) -> bool:
+    """
+    Publish a thesis automatically when every publication condition is met.
+
+    Called at the end of the steps that can complete the conditions (defense
+    close, manual result, authorization validation and corrected version). It
+    never raises for an unmet condition: the step that called it must still
+    succeed. A current PDF whose SHA-256 no longer matches blocks the
+    publication and is logged.
+
+    Args:
+        thesis: Thesis that may have become publishable.
+        trigger: ``PublicationTrigger`` code of the calling step.
+        request: HTTP request used for audit context.
+
+    Returns:
+        bool: Whether the thesis was published.
+    """
+    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    if thesis.status == ThesisStatus.PUBLISHED or thesis.deleted_at is not None:
+        return False
+    if not publication_requirements(thesis).ready:
+        return False
+    current = thesis.files.filter(is_current=True).select_related("stored_file").first()
+    if not verify_thesis_file_integrity(current):
+        logger.warning("Automatic publication of thesis %s blocked: integrity check failed", thesis.pk)
+        return False
+    _perform_publication(thesis, current, None, trigger, request)
+    logger.info("Thesis %s published automatically (trigger=%s)", thesis.pk, trigger)
+    return True
+
+
 @transaction.atomic
 def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None) -> Thesis:
     """
-    Publish an approved thesis in the public repository.
+    Publish an approved thesis in the public repository (manual path).
+
+    The publication normally happens automatically (``publish_if_ready``); this
+    endpoint stays for coordinators and is idempotent: an already published
+    thesis is returned unchanged, without new history, event or audit entries.
 
     Args:
         user: Coordinator or administrator performing the publication.
@@ -1137,39 +1348,15 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem publicar monografias.")
     thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
-    if thesis.status not in PUBLISHABLE_STATUSES:
-        raise ValidationError("A monografia precisa estar aprovada pela banca para ser publicada.")
+    if thesis.status == ThesisStatus.PUBLISHED and thesis.is_public:
+        return thesis
+    requirements = publication_requirements(thesis)
+    if not requirements.ready:
+        raise ValidationError(requirements.first_missing_message())
     current = thesis.files.filter(is_current=True).select_related("stored_file").first()
-    if current is None:
-        raise ValidationError("A monografia não possui versão atual.")
     if not verify_thesis_file_integrity(current):
         raise ValidationError("O arquivo da monografia falhou na verificação de integridade.")
-    authorization = thesis.documents.filter(
-        type=DocumentType.PUBLICATION_AUTHORIZATION,
-        status=DocumentStatus.VALIDATED,
-    ).first()
-    if authorization is None:
-        raise ValidationError("Registre e valide a autorização de publicação antes de publicar.")
-    previous_status = thesis.status
-    defense_date = thesis.defense_date or resolve_defense_date(thesis)
-    thesis.status = ThesisStatus.PUBLISHED
-    thesis.is_public = True
-    thesis.published_at = timezone.now()
-    thesis.defense_date = defense_date
-    thesis.defense_year = defense_date.year
-    thesis.save(update_fields=["status", "is_public", "published_at", "defense_date", "defense_year", "updated_at"])
-    _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, user, "Monografia publicada no repositório institucional.")
-    record_thesis_published(thesis)
-    invalidate_public_repository_cache()
-    purge_thesis_versions(thesis, actor=user, request=request)
-    _audit_thesis(
-        AuditAction.PUBLISH,
-        thesis,
-        request,
-        user,
-        metadata={"event": "PUBLISHED", "referenceCode": thesis.reference_code},
-    )
-    return thesis
+    return _perform_publication(thesis, current, user, PublicationTrigger.MANUAL, request)
 
 
 @transaction.atomic
@@ -1260,6 +1447,8 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
         user,
         metadata={"documentType": document.type, "documentId": str(document.pk), "event": "DOCUMENT_VALIDATED"},
     )
+    if document.type == DocumentType.PUBLICATION_AUTHORIZATION:
+        publish_if_ready(thesis, trigger=PublicationTrigger.AUTHORIZATION_VALIDATED, request=request)
     return document
 
 
@@ -1335,6 +1524,7 @@ def thesis_file_payload(thesis_file: ThesisFile) -> dict[str, Any]:
         "id": str(thesis_file.pk),
         "versionNumber": thesis_file.version_number,
         "isCurrent": thesis_file.is_current,
+        "isCorrection": thesis_file.is_correction,
         "changeDescription": thesis_file.change_description,
         "uploadedAt": thesis_file.uploaded_at.isoformat(),
         "hashVerifiedAt": thesis_file.hash_verified_at.isoformat() if thesis_file.hash_verified_at else None,
@@ -1531,6 +1721,7 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
             "canPublish": False,
             "canRecordDefenseResult": False,
             "canUploadDocuments": False,
+            "canUploadCorrection": False,
         }
     roles = user_roles(viewer)
     is_admin = user_is_admin(viewer)
@@ -1541,9 +1732,11 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
     main_author = _prefetched_main_author(thesis)
     is_author = main_author is not None and main_author.pk == viewer.pk
     editable = thesis.status in EDITABLE_STATUSES
+    accepts_correction = thesis.status in CORRECTION_UPLOAD_STATUSES
     return {
         "canEdit": bool(is_author and editable),
-        "canUpload": bool(is_author and editable),
+        "canUpload": bool(is_author and (editable or accepts_correction)),
+        "canUploadCorrection": bool(is_author and accepts_correction),
         "canSubmit": bool(is_author and editable),
         "canWithdrawSubmission": bool(is_author and thesis.status == ThesisStatus.SUBMITTED),
         "canReview": bool(is_advisor and thesis.status in REVIEWABLE_STATUSES),
@@ -1602,9 +1795,12 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
         "publishedAt": thesis.published_at.isoformat() if thesis.published_at else None,
         "createdAt": thesis.created_at.isoformat(),
         "updatedAt": thesis.updated_at.isoformat(),
+        "defenseDate": thesis.defense_date.isoformat() if thesis.defense_date else None,
+        "defenseYear": thesis.defense_year,
         "permissions": thesis_permissions(thesis, viewer),
     }
     if include_history:
+        payload["publicationRequirements"] = publication_requirements(thesis).to_payload()
         reviews: list[dict[str, Any]] = []
         for thesis_file in files:
             for review in thesis_file.reviews.all():
