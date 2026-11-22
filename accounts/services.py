@@ -644,13 +644,30 @@ def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict
     return [{"defenseId": str(membership.defense_id), "memberId": str(membership.pk)}]
 
 
-def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None,) -> tuple[ExternalInvitation, str]:
+def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None) -> ExternalInvitation:
     """
-    Create an external invitation and return its one-time readable token.
+    Create an external invitation without any usable token.
+
+    The token is issued later by the notification consumer and exists in plain
+    text only in the e-mail sent to the invitee (``issue_external_token``); until
+    then ``token_hash`` holds an unmatchable digest.
+
+    Args:
+        name: Invitee name.
+        email: Invitee e-mail address.
+        institution: Invitee institution.
+        invited_by: User who created the invitation.
+        expires_at: Expiration; defaults to now plus ``EXTERNAL_INVITATION_TOKEN_TTL_HOURS``.
+        request: HTTP request used for audit context.
+
+    Returns:
+        ExternalInvitation: Created invitation in ``PENDING`` status.
+
+    Raises:
+        ValidationError: When the e-mail address is invalid.
     """
     normalized_email = (email or "").strip().lower()
     validate_email(normalized_email)
-    token = generate_external_token()
     if expires_at is None:
         expires_at = timezone.now() + timedelta(
             hours=getattr(settings, "EXTERNAL_INVITATION_TOKEN_TTL_HOURS", 72)
@@ -662,7 +679,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             name=name.strip(),
             email=normalized_email,
             institution=(institution or "").strip(),
-            token_hash=hash_external_token(token),
+            token_hash=unissued_token_hash(),
             expires_at=expires_at,
         )
         record_audit(
@@ -675,7 +692,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             metadata={"email": invitation.email},
         )
     logger.info("External invitation created: invitation_id=%s", invitation.pk)
-    return invitation, token
+    return invitation
 
 
 def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitation:

@@ -19,7 +19,7 @@ class ExternalTokenIssuanceTests(TestCase):
 
     def setUp(self) -> None:
         self.factory = RequestFactory()
-        self.invitation, _token = create_external_invitation(name="Membro Externo", email="externo@outra.org", institution="UFMG")
+        self.invitation = create_external_invitation(name="Membro Externo", email="externo@outra.org", institution="UFMG")
 
     def _exchange(self, token: str) -> ExternalInvitation:
         request = self.factory.post("/api/v1/auth/external-token")

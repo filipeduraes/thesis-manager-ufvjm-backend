@@ -94,7 +94,7 @@ class DefenseUpdateConflictApiTests(TestCase):
 
     def test_external_members_are_not_checked(self) -> None:
         DefenseMember.objects.filter(defense=self.defense_b).delete()
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
         response = self._patch(self.defense_b, {"scheduledDatetime": (self.start + timedelta(minutes=30)).isoformat()})
         self.assertEqual(response.status_code, 200)

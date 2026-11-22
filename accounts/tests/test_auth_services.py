@@ -17,6 +17,7 @@ from accounts.services import (
     create_external_invitation,
     exchange_external_token,
     get_active_role,
+    issue_external_token,
     set_user_roles,
 )
 
@@ -89,11 +90,12 @@ class ExternalTokenTests(TestCase):
         self.factory = RequestFactory()
 
     def test_exchange_external_token_clears_session_and_marks_invitation(self) -> None:
-        invitation, token = create_external_invitation(
+        invitation = create_external_invitation(
             name="Membro Externo",
             email="externo@outra.org",
             institution="UFMG",
         )
+        token = issue_external_token(invitation)
         request = self.factory.post("/api/v1/auth/external-token")
         request.session = TestSession()
         exchanged = exchange_external_token(token, request)
@@ -105,6 +107,12 @@ class ExternalTokenTests(TestCase):
         self.assertNotIn("_auth_user_id", request.session)
         with self.assertRaises(ExternalTokenError):
             exchange_external_token(token, request)
+
+    def test_new_invitation_has_no_usable_token_until_one_is_issued(self) -> None:
+        invitation = create_external_invitation(name="Membro Externo", email="externo@outra.org")
+        self.assertIsNone(invitation.token_event_id)
+        self.assertIsNone(invitation.token_sent_at)
+        self.assertEqual(len(bytes(invitation.token_hash)), 32)
 
     def test_exchange_rejects_unknown_token(self) -> None:
         from accounts.services import ExternalTokenError

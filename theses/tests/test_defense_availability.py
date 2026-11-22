@@ -60,7 +60,7 @@ class DefenseAvailabilityTests(TestCase):
         return self.client.post(self._availability_url(member), {"status": status, "note": note}, format="json")
 
     def _external_member(self) -> tuple[DefenseMember, ExternalInvitationPrincipal]:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
         member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")

@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.core import mail
+from django.core.cache import cache
 from django.core.mail.backends.locmem import EmailBackend as LocmemEmailBackend
 from django.db import transaction
 from django.utils import timezone
@@ -15,9 +16,12 @@ from rest_framework.test import APIClient
 from academic.models import Course, Department
 from accounts.models import ExternalInvitation, ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
-from events.catalog import ExternalInvitationTrigger
+from events.catalog import EventType, ExternalInvitationTrigger
 from events.envelope import EventEnvelope
 from events.models import OutboxEvent
+from events.publisher import publish_pending_events
+from events.tests.fakes import InMemoryEventBroker
+from notifications.consumer import handle_event
 from theses.defense_scheduling import schedule_defense
 from theses.events import record_external_member_invited
 from theses.models import CommitteeRole, DefenseMember, DefenseModality, Thesis, ThesisAuthor, ThesisStatus
@@ -45,6 +49,24 @@ def envelope_for(event: OutboxEvent) -> EventEnvelope:
     return EventEnvelope.from_json_bytes(body)
 
 
+def deliver_pending_invitations() -> list[EventEnvelope]:
+    """
+    Publish pending outbox events to a fake broker and consume the invitation ones.
+
+    Mirrors the real pipeline (outbox → broker → consumer) without RabbitMQ: each
+    envelope goes through its JSON encoding, as on the wire.
+
+    Returns:
+        list[EventEnvelope]: Every envelope published to the fake broker.
+    """
+    broker = InMemoryEventBroker()
+    publish_pending_events(broker, batch_size=100)
+    for envelope in broker.published:
+        if envelope.event_type == EventType.DEFENSE_EXTERNAL_MEMBER_INVITED:
+            handle_event(EventEnvelope.from_json_bytes(envelope.to_json_bytes()))
+    return broker.published
+
+
 INVITATION_TEST_SETTINGS = {"CACHES": TEST_CACHES, "SESSION_ENGINE": "django.contrib.sessions.backends.db", "FRONTEND_URL": "https://tcc.example.com"}
 
 
@@ -54,6 +76,8 @@ class InvitationFixtureMixin:
     """
 
     def setUp(self) -> None:
+        # Os limites de requisição ficam no cache; sem limpar, um teste herda o consumo do anterior.
+        cache.clear()
         department = Department.objects.create(name="Computação")
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         course = Course.objects.create(department=department, name="CC", code="CC001")
@@ -62,7 +86,7 @@ class InvitationFixtureMixin:
         self.thesis = Thesis.objects.create(course=course, advisor=advisor, title="Filas & <Eventos>", status=ThesisStatus.ADVISOR_APPROVED)
         ThesisAuthor.objects.create(thesis=self.thesis, author=student, position=1, is_main_author=True)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), modality=DefenseModality.REMOTE, location="https://meet.example.com/sala", actor=self.admin)
-        invitation, _unused = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
         self.member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Edu Externo", email="externo@example.org", institution="UFMG")
         mail.outbox.clear()
 

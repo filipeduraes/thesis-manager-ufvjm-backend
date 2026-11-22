@@ -290,22 +290,6 @@ class ExternalTokenSerializer(serializers.Serializer):
         return token
 
 
-class ExternalInvitationCreateSerializer(serializers.Serializer):
-    """Validate data for issuing a temporary committee invitation."""
-    name = serializers.CharField(max_length=200)
-    email = serializers.EmailField()
-    institution = serializers.CharField(max_length=200, required=False, allow_blank=True)
-
-    def validate_name(self, value: str) -> str:
-        name = value.strip()
-        if not name:
-            raise serializers.ValidationError("Informe o nome do membro.")
-        return name
-
-    def validate_email(self, value: str) -> str:
-        return value.strip().lower()
-
-
 ENTITY_TYPE_LABELS = {
     "User": "usuário",
     "Course": "curso",

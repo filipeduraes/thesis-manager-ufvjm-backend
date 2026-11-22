@@ -226,7 +226,7 @@ class DefenseEvaluationApiTests(TestCase):
     # --- External invitation member evaluates ---
 
     def test_valid_external_member_can_evaluate(self) -> None:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         # Marcar convite como aceito para sessão válida
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
@@ -245,7 +245,7 @@ class DefenseEvaluationApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_revoked_external_invitation_cannot_evaluate(self) -> None:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext2@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext2@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.REVOKED
         invitation.revoked_at = timezone.now()
         invitation.save(update_fields=["status", "revoked_at"])

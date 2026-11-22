@@ -17,9 +17,11 @@ from django.http import HttpRequest
 from django.utils import timezone
 
 from accounts.authentication import ExternalInvitationPrincipal
-from accounts.models import AuditAction, User
+from accounts.models import AuditAction, ExternalInvitation, InvitationStatus, User
 from accounts.services import create_external_invitation, record_audit, revoke_external_invitation, user_avatar_url
+from events.catalog import ExternalInvitationTrigger
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
+from theses.events import record_external_member_invited
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
 
 
@@ -279,6 +281,7 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "evaluation": None,
     }
     payload.update(_member_availability_payload(member, can_see_availability))
+    payload.update(_member_invitation_payload(member, viewer_can_manage))
 
     can_see_eval = False
     if viewer is not None:
@@ -304,6 +307,74 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
             pass
 
     return payload
+
+
+def effective_invitation_status(invitation: ExternalInvitation) -> str:
+    """
+    Return the invitation status as the manager should see it.
+
+    ``status`` only becomes ``EXPIRED`` when someone tries an expired token, so an
+    invitation past ``expires_at`` is reported as expired here regardless.
+
+    Args:
+        invitation: External invitation.
+
+    Returns:
+        str: ``InvitationStatus`` code.
+    """
+    if invitation.revoked_at is not None:
+        return InvitationStatus.REVOKED
+    if invitation.status in {InvitationStatus.PENDING, InvitationStatus.ACCEPTED} and invitation.is_expired:
+        return InvitationStatus.EXPIRED
+    return invitation.status
+
+
+def can_resend_invitation(member: DefenseMember) -> bool:
+    """
+    Tell whether the member's current invitation can be e-mailed again with a new token.
+
+    Only invitations that were never used and are still valid can be resent; used,
+    expired or revoked invitations need a new invitation instead.
+
+    Args:
+        member: Committee member (with ``defense`` and ``external_invitation`` loadable).
+
+    Returns:
+        bool: True when ``resend_external_member_invitation`` would accept it.
+    """
+    invitation = member.external_invitation
+    if invitation is None or member.defense.status not in ACTIVE_DEFENSE_STATUSES:
+        return False
+    return invitation.is_usable
+
+
+def _member_invitation_payload(member: DefenseMember, visible: bool) -> dict[str, Any]:
+    """
+    Serialize the delivery state of an external member's invitation for managers.
+
+    Never includes the token, which exists only in the e-mail.
+
+    Args:
+        member: Committee member (``external_invitation`` ideally prefetched).
+        visible: Whether the viewer manages the defense.
+
+    Returns:
+        dict[str, Any]: ``invitationStatus``, ``invitationStatusLabel``,
+        ``invitationExpiresAt``, ``invitationSentAt`` and ``canResendInvitation``
+        (nulls and False for institutional members or viewers who do not manage it).
+    """
+    invitation = member.external_invitation if member.external_invitation_id else None
+    if not visible or invitation is None:
+        return {"invitationStatus": None, "invitationStatusLabel": None, "invitationExpiresAt": None, "invitationSentAt": None, "canResendInvitation": False}
+    status = effective_invitation_status(invitation)
+    sent_at = invitation.token_sent_at
+    return {
+        "invitationStatus": status,
+        "invitationStatusLabel": InvitationStatus(status).label,
+        "invitationExpiresAt": invitation.expires_at.isoformat(),
+        "invitationSentAt": sent_at.isoformat() if sent_at else None,
+        "canResendInvitation": can_resend_invitation(member),
+    }
 
 
 def _member_availability_payload(member: DefenseMember, visible: bool) -> dict[str, Any]:
@@ -445,12 +516,13 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
 
 
 @transaction.atomic
-def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> tuple[DefenseMember, str]:
+def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> DefenseMember:
     """
     Add an external member via the ExternalInvitation flow.
 
-    The readable access token is returned once so the caller can hand it to the
-    member; only its SHA-256 hash is stored. It must never be logged or audited.
+    No token is created here: ``defense.external_member_invited`` is recorded in
+    the same transaction and the notification consumer issues the token and
+    e-mails it to the member, storing only its SHA-256 hash.
 
     Args:
         defense: Defense session.
@@ -463,8 +535,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         request: HTTP request used for audit context.
 
     Returns:
-        tuple[DefenseMember, str]: Created member record (with linked invitation) and
-        the one-time readable access token.
+        DefenseMember: Created member record (with linked invitation).
 
     Raises:
         PermissionDenied: When the actor is not authorized to manage this defense.
@@ -486,7 +557,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
     if not clean_email:
         raise ValidationError("Informe o e-mail do membro externo.")
 
-    invitation, access_token = create_external_invitation(
+    invitation = create_external_invitation(
         name=clean_name,
         email=clean_email,
         institution=institution.strip(),
@@ -513,7 +584,8 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         actor_user=actor,
         metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "external", "invitationId": str(invitation.pk)},
     )
-    return member, access_token
+    record_external_member_invited(defense, member, ExternalInvitationTrigger.CREATED)
+    return member
 
 
 @transaction.atomic
@@ -700,12 +772,14 @@ def reset_committee_availability(defense: Defense) -> int:
 
 
 @transaction.atomic
-def regenerate_external_member_token(defense: Defense, member: DefenseMember, *, actor: User, request: HttpRequest | None = None) -> tuple[DefenseMember, str]:
+def regenerate_external_member_invitation(defense: Defense, member: DefenseMember, *, actor: User, request: HttpRequest | None = None) -> DefenseMember:
     """
-    Replace an external member's invitation and return the new readable token once.
+    Replace an external member's invitation and e-mail a token for the new one.
 
-    The current invitation is revoked (its sessions stop working) and a new one is
-    created and linked to the same member, keeping availability and evaluation.
+    Meant for invitations that can no longer be resent (used, expired or revoked):
+    the current invitation is revoked (its sessions stop working) and a new one,
+    with a fresh expiration, is linked to the same member, keeping availability and
+    evaluation. The token is issued and e-mailed by the notification consumer.
 
     Args:
         defense: Defense session (must be SCHEDULED or IN_PROGRESS).
@@ -714,7 +788,7 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
         request: HTTP request used for audit context.
 
     Returns:
-        tuple[DefenseMember, str]: Updated member and the new one-time access token.
+        DefenseMember: Updated member linked to the new invitation.
 
     Raises:
         PermissionDenied: When the actor is not authorized to manage this defense.
@@ -726,15 +800,15 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
         raise ValidationError("Membro não pertence a esta banca.")
     locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
     if locked_defense.status not in ACTIVE_DEFENSE_STATUSES:
-        raise ValidationError("Só é possível gerar novo token para bancas agendadas ou em andamento.")
+        raise ValidationError("Só é possível gerar novo convite para bancas agendadas ou em andamento.")
     # FOR UPDATE não pode ser combinado com o LEFT JOIN do convite (nulo para institucionais).
     member = DefenseMember.objects.select_for_update().get(pk=member.pk)
     previous_invitation = member.external_invitation
     if previous_invitation is None:
-        raise ValidationError("Somente membros externos possuem token de acesso.")
+        raise ValidationError("Somente membros externos recebem convite por e-mail.")
 
     revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
-    new_invitation, access_token = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
+    new_invitation = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
     member.external_invitation = new_invitation
     member.save(update_fields=["external_invitation"])
     record_audit(
@@ -744,6 +818,7 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
         entity_app_label="theses",
         request=request,
         actor_user=actor,
-        metadata={"event": "EXTERNAL_TOKEN_REGENERATED", "memberId": str(member.pk), "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
+        metadata={"event": "EXTERNAL_INVITATION_REGENERATED", "memberId": str(member.pk), "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
     )
-    return member, access_token
+    record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.REGENERATED)
+    return member

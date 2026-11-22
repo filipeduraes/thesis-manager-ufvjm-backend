@@ -85,20 +85,3 @@ class IsInstitutionalAdmin(BasePermission):
             or _has_role(user, (ProfileRole.ADMIN,))
         )
 
-
-class CanInviteExternalCommitteeMember(BasePermission):
-    """
-    Allow roles that can issue external committee invitations.
-    """
-    message = "Acesso restrito a perfis autorizados a convidar membros externos."
-
-    def has_permission(self, request, view) -> bool:
-        user = request.user
-        if not user or not user.is_authenticated or not user.is_active:
-            return False
-        if isinstance(user, ExternalInvitationPrincipal):
-            return False
-        return bool(
-            getattr(user, "is_superuser", False)
-            or _has_role(user, (ProfileRole.ADMIN, ProfileRole.COORDINATOR, ProfileRole.ADVISOR))
-        )

@@ -134,7 +134,7 @@ class DefenseAutoCloseTests(TestCase):
         self.assertEqual(DefenseMemberEvaluation.objects.get(member=self.member2).decision, DefenseResult.REJECTED)
 
     def test_external_member_last_evaluation_closes_defense(self) -> None:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
         external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")

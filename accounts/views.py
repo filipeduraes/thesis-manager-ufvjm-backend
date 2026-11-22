@@ -32,7 +32,7 @@ from accounts.models import (
     User,
     UserProfileRole,
 )
-from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin
+from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin
 from accounts.directory import ROLE_FILTERS
 from accounts.serializers import (
     AdminUserCreateSerializer,
@@ -40,14 +40,12 @@ from accounts.serializers import (
     AdminUserUpdateSerializer,
     AuditLogSerializer,
     ExternalTokenSerializer,
-    ExternalInvitationCreateSerializer,
 )
 from accounts.services import (
     ExternalTokenError,
     LastAdminError,
     UserAlreadyExistsError,
     build_session_payload,
-    create_external_invitation,
     create_institutional_user,
     deactivate_user,
     exchange_external_token,
@@ -533,13 +531,15 @@ class AdminUserDetailView(APIView):
 
 
 class AdminExternalInvitationsView(APIView):
-    """List invitations and issue new committee access tokens."""
-    throttle_scope = "session"
+    """
+    List external committee invitations (administrators only).
 
-    def get_permissions(self):
-        if self.request.method == "POST":
-            return [CanInviteExternalCommitteeMember()]
-        return [IsInstitutionalAdmin()]
+    Invitations are created only by adding an external member to a defense
+    (``POST /api/v1/defenses/<id>/members/external``); their tokens are e-mailed
+    by the notification consumer and never returned by the API.
+    """
+    permission_classes = [IsInstitutionalAdmin]
+    throttle_scope = "session"
 
     def get(self, request) -> Response:
         invitations = ExternalInvitation.objects.order_by("-created_at")[:100]
@@ -552,32 +552,11 @@ class AdminExternalInvitationsView(APIView):
                 "status": invitation.status,
                 "expiresAt": invitation.expires_at.isoformat(),
                 "usedAt": invitation.used_at.isoformat() if invitation.used_at else None,
+                "sentAt": invitation.token_sent_at.isoformat() if invitation.token_sent_at else None,
             }
             for invitation in invitations
         ]
         return Response({"results": results}, status=status.HTTP_200_OK)
-
-    def post(self, request) -> Response:
-        serializer = ExternalInvitationCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        invitation, token = create_external_invitation(
-            name=serializer.validated_data["name"],
-            email=serializer.validated_data["email"],
-            institution=serializer.validated_data.get("institution", ""),
-            invited_by=request.user,
-            request=request,
-        )
-        return Response(
-            {
-                "id": str(invitation.pk),
-                "name": invitation.name,
-                "email": invitation.email,
-                "institution": invitation.institution,
-                "token": token,
-                "expiresAt": invitation.expires_at.isoformat(),
-            },
-            status=status.HTTP_201_CREATED,
-        )
 
 
 class AdminExternalInvitationDetailView(APIView):

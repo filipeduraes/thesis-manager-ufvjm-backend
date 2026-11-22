@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from academic.models import Course, Department
 from accounts.models import ProfileRole, User, UserProfileRole
-from accounts.services import create_external_invitation
+from accounts.services import create_external_invitation, issue_external_token
 from events.catalog import EventType
 from events.envelope import EventEnvelope
 from events.models import OutboxEvent, ProcessedEvent
@@ -75,7 +75,8 @@ class NotificationHandlerTests(TestCase):
         add_institutional_member(defense, CommitteeRole.PRESIDENT, self.advisor, actor=self.admin)
         add_institutional_member(defense, CommitteeRole.MEMBER, self.evaluator, actor=self.admin)
         add_institutional_member(defense, CommitteeRole.ALTERNATE, self.alternate_user, actor=self.admin)
-        invitation, self.external_token = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
+        self.external_token = issue_external_token(invitation)
         DefenseMember.objects.create(defense=defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Edu Externo", email="externo@example.org")
         return defense
 
