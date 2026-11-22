@@ -16,12 +16,15 @@ from django.db.models import Q
 from django.utils import timezone
 
 from notifications.models import Notification, NotificationChannel, NotificationStatus
+from notifications.rendering import RenderedMessage
 
 logger = logging.getLogger(__name__)
 
 ERROR_MESSAGE_MAX_LENGTH = 500
 PENDING_RETRY_GRACE = timedelta(minutes=5)
 _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Alguns backends ecoam trechos da mensagem no erro; o token do convite nunca pode ir para o banco.
+_ACCESS_TOKEN_PATTERN = re.compile(r"UFVJM(?:-[A-Z0-9]{4}){4}", re.IGNORECASE)
 
 
 def notification_address(notification: Notification) -> str:
@@ -43,7 +46,7 @@ def notification_address(notification: Notification) -> str:
 
 def sanitize_delivery_error(error: BaseException) -> str:
     """
-    Describe a delivery error without e-mail addresses (SMTP errors often echo them).
+    Describe a delivery error without e-mail addresses or access tokens (SMTP errors often echo them).
 
     Args:
         error: Exception raised by the e-mail backend.
@@ -53,10 +56,11 @@ def sanitize_delivery_error(error: BaseException) -> str:
     """
     message = f"{type(error).__name__}: {error}"
     message = _EMAIL_PATTERN.sub("***@***", message)
+    message = _ACCESS_TOKEN_PATTERN.sub("UFVJM-****", message)
     return message[:ERROR_MESSAGE_MAX_LENGTH]
 
 
-def send_notification(notification: Notification) -> bool:
+def send_notification(notification: Notification, content: RenderedMessage | None = None) -> bool:
     """
     Send one e-mail notification and record the outcome on the row.
 
@@ -65,14 +69,17 @@ def send_notification(notification: Notification) -> bool:
 
     Args:
         notification: Notification in ``PENDING`` or ``FAILED`` status.
+        content: Message to send instead of the stored copy, used when the real
+            message carries a secret (the invitation token) that the row must not keep.
 
     Returns:
         bool: True when the backend accepted the message.
     """
     address = notification_address(notification)
-    message = EmailMultiAlternatives(subject=notification.subject, body=notification.body, from_email=settings.DEFAULT_FROM_EMAIL, to=[address])
-    if notification.body_html:
-        message.attach_alternative(notification.body_html, "text/html")
+    message_content = content or RenderedMessage(subject=notification.subject, body_text=notification.body, body_html=notification.body_html)
+    message = EmailMultiAlternatives(subject=message_content.subject, body=message_content.body_text, from_email=settings.DEFAULT_FROM_EMAIL, to=[address])
+    if message_content.body_html:
+        message.attach_alternative(message_content.body_html, "text/html")
     notification.attempts += 1
     try:
         message.send()

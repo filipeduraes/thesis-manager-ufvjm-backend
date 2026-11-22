@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from events.catalog import EventType
+from accounts.services import invalidate_external_token
+from events.catalog import EventType, ExternalInvitationTrigger
 from events.models import OutboxEvent
 from events.outbox import AggregateRef, record_event
 from theses.models import Defense, DefenseMember, Thesis
@@ -157,3 +158,34 @@ def record_thesis_published(thesis: Thesis) -> OutboxEvent:
     """
     payload = {"thesisId": str(thesis.pk), "referenceCode": thesis.reference_code, "publishedAt": _isoformat(thesis.published_at)}
     return record_event(EventType.THESIS_PUBLISHED, _thesis_aggregate(thesis), payload)
+
+
+def record_external_member_invited(defense: Defense, member: DefenseMember, trigger: ExternalInvitationTrigger) -> OutboxEvent:
+    """
+    Record ``defense.external_member_invited`` and make it the only event allowed to issue the member's token.
+
+    The invitation's current token stops working at once (its hash is replaced by an
+    unmatchable digest) and ``token_event_id`` points to the new event, so the
+    notification consumer generates the token, stores its hash and e-mails it.
+    Neither the token nor the e-mail address goes into the payload.
+
+    Args:
+        defense: Defense the member belongs to.
+        member: External committee member with its current invitation.
+        trigger: Why the invitation e-mail is requested.
+
+    Returns:
+        OutboxEvent: Recorded event.
+
+    Raises:
+        ValueError: When the member has no external invitation.
+    """
+    invitation = member.external_invitation
+    if invitation is None:
+        raise ValueError("Only external committee members receive invitation e-mails")
+    payload = {"defenseId": str(defense.pk), "thesisId": str(defense.thesis_id), "memberId": str(member.pk), "invitationId": str(invitation.pk), "trigger": str(trigger)}
+    event = record_event(EventType.DEFENSE_EXTERNAL_MEMBER_INVITED, _defense_aggregate(defense), payload)
+    invalidate_external_token(invitation)
+    invitation.token_event_id = event.pk
+    invitation.save(update_fields=["token_event_id"])
+    return event

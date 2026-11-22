@@ -23,10 +23,23 @@ class EventType(models.TextChoices):
     DEFENSE_COMPLETED = "defense.completed", "Banca concluída"
     THESIS_DEFENSE_RESULT_RECORDED = "thesis.defense_result_recorded", "Resultado da banca registrado"
     THESIS_PUBLISHED = "thesis.published", "Monografia publicada"
+    DEFENSE_EXTERNAL_MEMBER_INVITED = "defense.external_member_invited", "Convite de membro externo emitido"
+
+
+class ExternalInvitationTrigger(models.TextChoices):
+    """
+    Why an external member invitation e-mail (with a new token) was requested.
+    """
+
+    CREATED = "CREATED", "Convite criado"
+    RESENT = "RESENT", "Convite reenviado"
+    REGENERATED = "REGENERATED", "Novo convite gerado"
 
 
 # Payloads levam apenas identificadores e códigos; nomes, e-mails, notas, local e
 # link da banca são lidos do banco pelo consumidor. O conjunto de chaves é exato.
+# O token do membro externo nunca entra no payload: o consumidor o gera e o envia
+# só no e-mail, guardando apenas o hash no convite.
 PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     EventType.THESIS_SUBMITTED: frozenset({"thesisId", "versionNumber", "submittedAt"}),
     EventType.DEFENSE_SCHEDULED: frozenset({"defenseId", "thesisId", "scheduledDatetime", "durationMinutes", "modality"}),
@@ -34,6 +47,7 @@ PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     EventType.DEFENSE_COMPLETED: frozenset({"defenseId", "thesisId", "result", "thesisNewStatus", "automatic"}),
     EventType.THESIS_DEFENSE_RESULT_RECORDED: frozenset({"thesisId", "result", "thesisNewStatus"}),
     EventType.THESIS_PUBLISHED: frozenset({"thesisId", "referenceCode", "publishedAt"}),
+    EventType.DEFENSE_EXTERNAL_MEMBER_INVITED: frozenset({"defenseId", "thesisId", "memberId", "invitationId", "trigger"}),
 }
 
 CURRENT_VERSIONS: dict[str, str] = {event_type: EVENT_VERSION_1_0 for event_type in EventType.values}

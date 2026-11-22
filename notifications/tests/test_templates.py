@@ -42,11 +42,18 @@ class SeededTemplatesTests(TestCase):
                     self.assertNotIn("{%", content)
 
     def test_templates_never_reference_tokens_or_secrets(self) -> None:
-        for template in NotificationTemplate.objects.all():
+        for template in NotificationTemplate.objects.exclude(code=NotificationTemplateCode.EXTERNAL_MEMBER_INVITED):
             source = f"{template.subject} {template.body_text} {template.body_html} {template.variables}".lower()
             with self.subTest(code=template.code):
                 self.assertNotIn("token", source)
                 self.assertNotIn("senha", source)
+
+    def test_only_the_invitation_template_carries_the_access_token(self) -> None:
+        carriers = [template.code for template in NotificationTemplate.objects.all() if "access_token" in template.variables]
+        self.assertEqual(carriers, [NotificationTemplateCode.EXTERNAL_MEMBER_INVITED])
+        invitation_template = NotificationTemplate.objects.get(code=NotificationTemplateCode.EXTERNAL_MEMBER_INVITED)
+        self.assertNotIn("access_token", invitation_template.subject)
+        self.assertNotIn("senha", f"{invitation_template.body_text} {invitation_template.body_html}".lower())
 
 
 class RenderNotificationTests(TestCase):

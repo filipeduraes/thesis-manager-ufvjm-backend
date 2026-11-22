@@ -26,6 +26,7 @@ class NotificationTemplateCode(models.TextChoices):
     DEFENSE_COMPLETED = "DEFENSE_COMPLETED", "Banca concluída"
     THESIS_DEFENSE_RESULT_RECORDED = "THESIS_DEFENSE_RESULT_RECORDED", "Resultado da banca registrado"
     THESIS_PUBLISHED = "THESIS_PUBLISHED", "Monografia publicada"
+    EXTERNAL_MEMBER_INVITED = "EXTERNAL_MEMBER_INVITED", "Convite de membro externo"
 
 
 class NotificationChannel(models.TextChoices):

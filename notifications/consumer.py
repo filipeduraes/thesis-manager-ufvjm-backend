@@ -11,7 +11,8 @@ import enum
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -23,9 +24,11 @@ from events.envelope import EventEnvelope
 from events.models import OutboxEvent, ProcessedEvent
 from events.outbox import EventPayload
 from notifications.delivery import send_notification
+from notifications.invitations import plan_external_member_invited
 from notifications.models import Notification, NotificationTemplate, NotificationTemplateCode
-from notifications.recipients import Recipient, evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
-from notifications.rendering import TemplateContext, render_notification
+from notifications.plans import EntityNotFoundError, NotificationPlan
+from notifications.recipients import evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
+from notifications.rendering import RenderedMessage, TemplateContext, render_notification
 from theses.models import CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, Thesis
 
 logger = logging.getLogger(__name__)
@@ -42,30 +45,6 @@ class HandleOutcome(enum.Enum):
     PROCESSED = "PROCESSED"
     DUPLICATE = "DUPLICATE"
     REJECTED = "REJECTED"
-
-
-class EntityNotFoundError(LookupError):
-    """
-    Raised when the thesis or defense referenced by an event no longer exists.
-    """
-
-
-@dataclass
-class NotificationPlan:
-    """
-    What to send for one event.
-
-    Attributes:
-        template_code: Template used for every recipient.
-        thesis: Thesis the event refers to.
-        recipients: Deduplicated recipients.
-        context: Template variables shared by every recipient.
-    """
-
-    template_code: str
-    thesis: Thesis
-    recipients: list[Recipient]
-    context: TemplateContext = field(default_factory=dict)
 
 
 def _get_thesis(thesis_id: str) -> Thesis:
@@ -231,17 +210,62 @@ PLANNERS: dict[str, Callable[[EventPayload], NotificationPlan]] = {
     EventType.THESIS_PUBLISHED: _plan_thesis_published,
 }
 
+# Planejadores que precisam do id do evento (ex.: emissão do token, que só vale
+# para o evento mais recente do convite).
+EVENT_AWARE_PLANNERS: dict[str, Callable[[UUID, EventPayload], NotificationPlan]] = {
+    EventType.DEFENSE_EXTERNAL_MEMBER_INVITED: plan_external_member_invited,
+}
 
-def _create_notifications(envelope: EventEnvelope, plan: NotificationPlan) -> list[Notification]:
+
+def _plan_event(envelope: EventEnvelope) -> NotificationPlan:
+    """
+    Run the planner registered for the event type.
+
+    Args:
+        envelope: Event being handled.
+
+    Returns:
+        NotificationPlan: What to send.
+
+    Raises:
+        EntityNotFoundError: When a referenced record no longer exists.
+    """
+    event_aware_planner = EVENT_AWARE_PLANNERS.get(envelope.event_type)
+    if event_aware_planner is not None:
+        return event_aware_planner(envelope.event_id, envelope.payload)
+    planner = PLANNERS[envelope.event_type]
+    return planner(envelope.payload)
+
+
+@dataclass
+class PlannedDelivery:
+    """
+    Stored notification plus the content to send when it differs from the stored copy.
+
+    Attributes:
+        notification: Persisted notification (never holds secrets).
+        content: Message with secret values, kept only in memory; None to send the stored copy.
+        after_send: Callback run when the backend accepts the message.
+    """
+
+    notification: Notification
+    content: RenderedMessage | None
+    after_send: Callable[[Notification], None] | None
+
+
+def _create_notifications(envelope: EventEnvelope, plan: NotificationPlan) -> list[PlannedDelivery]:
     """
     Render and store one pending notification per recipient.
+
+    Values in ``plan.secret_context`` are rendered only into the in-memory message
+    that will be sent; the stored notification keeps the values of ``plan.context``.
 
     Args:
         envelope: Event being handled.
         plan: Template, recipients and context for the event.
 
     Returns:
-        list[Notification]: Created notifications (empty when the template is inactive).
+        list[PlannedDelivery]: Created notifications (empty when the template is inactive).
     """
     template = NotificationTemplate.objects.filter(code=plan.template_code, is_active=True).first()
     if template is None:
@@ -249,7 +273,7 @@ def _create_notifications(envelope: EventEnvelope, plan: NotificationPlan) -> li
         return []
     outbox_event = OutboxEvent.objects.filter(pk=envelope.event_id).first()
     base_context: TemplateContext = {"thesis_title": plan.thesis.title, "reference_code": plan.thesis.reference_code, "action_url": settings.FRONTEND_URL, **plan.context}
-    notifications: list[Notification] = []
+    deliveries: list[PlannedDelivery] = []
     for recipient in plan.recipients:
         recipient_context: TemplateContext = {**base_context, "recipient_name": recipient.name}
         rendered = render_notification(template, recipient_context)
@@ -263,8 +287,11 @@ def _create_notifications(envelope: EventEnvelope, plan: NotificationPlan) -> li
             body=rendered.body_text,
             body_html=rendered.body_html,
         )
-        notifications.append(notification)
-    return notifications
+        secret_content: RenderedMessage | None = None
+        if plan.secret_context:
+            secret_content = render_notification(template, {**recipient_context, **plan.secret_context})
+        deliveries.append(PlannedDelivery(notification, secret_content, plan.after_send))
+    return deliveries
 
 
 def _payload_matches_catalog(envelope: EventEnvelope) -> bool:
@@ -308,19 +335,21 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
         except IntegrityError:
             logger.info("Event %s (%s) already processed; skipping", envelope.event_id, envelope.event_type)
             return HandleOutcome.DUPLICATE
-        planner = PLANNERS[envelope.event_type]
         try:
-            plan = planner(envelope.payload)
+            plan = _plan_event(envelope)
         except EntityNotFoundError:
             logger.warning("Event %s (%s) refers to a record that no longer exists; no notification created", envelope.event_id, envelope.event_type)
-            notifications: list[Notification] = []
+            deliveries: list[PlannedDelivery] = []
         else:
-            notifications = _create_notifications(envelope, plan)
+            deliveries = _create_notifications(envelope, plan)
         marker.processing_time_ms = int((time.monotonic() - started) * 1000)
         marker.save(update_fields=["processing_time_ms"])
     sent = 0
-    for notification in notifications:
-        if send_notification(notification):
-            sent += 1
-    logger.info("Processed event %s (%s): %s notification(s), %s sent", envelope.event_id, envelope.event_type, len(notifications), sent)
+    for delivery in deliveries:
+        if not send_notification(delivery.notification, content=delivery.content):
+            continue
+        sent += 1
+        if delivery.after_send is not None:
+            delivery.after_send(delivery.notification)
+    logger.info("Processed event %s (%s): %s notification(s), %s sent", envelope.event_id, envelope.event_type, len(deliveries), sent)
     return HandleOutcome.PROCESSED
