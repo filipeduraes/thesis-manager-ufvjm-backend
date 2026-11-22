@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -31,7 +33,9 @@ from theses.models import (
     EDITABLE_STATUSES,
     PUBLISHABLE_STATUSES,
     REVIEWABLE_STATUSES,
+    Defense,
     DefenseResult,
+    DefenseStatus,
     DocumentStatus,
     DocumentType,
     Keyword,
@@ -52,6 +56,7 @@ from theses.models import (
 logger = logging.getLogger(__name__)
 
 PDF_MAGIC_BYTES = b"%PDF-"
+REPOSITORY_TIME_ZONE = ZoneInfo("America/Sao_Paulo")
 STATUS_DESCRIPTIONS: dict[str, str] = {
     ThesisStatus.DRAFT: "Preencha os dados da monografia e envie o PDF para submeter.",
     ThesisStatus.SUBMITTED: "Submissão recebida. Aguardando a análise do orientador.",
@@ -1089,10 +1094,30 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
     return thesis
 
 
+def resolve_defense_date(thesis: Thesis) -> date:
+    """
+    Resolve the defense date stored on a thesis when it is published.
+
+    The latest completed ``Defense`` wins; theses whose result was recorded
+    manually (no ``Defense`` row) use the date of that record, and the current
+    date is the last fallback. Dates are local to America/Sao_Paulo, the same
+    calendar used by the reports.
+
+    Args:
+        thesis: Thesis being published.
+
+    Returns:
+        date: Local defense date.
+    """
+    defense = Defense.objects.filter(thesis=thesis, status=DefenseStatus.COMPLETED).order_by("-scheduled_datetime").first()
+    if defense is not None:
+        return defense.scheduled_datetime.astimezone(REPOSITORY_TIME_ZONE).date()
+    result_entry = thesis.status_history.filter(metadata__has_key="defenseResult").order_by("-changed_at").first()
+    reference: datetime = result_entry.changed_at if result_entry is not None else timezone.now()
+    return reference.astimezone(REPOSITORY_TIME_ZONE).date()
+
+
 @transaction.atomic
-# TODO(auditoria): ao implementar cache do repositório público, invalidar aqui
-# (o ponto natural é logo após salvar `Publicado`); não usar delete amplo por
-# prefixo, mas girar uma versão de chaves para invalidar páginas da busca.
 def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None) -> Thesis:
     """
     Publish an approved thesis in the public repository.
@@ -1125,10 +1150,13 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     if authorization is None:
         raise ValidationError("Registre e valide a autorização de publicação antes de publicar.")
     previous_status = thesis.status
+    defense_date = thesis.defense_date or resolve_defense_date(thesis)
     thesis.status = ThesisStatus.PUBLISHED
     thesis.is_public = True
     thesis.published_at = timezone.now()
-    thesis.save(update_fields=["status", "is_public", "published_at", "updated_at"])
+    thesis.defense_date = defense_date
+    thesis.defense_year = defense_date.year
+    thesis.save(update_fields=["status", "is_public", "published_at", "defense_date", "defense_year", "updated_at"])
     _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, user, "Monografia publicada no repositório institucional.")
     record_thesis_published(thesis)
     purge_thesis_versions(thesis, actor=user, request=request)
@@ -1629,76 +1657,3 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str,
         "pendingReview": thesis.status in REVIEWABLE_STATUSES,
         "permissions": thesis_permissions(thesis, viewer),
     }
-
-
-def public_theses_queryset() -> QuerySet[Thesis]:
-    """
-    Return the public repository queryset.
-
-    Returns:
-        QuerySet[Thesis]: Published theses that were not deleted.
-    """
-    return thesis_queryset().filter(
-        is_public=True,
-        status=ThesisStatus.PUBLISHED,
-        published_at__isnull=False,
-        deleted_at__isnull=True,
-    )
-
-
-def public_thesis_payload(thesis: Thesis) -> dict[str, Any]:
-    """
-    Serialize a published thesis for anonymous repository access.
-
-    Args:
-        thesis: Published thesis.
-
-    Returns:
-        dict[str, Any]: Public thesis payload.
-    """
-    payload = thesis_payload(thesis, viewer=None, include_history=False)
-    current_file = thesis.files.filter(is_current=True).select_related("stored_file").first()
-    payload["currentFile"] = thesis_file_payload(current_file) if current_file else None
-    if current_file is not None:
-        payload["currentFile"]["downloadUrl"] = f"/api/v1/public/theses/{thesis.pk}/download"
-        payload["currentFile"]["previewUrl"] = f"/api/v1/public/theses/{thesis.pk}/download?disposition=inline"
-    return payload
-
-
-def public_theses_filtered(query: str = "", course_id: str = "", advisor_id: str = "", year: str = "", keyword: str = "") -> QuerySet[Thesis]:
-    """
-    Apply repository filters to published theses.
-
-    Args:
-        query: Free-text search across title, abstract, authors and advisor.
-        course_id: Optional course identifier.
-        advisor_id: Optional advisor identifier.
-        year: Optional defense/publication year.
-        keyword: Optional keyword filter.
-
-    Returns:
-        QuerySet[Thesis]: Filtered public queryset.
-    """
-    queryset = public_theses_queryset()
-    if query:
-        queryset = queryset.filter(
-            Q(title__icontains=query)
-            | Q(abstract__icontains=query)
-            | Q(authors__author__name__icontains=query)
-            | Q(advisor__name__icontains=query)
-            | Q(keyword_links__keyword__name__icontains=query)
-        )
-    if course_id:
-        queryset = queryset.filter(course_id=course_id)
-    if advisor_id:
-        queryset = queryset.filter(advisor_id=advisor_id)
-    if year:
-        try:
-            parsed_year = int(year)
-        except (TypeError, ValueError):
-            parsed_year = None
-        if parsed_year is not None:
-            queryset = queryset.filter(published_at__year=parsed_year)
-    if keyword:
-        queryset = queryset.filter(keyword_links__keyword__normalized_name=keyword.strip().casefold())
-    return queryset.distinct()

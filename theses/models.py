@@ -352,6 +352,11 @@ class Thesis(models.Model):
     advisor_approved_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    # Data/ano da defesa gravados na publicação: o repositório filtra e lista os
+    # anos sem depender de joins com `defense`, e monografias antigas (sem banca
+    # no sistema) informam esses valores no cadastro manual.
+    defense_date = models.DateField(null=True, blank=True)
+    defense_year = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
         """
@@ -367,6 +372,7 @@ class Thesis(models.Model):
             models.Index(fields=["advisor", "status"], name="thesis_advisor_status_idx"),
             models.Index(fields=["course", "status"], name="thesis_course_status_idx"),
             models.Index(fields=["is_public", "published_at"], name="thesis_public_idx"),
+            models.Index(fields=["is_public", "defense_year"], name="thesis_public_year_idx"),
         ]
 
     def __str__(self) -> str:

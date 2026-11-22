@@ -206,8 +206,13 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.ScopedRateThrottle",
     ],
+    # Identifica o cliente anônimo pelo REMOTE_ADDR; X-Forwarded-For só vale com
+    # proxies confiáveis configurados (mesma regra de accounts.network).
+    "NUM_PROXIES": env.int("TRUSTED_PROXY_COUNT", default=0),
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
+        "public_download": "30/min",
+        "public_repository": "120/min",
         "reports": "60/min",
         "reports_export": "10/min",
         "session": "120/min",

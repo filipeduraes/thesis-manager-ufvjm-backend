@@ -35,9 +35,19 @@ from theses.models import (
     ThesisStatus,
 )
 from theses.permissions import IsAcademicManager, IsAdvisorUser, IsStudentUser
+from theses.repository import (
+    public_courses_payload,
+    public_repository_filters_payload,
+    public_thesis_detail_payload,
+    public_thesis_list_payload,
+    public_theses_queryset,
+    published_theses,
+    search_public_theses,
+)
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
+    PublicThesisSearchSerializer,
     ThesisMetadataSerializer,
     ThesisReviewSerializer,
 )
@@ -48,8 +58,6 @@ from theses.services import (
     course_brief,
     document_payload,
     get_accessible_thesis,
-    public_theses_filtered,
-    public_thesis_payload,
     publish_thesis,
     record_defense_result,
     review_payload,
@@ -764,63 +772,97 @@ class ThesisDocumentDownloadView(APIView):
         return _download_response(document.stored_file, thesis, "attachment")
 
 
-class PublicThesisListView(APIView):
+class PublicRepositoryView(APIView):
     """
-    List published theses in the public repository.
-    """
+    Base class of the anonymous repository endpoints.
 
-    # TODO(auditoria): repositório público incompleto para anônimos.
-    # 1. `thesis_list_payload` aponta `currentFile.downloadUrl`/`previewUrl` para
-    #    `/api/v1/theses/<id>/files/<fileId>/download` (rota autenticada): o visitante
-    #    anônimo recebe 401. Criar `public_thesis_list_payload` mantendo o resumo
-    #    e trocando as URLs para `/api/v1/public/theses/<id>/download` — o detalhe
-    #    (`public_thesis_payload`) já faz esse ajuste.
-    # 2. Serializar também `abstract`, `type`, `typeLabel` e `journal` na listagem
-    #    se os cards do repositório forem exibir esses campos.
-    # 3. Ordenar por `-published_at` para paginação estável por publicação.
-    # 4. Cache versionado (índice girado na publicação) apenas se o volume de
-    #    tráfego anônimo justificar; se implementado, invalidar na publicação
-    #    (ver comentário em `publish_thesis`).
-    # Os pontos de contrato público estão descritos também em
-    # FUNCIONALIDADES.md, seção "Pendências identificadas na auditoria".
+    No authentication runs (session cookies are ignored), and every endpoint is
+    rate limited per client IP. ``NUM_PROXIES`` follows ``TRUSTED_PROXY_COUNT``,
+    so ``X-Forwarded-For`` is only honored behind configured proxies.
+    """
 
     permission_classes = [AllowAny]
     authentication_classes: list = []
+    throttle_scope = "public_repository"
+
+
+class PublicThesisListView(PublicRepositoryView):
+    """
+    Search published theses in the public repository.
+    """
 
     def get(self, request) -> Response:
         """
-        Return published theses with public filters.
+        Return published theses matching the search parameters.
+
+        Args:
+            request: HTTP request. Query parameters: ``q`` (free text), ``title``,
+                ``author``, ``advisor``, ``course`` (text), ``keyword`` (repeatable,
+                exact), ``courseId``, ``advisorId``, ``year`` (defense year),
+                ``ordering`` (``relevance``, ``recent``, ``title``), ``page`` and ``pageSize``.
+
+        Returns:
+            Response: Paginated public summaries; 400 for invalid parameters.
+        """
+        serializer = PublicThesisSearchSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        filters = serializer.to_filters()
+        queryset = search_public_theses(filters)
+        paginator = ThesisPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        results = [public_thesis_list_payload(thesis) for thesis in page]
+        response = paginator.get_paginated_response(results)
+        response.data["ordering"] = filters.effective_ordering
+        return response
+
+
+class PublicThesisFiltersView(PublicRepositoryView):
+    """
+    List the filter options present in published theses.
+    """
+
+    def get(self, request) -> Response:
+        """
+        Return courses, advisors, defense years and keywords of published theses.
 
         Args:
             request: HTTP request.
 
         Returns:
-            Response: Paginated public thesis summaries.
+            Response: ``courses``, ``advisors``, ``years`` and ``keywords`` with counts.
         """
-        queryset = public_theses_filtered(
-            query=(request.query_params.get("q") or "").strip(),
-            course_id=(request.query_params.get("courseId") or "").strip(),
-            advisor_id=(request.query_params.get("advisorId") or "").strip(),
-            year=(request.query_params.get("year") or "").strip(),
-            keyword=(request.query_params.get("keyword") or "").strip(),
-        )
-        paginator = ThesisPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        results = [thesis_list_payload(thesis, None) for thesis in page]
-        return paginator.get_paginated_response(results)
+        return Response(public_repository_filters_payload())
 
 
-class PublicThesisDetailView(APIView):
+class PublicCourseListView(PublicRepositoryView):
+    """
+    List the institution's courses for anonymous visitors.
+    """
+
+    def get(self, request) -> Response:
+        """
+        Return every course with its number of published theses.
+
+        Args:
+            request: HTTP request. ``withPublished=true`` keeps only courses with
+                at least one published thesis.
+
+        Returns:
+            Response: ``count`` and ``results``.
+        """
+        only_with_published = (request.query_params.get("withPublished") or "").strip().lower() in {"1", "true", "yes"}
+        results = public_courses_payload(only_with_published=only_with_published)
+        return Response({"count": len(results), "results": results})
+
+
+class PublicThesisDetailView(PublicRepositoryView):
     """
     Return a published thesis from the public repository.
     """
 
-    permission_classes = [AllowAny]
-    authentication_classes: list = []
-
     def get(self, request, thesis_id) -> Response:
         """
-        Return public thesis metadata.
+        Return public thesis metadata, including the SHA-256 of the published PDF.
 
         Args:
             request: HTTP request.
@@ -829,24 +871,37 @@ class PublicThesisDetailView(APIView):
         Returns:
             Response: Public thesis payload.
         """
-        thesis = public_theses_filtered().filter(pk=thesis_id).first()
+        thesis = public_theses_queryset().filter(pk=thesis_id).first()
         if thesis is None:
             raise Http404("Monografia não encontrada.")
-        return Response({"thesis": public_thesis_payload(thesis)})
+        return Response({"thesis": public_thesis_detail_payload(thesis)})
 
 
-class PublicThesisDownloadView(APIView):
+class PublicThesisDownloadView(PublicRepositoryView):
     """
     Stream the current file of a published thesis.
     """
 
-    permission_classes = [AllowAny]
-    authentication_classes: list = []
-    renderer_classes = [BinaryFileRenderer]
+    throttle_scope = "public_download"
+
+    def perform_content_negotiation(self, request, force: bool = False):
+        """
+        Negotiate leniently so errors (404, 429) are always JSON.
+
+        The PDF itself is a ``FileResponse`` and bypasses the renderers.
+
+        Args:
+            request: Incoming request.
+            force: Ignored; negotiation is always forced.
+
+        Returns:
+            tuple: Renderer and media type for error responses.
+        """
+        return super().perform_content_negotiation(request, force=True)
 
     def get(self, request, thesis_id) -> FileResponse:
         """
-        Download or preview the current public PDF.
+        Download or preview the current public PDF after rechecking its SHA-256.
 
         Args:
             request: HTTP request.
@@ -855,7 +910,7 @@ class PublicThesisDownloadView(APIView):
         Returns:
             FileResponse: Streamed PDF.
         """
-        thesis = public_theses_filtered().filter(pk=thesis_id).first()
+        thesis = published_theses().filter(pk=thesis_id).first()
         if thesis is None:
             raise Http404("Monografia não encontrada.")
         thesis_file = thesis.files.filter(is_current=True).select_related("stored_file").first()

@@ -10,6 +10,7 @@ from rest_framework import serializers
 from academic.models import Course
 from accounts.models import User
 from theses.models import AvailabilityStatus, CommitteeRole, DefenseModality, DefenseResult, DocumentType, ReviewDecision, ThesisType
+from theses.repository import ORDERING_CHOICES, PublicSearchFilters
 from theses.services import available_advisors, normalize_keyword_names
 
 
@@ -220,3 +221,49 @@ class SubmitEvaluationSerializer(serializers.Serializer):
     decision = serializers.ChoiceField(choices=DefenseResult.choices)
     score = serializers.DecimalField(max_digits=4, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=10)
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PublicThesisSearchSerializer(serializers.Serializer):
+    """
+    Validate the query parameters of the public repository search.
+
+    Unknown parameters (``page``, ``pageSize``) are ignored here and handled by the
+    paginator; invalid values return 400 instead of being silently dropped.
+    """
+
+    q = serializers.CharField(required=False, allow_blank=True, max_length=200, default="")
+    title = serializers.CharField(required=False, allow_blank=True, max_length=200, default="")
+    author = serializers.CharField(required=False, allow_blank=True, max_length=200, default="")
+    advisor = serializers.CharField(required=False, allow_blank=True, max_length=200, default="")
+    course = serializers.CharField(required=False, allow_blank=True, max_length=150, default="")
+    keyword = serializers.ListField(child=serializers.CharField(max_length=50, allow_blank=True), required=False, default=list, max_length=10)
+    courseId = serializers.UUIDField(required=False, allow_null=True, default=None)
+    advisorId = serializers.UUIDField(required=False, allow_null=True, default=None)
+    year = serializers.IntegerField(required=False, allow_null=True, default=None, min_value=1900, max_value=2200)
+    ordering = serializers.ChoiceField(choices=ORDERING_CHOICES, required=False, allow_blank=True, default="")
+
+    def to_filters(self) -> PublicSearchFilters:
+        """
+        Convert the validated parameters into search filters.
+
+        Returns:
+            PublicSearchFilters: Normalized filters (texts collapsed, keywords case-folded).
+        """
+        data = self.validated_data
+        keywords: list[str] = []
+        for raw_keyword in data["keyword"]:
+            normalized = " ".join(raw_keyword.split()).casefold()
+            if normalized and normalized not in keywords:
+                keywords.append(normalized)
+        return PublicSearchFilters(
+            query=" ".join(data["q"].split()),
+            title=" ".join(data["title"].split()),
+            author=" ".join(data["author"].split()),
+            advisor=" ".join(data["advisor"].split()),
+            course=" ".join(data["course"].split()),
+            keywords=tuple(keywords),
+            course_id=data["courseId"],
+            advisor_id=data["advisorId"],
+            year=data["year"],
+            ordering=data["ordering"],
+        )

@@ -80,15 +80,13 @@ urlpatterns = [
         views.ThesisDocumentDownloadView.as_view(),
         name="api_thesis_document_download",
     ),
-    # TODO(auditoria): repositório público ainda sem `GET /api/v1/public/theses/filters`
-    # (opções de curso/orientador/ano/palavra-chave presentes em publicados, cacheadas),
-    # e sem cache para a busca anônima. Ver FUNCIONALIDADES.md
-    # "Pendências identificadas na auditoria".
     path(
         "api/v1/public/theses",
         views.PublicThesisListView.as_view(),
         name="api_public_theses",
     ),
+    path("api/v1/public/theses/filters", views.PublicThesisFiltersView.as_view(), name="api_public_thesis_filters"),
+    path("api/v1/public/courses", views.PublicCourseListView.as_view(), name="api_public_courses"),
     path(
         "api/v1/public/theses/<uuid:thesis_id>",
         views.PublicThesisDetailView.as_view(),
