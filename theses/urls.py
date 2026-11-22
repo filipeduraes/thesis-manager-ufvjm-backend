@@ -60,6 +60,7 @@ urlpatterns = [
         views.ThesisPublishView.as_view(),
         name="api_thesis_publish",
     ),
+    path("api/v1/theses/<uuid:thesis_id>/unpublish", views.ThesisUnpublishView.as_view(), name="api_thesis_unpublish"),
     path(
         "api/v1/theses/<uuid:thesis_id>/files/<uuid:file_id>/download",
         views.ThesisFileDownloadView.as_view(),

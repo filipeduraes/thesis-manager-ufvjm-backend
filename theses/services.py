@@ -54,6 +54,7 @@ from theses.models import (
     ThesisStatus,
     ThesisStatusHistory,
     ThesisType,
+    thesis_was_published,
 )
 
 logger = logging.getLogger(__name__)
@@ -1722,6 +1723,8 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
             "canRecordDefenseResult": False,
             "canUploadDocuments": False,
             "canUploadCorrection": False,
+            "canUnpublish": False,
+            "canDelete": False,
         }
     roles = user_roles(viewer)
     is_admin = user_is_admin(viewer)
@@ -1744,6 +1747,8 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
         "canPublish": bool((is_admin or is_coordinator) and thesis.status in PUBLISHABLE_STATUSES),
         "canRecordDefenseResult": bool((is_admin or is_coordinator) and thesis.status in DEFENSE_RESULT_STATUSES),
         "canUploadDocuments": bool(user_can_access_thesis(viewer, thesis) and thesis.status not in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}),
+        "canUnpublish": bool((is_admin or is_coordinator) and thesis.status == ThesisStatus.PUBLISHED),
+        "canDelete": bool((is_admin or is_coordinator) and not thesis_was_published(thesis) and thesis.deleted_at is None),
     }
 
 

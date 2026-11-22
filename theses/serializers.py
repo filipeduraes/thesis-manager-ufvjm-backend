@@ -267,3 +267,11 @@ class PublicThesisSearchSerializer(serializers.Serializer):
             year=data["year"],
             ordering=data["ordering"],
         )
+
+
+class UnpublishThesisSerializer(serializers.Serializer):
+    """
+    Validate the reason given to remove a thesis from the public repository.
+    """
+
+    reason = serializers.CharField(max_length=1000, allow_blank=False, trim_whitespace=True)

@@ -15,6 +15,7 @@ from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import BaseRenderer
@@ -45,10 +46,12 @@ from theses.repository import (
     search_public_theses,
 )
 from theses.repository_cache import cached_payload, courses_cache_key, detail_cache_key, filters_cache_key, search_cache_key
+from theses.repository_management import delete_thesis, unpublish_thesis
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
     PublicThesisSearchSerializer,
+    UnpublishThesisSerializer,
     ThesisMetadataSerializer,
     ThesisReviewSerializer,
 )
@@ -480,6 +483,63 @@ class ThesisDetailView(APIView):
         thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
         if thesis is None:
             raise Http404("Monografia não encontrada.")
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)})
+
+    def delete(self, request, thesis_id) -> Response:
+        """
+        Soft-delete a thesis that was never published.
+
+        Published theses are refused with 400 (even for administrators); they can
+        only be unpublished through ``POST /api/v1/theses/<id>/unpublish``.
+
+        Args:
+            request: HTTP request.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: 204 on success, 400 when refused, 403 outside the manager's courses.
+        """
+        if not IsAcademicManager().has_permission(request, self):
+            raise PermissionDenied(IsAcademicManager.message)
+        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
+        if thesis is None:
+            raise Http404("Monografia não encontrada.")
+        try:
+            delete_thesis(request.user, thesis, request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ThesisUnpublishView(APIView):
+    """
+    Remove a published thesis from the public repository.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis"
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Unpublish a thesis with a mandatory reason.
+
+        Args:
+            request: HTTP request with ``reason``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: Updated thesis payload (status ``ARCHIVED``).
+        """
+        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
+        if thesis is None:
+            raise Http404("Monografia não encontrada.")
+        serializer = UnpublishThesisSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis = unpublish_thesis(request.user, thesis, serializer.validated_data["reason"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
         thesis = get_accessible_thesis(request.user, str(thesis.pk))
         return Response({"thesis": thesis_payload(thesis, request.user)})
 

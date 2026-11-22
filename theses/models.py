@@ -184,6 +184,57 @@ ACTIVE_DEFENSE_STATUSES = (
 )
 
 
+PUBLISHED_DELETE_ERROR = "Monografias publicadas não podem ser excluídas; use a despublicação."
+
+
+def thesis_was_published(thesis: Thesis) -> bool:
+    """
+    Return whether a thesis is or was in the public repository.
+
+    Unpublished theses keep ``published_at``, so they stay protected as well.
+
+    Args:
+        thesis: Thesis instance.
+
+    Returns:
+        bool: ``True`` when deletion must be refused.
+    """
+    return thesis.status == ThesisStatus.PUBLISHED or thesis.is_public or thesis.published_at is not None
+
+
+def published_thesis_filter() -> Q:
+    """
+    Build the filter matching theses that are or were published.
+
+    Returns:
+        Q: Same rule as ``thesis_was_published``, usable in querysets.
+    """
+    return Q(status=ThesisStatus.PUBLISHED) | Q(is_public=True) | Q(published_at__isnull=False)
+
+
+class ThesisQuerySet(models.QuerySet):
+    """
+    QuerySet that refuses bulk deletion of published theses.
+    """
+
+    def delete(self) -> tuple[int, dict[str, int]]:
+        """
+        Delete the selected theses unless one of them is or was published.
+
+        Checked before Django starts collecting related rows, so the caller's
+        transaction is not left broken by an error raised mid-deletion.
+
+        Returns:
+            tuple[int, dict[str, int]]: Django's deletion counters.
+
+        Raises:
+            ValidationError: When the selection contains a published thesis.
+        """
+        if self.filter(published_thesis_filter()).exists():
+            raise ValidationError(PUBLISHED_DELETE_ERROR)
+        return super().delete()
+
+
 def build_reference_code() -> str:
     """
     Build a unique, human-readable thesis reference code.
@@ -362,6 +413,8 @@ class Thesis(models.Model):
     defense_date = models.DateField(null=True, blank=True)
     defense_year = models.PositiveSmallIntegerField(null=True, blank=True)
 
+    objects = ThesisQuerySet.as_manager()
+
     class Meta:
         """
         Database table, ordering and indexes for theses.
@@ -410,10 +463,10 @@ class Thesis(models.Model):
         Prevent deletion of published theses through ordinary CRUD paths.
 
         Raises:
-            ValidationError: If the thesis is published.
+            ValidationError: If the thesis is or was published.
         """
-        if self.status == ThesisStatus.PUBLISHED or self.is_public:
-            raise ValidationError("Monografias publicadas não podem ser excluídas.")
+        if thesis_was_published(self):
+            raise ValidationError(PUBLISHED_DELETE_ERROR)
         super().delete(*args, **kwargs)
 
     @property
