@@ -27,6 +27,7 @@ from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
 from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted
+from theses.repository_cache import invalidate_public_repository_cache
 from theses.models import (
     APPROVED_DEFENSE_STATUSES,
     DEFENSE_RESULT_STATUSES,
@@ -1159,6 +1160,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     thesis.save(update_fields=["status", "is_public", "published_at", "defense_date", "defense_year", "updated_at"])
     _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, user, "Monografia publicada no repositório institucional.")
     record_thesis_published(thesis)
+    invalidate_public_repository_cache()
     purge_thesis_versions(thesis, actor=user, request=request)
     _audit_thesis(
         AuditAction.PUBLISH,

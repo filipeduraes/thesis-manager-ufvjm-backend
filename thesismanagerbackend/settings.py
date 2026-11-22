@@ -372,6 +372,9 @@ THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
 THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
+# Cache Redis do repositório público; a invalidação é explícita (publicação,
+# edição ou despublicação), então o TTL só limita dados velhos de curso/orientador.
+PUBLIC_REPOSITORY_CACHE_TTL_SECONDS = env.int("PUBLIC_REPOSITORY_CACHE_TTL_SECONDS", default=300)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field

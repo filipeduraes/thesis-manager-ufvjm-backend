@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone as dt_timezone
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -136,6 +137,7 @@ class PublicSearchTests(RepositoryTestCase):
             self.client.get("/api/v1/public/theses")
         for index in range(4):
             create_thesis(ThesisSpec(title=f"Extra {index}", course=self.course, advisor=self.advisor, authors=[self.student], keywords=["Extra"]))
+        cache.clear()
         with CaptureQueriesContext(connection) as seven_results:
             response = self.client.get("/api/v1/public/theses")
         self.assertEqual(response.data["count"], 7)

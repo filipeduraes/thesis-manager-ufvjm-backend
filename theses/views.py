@@ -44,6 +44,7 @@ from theses.repository import (
     published_theses,
     search_public_theses,
 )
+from theses.repository_cache import cached_payload, courses_cache_key, detail_cache_key, filters_cache_key, search_cache_key
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
@@ -772,6 +773,22 @@ class ThesisDocumentDownloadView(APIView):
         return _download_response(document.stored_file, thesis, "attachment")
 
 
+def _cached_response(payload: dict[str, Any], from_cache: bool) -> Response:
+    """
+    Wrap a public repository payload, flagging whether it came from the cache.
+
+    Args:
+        payload: Response body.
+        from_cache: Whether the body was read from Redis.
+
+    Returns:
+        Response: JSON response with ``X-Repository-Cache: HIT|MISS``.
+    """
+    response = Response(payload)
+    response["X-Repository-Cache"] = "HIT" if from_cache else "MISS"
+    return response
+
+
 class PublicRepositoryView(APIView):
     """
     Base class of the anonymous repository endpoints.
@@ -807,13 +824,21 @@ class PublicThesisListView(PublicRepositoryView):
         serializer = PublicThesisSearchSerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         filters = serializer.to_filters()
-        queryset = search_public_theses(filters)
-        paginator = ThesisPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        results = [public_thesis_list_payload(thesis) for thesis in page]
-        response = paginator.get_paginated_response(results)
-        response.data["ordering"] = filters.effective_ordering
-        return response
+        page_param = str(request.query_params.get("page") or "1")
+        page_size_param = str(request.query_params.get("pageSize") or "")
+        cache_key = search_cache_key(filters, page_param, page_size_param)
+
+        def build_page() -> dict[str, Any]:
+            queryset = search_public_theses(filters)
+            paginator = ThesisPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            results = [public_thesis_list_payload(thesis) for thesis in page]
+            page_data = dict(paginator.get_paginated_response(results).data)
+            page_data["ordering"] = filters.effective_ordering
+            return page_data
+
+        payload, from_cache = cached_payload(cache_key, build_page)
+        return _cached_response(payload, from_cache)
 
 
 class PublicThesisFiltersView(PublicRepositoryView):
@@ -831,7 +856,8 @@ class PublicThesisFiltersView(PublicRepositoryView):
         Returns:
             Response: ``courses``, ``advisors``, ``years`` and ``keywords`` with counts.
         """
-        return Response(public_repository_filters_payload())
+        payload, from_cache = cached_payload(filters_cache_key(), public_repository_filters_payload)
+        return _cached_response(payload, from_cache)
 
 
 class PublicCourseListView(PublicRepositoryView):
@@ -851,8 +877,13 @@ class PublicCourseListView(PublicRepositoryView):
             Response: ``count`` and ``results``.
         """
         only_with_published = (request.query_params.get("withPublished") or "").strip().lower() in {"1", "true", "yes"}
-        results = public_courses_payload(only_with_published=only_with_published)
-        return Response({"count": len(results), "results": results})
+
+        def build_courses() -> dict[str, Any]:
+            results = public_courses_payload(only_with_published=only_with_published)
+            return {"count": len(results), "results": results}
+
+        payload, from_cache = cached_payload(courses_cache_key(only_with_published), build_courses)
+        return _cached_response(payload, from_cache)
 
 
 class PublicThesisDetailView(PublicRepositoryView):
@@ -871,10 +902,17 @@ class PublicThesisDetailView(PublicRepositoryView):
         Returns:
             Response: Public thesis payload.
         """
-        thesis = public_theses_queryset().filter(pk=thesis_id).first()
-        if thesis is None:
+
+        def build_detail() -> dict[str, Any] | None:
+            thesis = public_theses_queryset().filter(pk=thesis_id).first()
+            if thesis is None:
+                return None
+            return {"thesis": public_thesis_detail_payload(thesis)}
+
+        payload, from_cache = cached_payload(detail_cache_key(str(thesis_id)), build_detail)
+        if payload is None:
             raise Http404("Monografia não encontrada.")
-        return Response({"thesis": public_thesis_detail_payload(thesis)})
+        return _cached_response(payload, from_cache)
 
 
 class PublicThesisDownloadView(PublicRepositoryView):
