@@ -198,7 +198,7 @@ class CommitteeMemberServiceTests(TestCase):
     def test_remove_blocked_if_has_evaluation(self) -> None:
         member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
         # Forçar avaliação diretamente (sem iniciar defesa, apenas para testar a guarda)
-        DefenseMemberEvaluation.objects.create(member=member, decision=DefenseResult.APPROVED)
+        DefenseMemberEvaluation.objects.create(member=member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.")
         with self.assertRaises(ValidationError):
             remove_member(self.defense, member, actor=self.admin)
 
@@ -246,28 +246,28 @@ class EvaluationServiceTests(TestCase):
 
     def test_alternate_cannot_evaluate(self) -> None:
         with self.assertRaises(PermissionDenied):
-            submit_committee_evaluation(self.defense, self.alternate, decision=DefenseResult.APPROVED, actor=self.alternate_user)
+            submit_committee_evaluation(self.defense, self.alternate, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.alternate_user)
 
     def test_cannot_evaluate_as_other_member(self) -> None:
         with self.assertRaises(ValidationError):
-            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator2)
+            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator2)
 
     def test_score_above_10_raises(self) -> None:
         with self.assertRaises(ValidationError):
-            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="10.01", actor=self.evaluator1)
+            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="10.01", notes="Parecer de teste.", actor=self.evaluator1)
 
     def test_score_below_0_raises(self) -> None:
         with self.assertRaises(ValidationError):
-            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="-0.01", actor=self.evaluator1)
+            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="-0.01", notes="Parecer de teste.", actor=self.evaluator1)
 
     def test_valid_evaluation_creates_record(self) -> None:
-        ev = submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.5", actor=self.evaluator1)
+        ev = submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.5", notes="Parecer de teste.", actor=self.evaluator1)
         self.assertEqual(ev.decision, DefenseResult.APPROVED)
         self.assertIsNotNone(ev.score)
 
     def test_evaluation_update_or_create(self) -> None:
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
         self.assertEqual(DefenseMemberEvaluation.objects.filter(member=self.member1).count(), 1)
         self.assertEqual(DefenseMemberEvaluation.objects.get(member=self.member1).decision, DefenseResult.REJECTED)
 
@@ -275,28 +275,28 @@ class EvaluationServiceTests(TestCase):
 
     def test_close_defense_missing_evaluations_raises(self) -> None:
         # Apenas member1 avalia, member2 não
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
         with self.assertRaises(ValidationError):
             close_defense(self.defense, actor=self.admin)
 
     def test_close_defense_result_rejected(self) -> None:
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
         record_evaluation_without_auto_close(self.member2, DefenseResult.APPROVED)
         close_defense(self.defense, actor=self.admin)
         self.thesis.refresh_from_db()
         self.assertEqual(self.thesis.status, ThesisStatus.REJECTED)
 
     def test_close_defense_result_approved_with_remarks(self) -> None:
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.APPROVED_WITH_REMARKS, actor=self.evaluator2)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.APPROVED_WITH_REMARKS, score="8.00", notes="Parecer de teste.", actor=self.evaluator2)
         with patch("theses.defense_scheduling.purge_thesis_versions"):
             close_defense(self.defense, actor=self.admin)
         self.thesis.refresh_from_db()
         self.assertEqual(self.thesis.status, ThesisStatus.APPROVED_WITH_REMARKS)
 
     def test_close_defense_result_approved(self) -> None:
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator1)
-        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.APPROVED, actor=self.evaluator2)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member2, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator2)
         with patch("theses.defense_scheduling.purge_thesis_versions"):
             close_defense(self.defense, actor=self.admin)
         self.thesis.refresh_from_db()
@@ -304,20 +304,20 @@ class EvaluationServiceTests(TestCase):
 
     def test_alternate_missing_evaluation_does_not_block_close(self) -> None:
         # Suplente não avaliou — não deve bloquear o encerramento
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
         record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
         self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)
 
     def test_evaluation_blocked_after_completed_raises_and_audits(self) -> None:
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
         record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
 
         with self.assertRaises(ValidationError):
-            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, actor=self.evaluator1)
+            submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.evaluator1)
 
         # Verificar que a tentativa foi registrada no audit log
         blocked_entry = AuditLog.objects.filter(

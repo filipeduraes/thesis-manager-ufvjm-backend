@@ -69,6 +69,8 @@ class CommitteeIntegrityTests(TestCase):
                 defense=stale_defense,
                 member=member,
                 decision=DefenseResult.REJECTED,
+                score="6.00",
+                notes="Parecer de teste.",
                 actor=self.evaluator,
             )
         self.assertFalse(

@@ -107,7 +107,7 @@ class NotificationHandlerTests(TestCase):
         confirm_committee(defense)
         start_defense(defense, actor=self.admin)
         member = DefenseMember.objects.get(defense=defense, institutional_member=self.evaluator)
-        record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.REJECTED, notes="Parecer sigiloso", actor=self.evaluator)
+        record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.REJECTED, score="6.00", notes="Parecer sigiloso", actor=self.evaluator)
         self._handle_latest(EventType.DEFENSE_EVALUATION_RECORDED)
         [message] = mail.outbox
         self.assertEqual(message.to, ["orientador@ufvjm.edu.br"])

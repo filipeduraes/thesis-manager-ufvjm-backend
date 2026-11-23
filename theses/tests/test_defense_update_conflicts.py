@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -14,7 +15,7 @@ from rest_framework.test import APIClient
 from academic.models import Course, Department
 from accounts.models import ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
-from theses.defense_committee import add_institutional_member
+from theses.defense_committee import add_external_member, add_institutional_member
 from theses.defense_scheduling import schedule_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, Thesis, ThesisStatus
 
@@ -92,9 +93,20 @@ class DefenseUpdateConflictApiTests(TestCase):
         response = self._patch(self.defense_b, {"location": "Auditório"})
         self.assertEqual(response.status_code, 200)
 
-    def test_external_members_are_not_checked(self) -> None:
+    def test_external_members_are_checked_by_email(self) -> None:
         DefenseMember.objects.filter(defense=self.defense_b).delete()
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
-        DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        invitation_a, _token_a = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation_a, name="Dr. Externo", email="ext@example.com")
+        invitation_b, _token_b = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation=invitation_b, name="Dr. Externo", email="ext@example.com")
         response = self._patch(self.defense_b, {"scheduledDatetime": (self.start + timedelta(minutes=30)).isoformat()})
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Dr. Externo", response.data["detail"])
+
+    def test_add_external_member_refuses_overlapping_guest(self) -> None:
+        Defense.objects.filter(pk=self.defense_b.pk).update(scheduled_datetime=self.start + timedelta(minutes=30))
+        self.defense_b.refresh_from_db()
+        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        with self.assertRaisesMessage(ValidationError, "já participa de outra banca"):
+            add_external_member(self.defense_b, CommitteeRole.MEMBER, name="Dr. Externo", email="EXT@example.com", actor=self.admin)

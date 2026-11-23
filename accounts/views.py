@@ -37,7 +37,7 @@ from accounts.models import (
     User,
     UserProfileRole,
 )
-from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin
+from accounts.permissions import CanInviteExternalCommitteeMember, IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin, IsInstitutionalUser
 from accounts.directory import ROLE_FILTERS
 from accounts.serializers import (
     AdminUserCreateSerializer,
@@ -283,7 +283,7 @@ class AdminUsersView(APIView):
                 to_attr="google_social_accounts",
             )
         )
-        return User.objects.prefetch_related(*prefetches).order_by("email")
+        return User.objects.select_related("department").prefetch_related(*prefetches).order_by("email")
 
     def get(self, request) -> Response:
         queryset = self._queryset()
@@ -332,11 +332,18 @@ class AdminUsersView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             with transaction.atomic():
+                from academic.models import Department
+
+                department_id = serializer.validated_data.get("departmentId")
+                department = Department.objects.filter(pk=department_id).first() if department_id else None
                 user = create_institutional_user(
                     email=serializer.validated_data["email"],
                     name=serializer.validated_data["name"],
                     roles=serializer.validated_data["roles"],
                     assigned_by=actor_from_request(request),
+                    registration_number=serializer.validated_data.get("registrationNumber", ""),
+                    research_area=serializer.validated_data.get("researchArea", ""),
+                    department=department,
                     request=request,
                 )
                 course_id = serializer.validated_data.get("courseId")
@@ -401,7 +408,7 @@ class AdminUserDetailView(APIView):
             )
         )
         return get_object_or_404(
-            User.objects.prefetch_related(*prefetches),
+            User.objects.select_related("department").prefetch_related(*prefetches),
             pk=user_id,
         )
 
@@ -418,6 +425,7 @@ class AdminUserDetailView(APIView):
         previous_course_records = getattr(user, "active_course_assignment_records", []) or []
         previous_course = previous_course_records[0].course if previous_course_records else None
         previous_is_active = user.is_active
+        previous_department = user.department.name if user.department_id else None
 
         try:
             with transaction.atomic():
@@ -454,6 +462,23 @@ class AdminUserDetailView(APIView):
                         "from": previous_course.name if previous_course else None,
                         "to": course.name if course else None,
                     }
+                if "departmentId" in validated:
+                    from academic.models import Department
+
+                    raw_department = validated["departmentId"]
+                    department = Department.objects.filter(pk=raw_department).first() if raw_department else None
+                    if raw_department and department is None:
+                        return Response({"detail": "Departamento inválido."}, status=status.HTTP_400_BAD_REQUEST)
+                    user.department = department
+                    audit_changes["department"] = {"from": previous_department, "to": department.name if department else None}
+                if "registrationNumber" in validated:
+                    user.registration_number = validated["registrationNumber"].strip()
+                    audit_changes["registrationNumber"] = user.registration_number
+                if "researchArea" in validated:
+                    user.research_area = validated["researchArea"].strip()
+                    audit_changes["researchArea"] = user.research_area
+                if user.department_id is not None or "departmentId" in validated or "registrationNumber" in validated or "researchArea" in validated:
+                    user.save(update_fields=["department", "registration_number", "research_area"])
                 if "is_active" in validated:
                     if validated["is_active"] and not user.is_active:
                         user.is_active = True
@@ -966,11 +991,11 @@ class UserSuggestView(APIView):
     Return up to three institutional users matching a search fragment.
 
     Administrators and coordinators search the full directory; advisors see
-    only other advisors (the advisors list is public). Students and external
-    sessions receive 403.
+    only other advisors; students see only other students, so they can pick
+    co-authors for a thesis group. External sessions receive 403.
     """
 
-    permission_classes = [IsInstitutionalManager]
+    permission_classes = [IsInstitutionalUser]
     throttle_scope = "user_suggest"
 
     def get(self, request) -> Response:
@@ -978,8 +1003,9 @@ class UserSuggestView(APIView):
         Return the matching users for an autocomplete field.
 
         Query strings shorter than two characters return an empty result list
-        (never an error). Advisors only see other advisors; coordinators and
-        administrators can optionally narrow the result with ``role``.
+        (never an error). Advisors only see other advisors, students only other
+        students; coordinators and administrators can optionally narrow the
+        result with ``role``.
 
         Args:
             request: HTTP request with the ``q`` query parameter.
@@ -989,11 +1015,18 @@ class UserSuggestView(APIView):
         """
         query = (request.query_params.get("q") or "").strip()
         start_roles = None
-        if not IsCoordinatorOrAdmin().has_permission(request, self):
+        role = (request.query_params.get("role") or "").strip().upper()
+        if role and role not in ROLE_FILTERS:
+            return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        if IsCoordinatorOrAdmin().has_permission(request, self):
+            start_roles = ROLE_FILTERS.get(role) if role else None
+        elif IsInstitutionalManager().has_permission(request, self):
+            if role and role != ProfileRole.ADVISOR.value:
+                return Response({"detail": "Orientadores só podem buscar outros orientadores."}, status=status.HTTP_403_FORBIDDEN)
             start_roles = (ProfileRole.ADVISOR,)
         else:
-            role = (request.query_params.get("role") or "").strip().upper()
-            if role and role not in ROLE_FILTERS:
-                return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
-            start_roles = ROLE_FILTERS.get(role) if role else None
+            # Alunos precisam encontrar colegas para formar o grupo de até cinco autores.
+            if role and role != ProfileRole.STUDENT.value:
+                return Response({"detail": "Alunos só podem buscar outros alunos."}, status=status.HTTP_403_FORBIDDEN)
+            start_roles = (ProfileRole.STUDENT,)
         return Response({"results": suggest_users(query, start_roles)}, status=status.HTTP_200_OK)

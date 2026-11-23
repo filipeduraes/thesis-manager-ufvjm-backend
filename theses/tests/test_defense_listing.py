@@ -106,7 +106,7 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertFalse(membership["hasEvaluated"])
 
     def test_committee_member_has_evaluated_flag(self) -> None:
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.")
         self.client.force_authenticate(user=self.member_professor)
         response = self.client.get(DEFENSES_URL)
         self.assertTrue(response.data["results"][0]["viewerMembership"]["hasEvaluated"])
@@ -247,7 +247,7 @@ class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertEqual(self._ids(response), {str(self.defense.pk)})
 
     def test_pending_evaluation_hides_member_who_evaluated(self) -> None:
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.")
         self.client.force_authenticate(user=self.member_professor)
         response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
         self.assertEqual(response.data["count"], 0)

@@ -11,12 +11,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, QuerySet, Value, When
+from django.db.models import Case, Count, F, IntegerField, Q, QuerySet, Value, When
 from django.db.models.functions import Coalesce, ExtractYear, Lower
 
 from academic.models import Course
 from accounts.models import User
-from theses.models import Thesis, ThesisAuthor, ThesisFile, ThesisKeyword, ThesisOrigin, ThesisStatus, ThesisType
+from theses.models import Thesis, ThesisFile, ThesisKeyword, ThesisOrigin, ThesisStatus, ThesisType
+from theses.search_index import field_term, search_term
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     STATUS_DESCRIPTIONS,
@@ -150,65 +151,23 @@ def defense_year_expression() -> Coalesce:
     return Coalesce(F("defense_year"), publication_year, output_field=IntegerField())
 
 
-def _author_name_match(value: str) -> Exists:
-    """
-    Build an EXISTS filter matching any author whose name contains ``value``.
-
-    Args:
-        value: Search fragment.
-
-    Returns:
-        Exists: Correlated subquery over ``thesis_author``.
-    """
-    author_links = ThesisAuthor.objects.filter(thesis=OuterRef("pk")).filter(Q(name__icontains=value) | Q(author__name__icontains=value))
-    return Exists(author_links)
-
-
-def _keyword_name_match(value: str) -> Exists:
-    """
-    Build an EXISTS filter matching any keyword that contains ``value``.
-
-    Args:
-        value: Search fragment.
-
-    Returns:
-        Exists: Correlated subquery over ``thesis_keyword``.
-    """
-    keyword_links = ThesisKeyword.objects.filter(thesis=OuterRef("pk"), keyword__name__icontains=value)
-    return Exists(keyword_links)
-
-
-def _course_match(value: str) -> Q:
-    """
-    Build the filter matching the course name or code.
-
-    Args:
-        value: Search fragment.
-
-    Returns:
-        Q: Course filter.
-    """
-    return Q(course__name__icontains=value) | Q(course__code__iexact=value)
-
-
 def _free_text_filter(query: str) -> Q:
     """
-    Build the free-text filter across every searchable field.
+    Build the accent-insensitive free-text filter over the normalized index.
+
+    Every term must appear somewhere in the document so that a multi-word query
+    can match words stored in different fields (for example advisor and title).
 
     Args:
-        query: Search text.
+        query: Raw search text.
 
     Returns:
         Q: Combined filter.
     """
-    return (
-        Q(title__icontains=query)
-        | Q(abstract__icontains=query)
-        | Q(advisor__name__icontains=query)
-        | _course_match(query)
-        | Q(_author_name_match(query))
-        | Q(_keyword_name_match(query))
-    )
+    combined = Q()
+    for term in search_term(query).split():
+        combined &= Q(search_text__icontains=term)
+    return combined
 
 
 def _relevance_expression(query: str) -> Any:
@@ -222,12 +181,12 @@ def _relevance_expression(query: str) -> Any:
         Any: Integer expression summing the weights of the matched fields.
     """
     conditions = [
-        (Q(title__icontains=query), RELEVANCE_WEIGHTS["title"]),
-        (Q(_keyword_name_match(query)), RELEVANCE_WEIGHTS["keyword"]),
-        (Q(_author_name_match(query)), RELEVANCE_WEIGHTS["author"]),
-        (Q(advisor__name__icontains=query), RELEVANCE_WEIGHTS["advisor"]),
-        (_course_match(query), RELEVANCE_WEIGHTS["course"]),
-        (Q(abstract__icontains=query), RELEVANCE_WEIGHTS["abstract"]),
+        (Q(search_text__icontains=field_term("title", query)), RELEVANCE_WEIGHTS["title"]),
+        (Q(search_text__icontains=field_term("keyword", query)), RELEVANCE_WEIGHTS["keyword"]),
+        (Q(search_text__icontains=field_term("author", query)), RELEVANCE_WEIGHTS["author"]),
+        (Q(search_text__icontains=field_term("advisor", query)), RELEVANCE_WEIGHTS["advisor"]),
+        (Q(search_text__icontains=field_term("course", query)), RELEVANCE_WEIGHTS["course"]),
+        (Q(search_text__icontains=field_term("abstract", query)), RELEVANCE_WEIGHTS["abstract"]),
     ]
     score: Any = Value(0)
     for condition, weight in conditions:
@@ -252,16 +211,15 @@ def search_public_theses(filters: PublicSearchFilters) -> QuerySet[Thesis]:
     if filters.query:
         queryset = queryset.filter(_free_text_filter(filters.query))
     if filters.title:
-        queryset = queryset.filter(title__icontains=filters.title)
+        queryset = queryset.filter(search_text__icontains=field_term("title", filters.title))
     if filters.author:
-        queryset = queryset.filter(_author_name_match(filters.author))
+        queryset = queryset.filter(search_text__icontains=field_term("author", filters.author))
     if filters.advisor:
-        queryset = queryset.filter(advisor__name__icontains=filters.advisor)
+        queryset = queryset.filter(search_text__icontains=field_term("advisor", filters.advisor))
     if filters.course:
-        queryset = queryset.filter(_course_match(filters.course))
+        queryset = queryset.filter(search_text__icontains=field_term("course", filters.course))
     for keyword in filters.keywords:
-        keyword_links = ThesisKeyword.objects.filter(thesis=OuterRef("pk"), keyword__normalized_name=keyword)
-        queryset = queryset.filter(Exists(keyword_links))
+        queryset = queryset.filter(search_text__icontains=field_term("keyword", keyword))
     if filters.course_id:
         queryset = queryset.filter(course_id=filters.course_id)
     if filters.advisor_id:

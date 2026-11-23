@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from accounts.models import ExternalInvitation, User
-from theses.models import CommitteeRole, Defense, Thesis, ThesisAuthor
+from theses.models import CommitteeRole, Defense, DefenseMember, Thesis, ThesisAuthor
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,23 @@ def evaluating_committee_members(defense: Defense) -> list[Recipient]:
         elif member.email:
             recipients.append(Recipient(name=member.name, external_invitation=member.external_invitation, external_email=member.email))
     return recipients
+
+
+def defense_member(member: DefenseMember) -> list[Recipient]:
+    """
+    Return the single recipient of one committee membership.
+
+    Args:
+        member: Institutional or external committee member.
+
+    Returns:
+        list[Recipient]: One recipient, or none for an inactive institutional user.
+    """
+    if member.institutional_member_id is not None:
+        return _user_recipient(member.institutional_member)
+    if member.email:
+        return [Recipient(name=member.name, external_invitation=member.external_invitation, external_email=member.email)]
+    return []
 
 
 def unique_recipients(*groups: list[Recipient]) -> list[Recipient]:

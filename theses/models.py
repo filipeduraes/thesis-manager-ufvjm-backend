@@ -4,6 +4,8 @@ Models for the thesis submission, review and publication workflow.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import secrets
 import uuid
 from datetime import date
@@ -327,6 +329,9 @@ class StoredFile(models.Model):
         db_index=True,
     )
     extracted_text_path = models.CharField(max_length=512, blank=True, default="")
+    # O texto extraído também fica no banco para ser indexado e pesquisado; o arquivo
+    # derivado é mantido apenas para auditoria e reprocessamento.
+    extracted_text = models.TextField(blank=True, default="")
     extracted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -401,6 +406,9 @@ class Thesis(models.Model):
     )
     title = models.CharField(max_length=500)
     abstract = models.TextField(blank=True, default="")
+    # Texto normalizado (sem acentos) com segmentos rotulados de todos os campos
+    # pesquisáveis, incluindo o PDF extraído. Mantido pelos serviços de domínio.
+    search_text = models.TextField(blank=True, default="")
     journal = models.CharField(max_length=200, blank=True, default="")
     reference_code = models.CharField(max_length=50, unique=True, editable=False)
     status = models.CharField(
@@ -1099,8 +1107,8 @@ class DefenseMemberEvaluation(models.Model):
         related_name="evaluation",
     )
     decision = models.CharField(max_length=30, choices=DefenseResult.choices)
-    score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
-    notes = models.TextField(blank=True, default="")
+    score = models.DecimalField(max_digits=4, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(default="")
     submitted_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1114,9 +1122,9 @@ class DefenseMemberEvaluation(models.Model):
         verbose_name_plural = "Avaliações da banca"
         ordering = ["-submitted_at"]
         constraints = [
-            # Nota deve estar entre 0,00 e 10,00, se informada.
+            # Nota obrigatória entre 0,00 e 10,00.
             models.CheckConstraint(
-                condition=Q(score__isnull=True) | (Q(score__gte=0) & Q(score__lte=10)),
+                condition=Q(score__gte=0) & Q(score__lte=10),
                 name="defense_evaluation_score_range",
             ),
         ]

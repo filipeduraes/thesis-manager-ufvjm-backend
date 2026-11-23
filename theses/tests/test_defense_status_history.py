@@ -83,7 +83,7 @@ class DefenseStatusHistoryTests(TestCase):
         member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
         confirm_committee(self.defense)
         start_defense(self.defense, actor=self.admin)
-        DefenseMemberEvaluation.objects.create(member=member, decision=DefenseResult.REJECTED)
+        DefenseMemberEvaluation.objects.create(member=member, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.")
         close_defense(self.defense, actor=self.coordinator)
         entry = self._last_entry()
         self.assertEqual((entry.previous_status, entry.new_status), (DefenseStatus.IN_PROGRESS, DefenseStatus.COMPLETED))

@@ -167,5 +167,5 @@ class ExternalMemberTokenTests(TestCase):
         self.assertEqual(client.get(f"/api/v1/theses/{self.thesis.pk}").status_code, 403)
 
         start_defense(self.defense, actor=self.admin)
-        evaluation = client.put(f"{own}/members/{member_id}/evaluation", {"decision": DefenseResult.REJECTED}, format="json")
+        evaluation = client.put(f"{own}/members/{member_id}/evaluation", {"decision": DefenseResult.REJECTED, "score": "6.00", "notes": "Parecer de teste."}, format="json")
         self.assertEqual(evaluation.status_code, 200)

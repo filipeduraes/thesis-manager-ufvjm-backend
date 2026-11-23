@@ -560,42 +560,6 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
     return defense
 
 
-def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | None = None) -> str | None:
-    """
-    Close the defense automatically when every required evaluation is in.
-
-    Runs in its own savepoint: if closing raises ValidationError (for example, an
-    approval whose thesis has no current PDF), only the close is rolled back, the
-    evaluation that triggered it stays saved and the defense stays IN_PROGRESS so
-    it can still be closed manually. A concurrent close is not reported as error.
-
-    Args:
-        defense: Defense that just received an evaluation.
-        request: HTTP request used for audit context.
-
-    Returns:
-        str | None: Error message when the automatic close failed, otherwise None.
-    """
-    try:
-        with transaction.atomic():
-            locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
-            if locked_defense.status != DefenseStatus.IN_PROGRESS or not all_required_evaluations_submitted(locked_defense):
-                return None
-            _finalize_defense(locked_defense, closed_by=None, automatic=True, request=request)
-    except ValidationError as exc:
-        error_message = exc.messages[0] if exc.messages else "Não foi possível encerrar a banca automaticamente."
-        logger.warning("Automatic close failed for defense %s after last evaluation: %s", defense.pk, error_message)
-        audit_defense(
-            action=AuditAction.EVALUATE,
-            defense=defense,
-            request=request,
-            metadata=event_payload(AuditEvent.AUTO_CLOSE_FAILED, reason=error_message),
-        )
-        return error_message
-    logger.info("Defense %s closed automatically after last evaluation", defense.pk)
-    return None
-
-
 @transaction.atomic
 def revert_defense_status(defense: Defense, *, reason: str, actor: User, request: HttpRequest | None = None) -> Defense:
     """

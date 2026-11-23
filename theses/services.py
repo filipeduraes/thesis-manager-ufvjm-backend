@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -30,8 +30,10 @@ from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
-from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted
+from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted, record_thesis_text_extraction_requested
 from theses.repository_cache import invalidate_public_repository_cache
+from theses.search_index import refresh_search_text
+from theses.uploads import clear_upload_in_progress, mark_upload_in_progress, upload_in_progress
 from theses.models import (
     APPROVED_DEFENSE_STATUSES,
     CORRECTION_UPLOAD_STATUSES,
@@ -40,6 +42,7 @@ from theses.models import (
     PUBLISHABLE_STATUSES,
     REVIEWABLE_STATUSES,
     Defense,
+    DefenseMember,
     DefenseResult,
     DefenseStatus,
     DocumentStatus,
@@ -211,6 +214,10 @@ def user_can_access_thesis(user: User, thesis: Thesis) -> bool:
     """
     if user_is_admin(user):
         return True
+    # Membros institucionais da banca precisam ler a monografia que avaliam.
+    # Esta é uma regra de leitura: não altera escopos de gestão nem permissões de escrita.
+    if DefenseMember.objects.filter(defense__thesis=thesis, institutional_member=user).exists():
+        return True
     roles = user_roles(user)
     if ProfileRole.ADVISOR in roles and thesis.advisor_id == user.pk:
         return True
@@ -233,14 +240,10 @@ def user_can_access_thesis(user: User, thesis: Thesis) -> bool:
     return False
 
 
-# TODO(auditoria): membro institucional de banca precisa ler a monografia que
-# avalia (detalhe e download do PDF), mas hoje `theses_visible_to` e
-# `user_can_access_thesis` não incluem o membro da comissão. Ao adicionar essa
-# leitura, NÃO reutilizar escopos de gestão (`coordinator_managed_theses`,
-# `_can_manage_defense`): a leitura deve ser somente para detalhe/download, e as
-# escritas (upload, parecer, agendamento, membros) continuam exigindo
-# `user_can_access_thesis`/regras de gestão. Coordenador-membro de outro curso
-# não pode gerenciar a banca por conta da leitura.
+# A leitura da monografia por membro da banca é tratada em
+# `user_can_access_thesis` e `get_accessible_thesis`, sem alterar este escopo de
+# gestão. Reutilizar `theses_visible_to` aqui daria a um coordenador-membro de
+# outro curso permissão de gestão sobre a banca, o que é proibido.
 def theses_visible_to(user: User, base_queryset: QuerySet[Thesis] | None = None) -> QuerySet[Thesis]:
     """
     Return the thesis queryset visible to a user according to their roles.
@@ -350,6 +353,10 @@ def get_accessible_thesis(user: User, thesis_id: str) -> Thesis:
     """
     thesis = theses_visible_to(user).select_related("course", "advisor").filter(pk=thesis_id).first()
     if thesis is None:
+        is_committee_member = DefenseMember.objects.filter(defense__thesis_id=thesis_id, institutional_member=user).exists()
+        if is_committee_member:
+            thesis = Thesis.objects.select_related("course", "advisor").filter(pk=thesis_id, deleted_at__isnull=True).first()
+    if thesis is None:
         raise ValidationError("Monografia não encontrada.")
     return thesis
 
@@ -383,18 +390,17 @@ def _main_author(thesis: Thesis) -> ThesisAuthor | None:
 
 def _ensure_student_owner(user: User, thesis: Thesis) -> None:
     """
-    Ensure the user is the main author of the thesis.
+    Ensure the user belongs to the author group of the thesis.
 
     Args:
         user: Institutional user.
         thesis: Thesis instance.
 
     Raises:
-        ValidationError: When the user is not the main author.
+        ValidationError: When the user is not one of the authors.
     """
-    author = _main_author(thesis)
-    if author is None or author.author_id != user.pk:
-        raise ValidationError("Apenas o autor principal pode alterar esta monografia.")
+    if not thesis.authors.filter(author_id=user.pk).exists():
+        raise ValidationError("Apenas os autores da monografia podem alterá-la.")
 
 
 def _validate_advisor(advisor: User) -> None:
@@ -549,8 +555,62 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
     ))
 
 
+def _resolve_coauthors(author_ids: Iterable[UUID], main_author_id: UUID) -> list[User]:
+    """
+    Validate and load the co-authors of a student group.
+
+    Args:
+        author_ids: Identifiers of the other students in the group.
+        main_author_id: Identifier of the thesis main author.
+
+    Returns:
+        list[User]: Active students in the order provided.
+
+    Raises:
+        ValidationError: When a co-author is unknown, inactive, not a student or
+            when the group exceeds the configured maximum.
+    """
+    maximum = getattr(settings, "THESIS_MAX_AUTHORS", 5)
+    identifiers = list(dict.fromkeys(author_ids))
+    if len(identifiers) > maximum - 1:
+        raise ValidationError(f"O grupo pode ter no máximo {maximum} alunos, incluindo você.")
+    if main_author_id in identifiers:
+        raise ValidationError("O autor principal não deve ser informado como coautor.")
+    coauthors = list(User.objects.filter(pk__in=identifiers, is_active=True))
+    if len(coauthors) != len(identifiers):
+        raise ValidationError("Um ou mais coautores informados não existem ou estão inativos.")
+    for coauthor in coauthors:
+        if ProfileRole.STUDENT not in active_role_codes(coauthor):
+            raise ValidationError(f"{coauthor.name} não possui o perfil de aluno.")
+    order = {identifier: position for position, identifier in enumerate(identifiers)}
+    return sorted(coauthors, key=lambda coauthor: order[coauthor.pk])
+
+
+def _sync_coauthors(thesis: Thesis, coauthors: list[User]) -> None:
+    """
+    Replace the non-main authors of a thesis with the validated group.
+
+    Args:
+        thesis: Thesis being saved.
+        coauthors: Students to keep as co-authors, in order.
+    """
+    wanted = {coauthor.pk for coauthor in coauthors}
+    existing = thesis.authors.exclude(is_main_author=True)
+    for link in existing:
+        if link.author_id not in wanted:
+            link.delete()
+    current = {link.author_id for link in existing}
+    next_position = 2
+    for coauthor in coauthors:
+        if coauthor.pk in current:
+            ThesisAuthor.objects.filter(thesis=thesis, author=coauthor).update(position=next_position)
+        else:
+            ThesisAuthor.objects.create(thesis=thesis, author=coauthor, position=next_position)
+        next_position += 1
+
+
 @transaction.atomic
-def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, abstract: str, keyword_names: Iterable[str], thesis_type: str = ThesisType.MONOGRAPH, journal: str = "", request: HttpRequest | None = None) -> Thesis:
+def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, abstract: str, keyword_names: Iterable[str], thesis_type: str = ThesisType.MONOGRAPH, journal: str = "", author_ids: Iterable[UUID] | None = None, request: HttpRequest | None = None) -> Thesis:
     """
     Create or update the thesis metadata while it is editable.
 
@@ -563,6 +623,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         keyword_names: Keyword names.
         thesis_type: Thesis type code.
         journal: Optional journal name for articles.
+        author_ids: Identifiers of co-authors in the student group.
         request: HTTP request used for audit context.
 
     Returns:
@@ -588,7 +649,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     if not clean_abstract:
         raise ValidationError("Informe o resumo da monografia.")
 
-    thesis = Thesis.objects.select_for_update().filter(origin=ThesisOrigin.WORKFLOW, authors__author=user, authors__is_main_author=True).first()
+    thesis = Thesis.objects.select_for_update().filter(origin=ThesisOrigin.WORKFLOW, authors__author=user).first()
     created = thesis is None
     if thesis is not None:
         _ensure_student_owner(user, thesis)
@@ -618,7 +679,16 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         )
         _add_status_history(thesis, "", ThesisStatus.DRAFT, user, "Rascunho criado.")
 
+    requested_ids = list(author_ids or [])
+    main_author_id = thesis.authors.filter(is_main_author=True).values_list("author_id", flat=True).first()
+    if main_author_id is not None and main_author_id in requested_ids:
+        raise ValidationError("O autor principal não deve ser informado como coautor.")
+    if created is False and main_author_id != user.pk and user.pk not in requested_ids:
+        raise ValidationError("Você não pode remover a si próprio do grupo de autores.")
+    coauthors = _resolve_coauthors(requested_ids, main_author_id or user.pk)
+    _sync_coauthors(thesis, coauthors)
     _sync_keywords(thesis, keyword_names)
+    refresh_search_text(thesis)
     action = AuditAction.CREATE if created else AuditAction.UPDATE
     _audit_thesis(
         action,
@@ -704,8 +774,13 @@ def _store_pdf(uploaded_file: Any, thesis: Thesis, user: User, setting_name: str
         ValidationError: When the upload is invalid.
     """
     digest, size = _validate_pdf_upload(uploaded_file, setting_name, default_mb)
+    digest_hex = bytes(digest).hex()
+    if upload_in_progress(digest_hex):
+        raise ValidationError("Este arquivo já está em processamento. Aguarde a extração de texto antes de reenviá-lo.")
     existing = StoredFile.objects.filter(sha256=digest).first()
     if existing is not None and default_storage.exists(existing.storage_path):
+        if existing.processing_status in {ProcessingStatus.PENDING, ProcessingStatus.PROCESSING, ProcessingStatus.RETRYING}:
+            transaction.on_commit(lambda: mark_upload_in_progress(digest_hex))
         return existing
 
     safe_name = f"{prefix}/{thesis.pk}/{uuid4().hex}.pdf"
@@ -722,6 +797,7 @@ def _store_pdf(uploaded_file: Any, thesis: Thesis, user: User, setting_name: str
         uploaded_by=user,
         processing_status=ProcessingStatus.PENDING,
     )
+    transaction.on_commit(lambda: mark_upload_in_progress(digest_hex))
     logger.info("Stored PDF file %s for thesis %s", stored_file.pk, thesis.pk)
     return stored_file
 
@@ -837,6 +913,8 @@ def upload_thesis_file(user: User, thesis: Thesis, uploaded_file: Any, change_de
         50,
     )
     thesis_file = _add_thesis_version(thesis, stored_file, user, change_description, is_correction=is_correction)
+    record_thesis_text_extraction_requested(thesis, stored_file, trigger="UPLOAD")
+    refresh_search_text(thesis)
     thesis.save(update_fields=["updated_at"])
     metadata: dict[str, object] = {
         "versionNumber": thesis_file.version_number,
@@ -1299,6 +1377,9 @@ def _perform_publication(thesis: Thesis, current: ThesisFile, actor: User | None
     history_metadata = {"event": AuditEvent.PUBLISHED.value, "automatic": automatic, "trigger": trigger, "versionNumber": current.version_number, "sha256": current.stored_file.sha256_hex}
     _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, actor, reason, metadata=history_metadata)
     record_thesis_published(thesis)
+    if current.stored_file.processing_status != ProcessingStatus.COMPLETED:
+        record_thesis_text_extraction_requested(thesis, current.stored_file, trigger="PUBLICATION")
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     purge_thesis_versions(thesis, actor=actor, request=request)
     audit_metadata = event_payload(AuditEvent.PUBLISHED, referenceCode=thesis.reference_code, automatic=automatic, trigger=str(trigger))
@@ -1715,13 +1796,15 @@ def thesis_summary_payload(thesis: Thesis, include_file_urls: bool = True) -> di
     }
 
 
-def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
+def thesis_permissions(thesis: Thesis, viewer: User | None, viewer_context: dict[str, object] | None = None) -> dict[str, bool]:
     """
     Compute the actions available to a viewer.
 
     Args:
         thesis: Thesis instance.
         viewer: Authenticated user or ``None`` for public access.
+        viewer_context: Optional precomputed ``roles``, ``is_admin`` and
+            ``accessible_ids`` so a list page does not query them per thesis.
 
     Returns:
         dict[str, bool]: Action availability flags.
@@ -1742,8 +1825,8 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
             "canEditPublished": False,
             "canDelete": False,
         }
-    roles = user_roles(viewer)
-    is_admin = user_is_admin(viewer)
+    roles = viewer_context["roles"] if viewer_context else user_roles(viewer)
+    is_admin = viewer_context["is_admin"] if viewer_context else user_is_admin(viewer)
     is_coordinator = ProfileRole.COORDINATOR in roles
     has_advisor_role = ProfileRole.ADVISOR in roles
     is_assigned_advisor = thesis.advisor_id == viewer.pk
@@ -1762,14 +1845,14 @@ def thesis_permissions(thesis: Thesis, viewer: User | None) -> dict[str, bool]:
         "canManage": bool(is_admin or is_coordinator),
         "canPublish": bool((is_admin or is_coordinator) and thesis.status in PUBLISHABLE_STATUSES),
         "canRecordDefenseResult": bool((is_admin or is_coordinator) and thesis.status in DEFENSE_RESULT_STATUSES),
-        "canUploadDocuments": bool(user_can_access_thesis(viewer, thesis) and thesis.status not in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}),
+        "canUploadDocuments": bool((thesis.pk in viewer_context["accessible_ids"] if viewer_context else user_can_access_thesis(viewer, thesis)) and thesis.status not in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}),
         "canUnpublish": bool((is_admin or is_coordinator) and thesis.status == ThesisStatus.PUBLISHED),
         "canEditPublished": bool((is_admin or is_coordinator) and thesis.status == ThesisStatus.PUBLISHED),
         "canDelete": bool((is_admin or is_coordinator) and not thesis_was_published(thesis) and thesis.deleted_at is None),
     }
 
 
-def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: bool = True) -> dict[str, Any]:
+def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: bool = True, viewer_context: dict[str, object] | None = None) -> dict[str, Any]:
     """
     Serialize a thesis for API responses.
 
@@ -1822,7 +1905,7 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
         "updatedAt": thesis.updated_at.isoformat(),
         "defenseDate": thesis.defense_date.isoformat() if thesis.defense_date else None,
         "defenseYear": thesis.defense_year,
-        "permissions": thesis_permissions(thesis, viewer),
+        "permissions": thesis_permissions(thesis, viewer, viewer_context),
     }
     if include_history:
         payload["publicationRequirements"] = publication_requirements(thesis).to_payload()
@@ -1838,13 +1921,14 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
     return payload
 
 
-def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str, Any]:
+def thesis_list_payload(thesis: Thesis, viewer: User | None = None, viewer_context: dict[str, object] | None = None) -> dict[str, Any]:
     """
     Serialize a thesis summary for lists and dashboards.
 
     Args:
         thesis: Thesis instance.
         viewer: Authenticated user or ``None`` for public access.
+        viewer_context: Optional precomputed viewer data for list pages.
 
     Returns:
         dict[str, Any]: Compact thesis payload.
@@ -1880,5 +1964,5 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None) -> dict[str,
         "updatedAt": thesis.updated_at.isoformat(),
         "advisorApprovedAt": thesis.advisor_approved_at.isoformat() if thesis.advisor_approved_at else None,
         "pendingReview": thesis.status in REVIEWABLE_STATUSES,
-        "permissions": thesis_permissions(thesis, viewer),
+        "permissions": thesis_permissions(thesis, viewer, viewer_context),
     }

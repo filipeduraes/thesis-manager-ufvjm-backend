@@ -15,6 +15,10 @@ from academic.models import Course, Department
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import InvitationStatus, ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
+from adjudication.consumer import handle_event as handle_adjudication_event
+from events.catalog import EventType
+from events.envelope import EventEnvelope
+from events.models import OutboxEvent, ProcessedEvent
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, DefenseMember, DefenseResult, DefenseStatus, Thesis, ThesisStatus
@@ -66,9 +70,19 @@ class DefenseResultPayloadTests(TestCase):
         response = self.client.get("/api/v1/defenses")
         return next(item for item in response.data["results"] if item["id"] == str(self.defense.pk))
 
+    def _drain_adjudication(self) -> None:
+        """Process the queued evaluation events like the adjudication worker."""
+        processed = set(ProcessedEvent.objects.filter(consumer_group="adjudication").values_list("event_id", flat=True))
+        pending = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EVALUATION_RECORDED).exclude(pk__in=processed).order_by("created_at")
+        for event in pending:
+            handle_adjudication_event(EventEnvelope.from_outbox(event))
+
     def _evaluate(self, principal, member: DefenseMember, decision: str):
         self.client.force_authenticate(user=principal)
-        return self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision}, format="json")
+        response = self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision, "score": "8.00", "notes": "Parecer de teste."}, format="json")
+        if response.status_code == 200:
+            self._drain_adjudication()
+        return response
 
     # --- result / resultLabel ---
 
@@ -85,7 +99,8 @@ class DefenseResultPayloadTests(TestCase):
         start_defense(self.defense, actor=self.admin)
         self._evaluate(self.evaluator, self.member, DefenseResult.APPROVED)
         response = self._evaluate(self.external_principal, self.external_member, DefenseResult.REJECTED)
-        self.assertEqual(response.data["defenseStatus"], DefenseStatus.COMPLETED)
+        self.defense.refresh_from_db()
+        self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)
 
         evaluator_detail = self._detail(self.evaluator)
         self.assertEqual(evaluator_detail["result"], DefenseResult.REJECTED)

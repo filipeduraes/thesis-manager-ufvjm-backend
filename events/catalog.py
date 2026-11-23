@@ -18,7 +18,9 @@ class EventType(models.TextChoices):
     """
 
     THESIS_SUBMITTED = "thesis.submitted", "Monografia submetida"
+    THESIS_TEXT_EXTRACTION_REQUESTED = "thesis.text_extraction_requested", "Extração de texto solicitada"
     DEFENSE_SCHEDULED = "defense.scheduled", "Banca agendada"
+    DEFENSE_MEMBER_INVITED = "defense.member_invited", "Membro da banca convidado"
     DEFENSE_EVALUATION_RECORDED = "defense.evaluation_recorded", "Avaliação registrada"
     DEFENSE_COMPLETED = "defense.completed", "Banca concluída"
     THESIS_DEFENSE_RESULT_RECORDED = "thesis.defense_result_recorded", "Resultado da banca registrado"
@@ -29,7 +31,9 @@ class EventType(models.TextChoices):
 # link da banca são lidos do banco pelo consumidor. O conjunto de chaves é exato.
 PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     EventType.THESIS_SUBMITTED: frozenset({"thesisId", "versionNumber", "submittedAt"}),
+    EventType.THESIS_TEXT_EXTRACTION_REQUESTED: frozenset({"thesisId", "storedFileId", "trigger"}),
     EventType.DEFENSE_SCHEDULED: frozenset({"defenseId", "thesisId", "scheduledDatetime", "durationMinutes", "modality"}),
+    EventType.DEFENSE_MEMBER_INVITED: frozenset({"defenseId", "thesisId", "memberId", "invitationId"}),
     EventType.DEFENSE_EVALUATION_RECORDED: frozenset({"defenseId", "thesisId", "memberId", "isUpdate"}),
     EventType.DEFENSE_COMPLETED: frozenset({"defenseId", "thesisId", "result", "thesisNewStatus", "automatic"}),
     EventType.THESIS_DEFENSE_RESULT_RECORDED: frozenset({"thesisId", "result", "thesisNewStatus"}),

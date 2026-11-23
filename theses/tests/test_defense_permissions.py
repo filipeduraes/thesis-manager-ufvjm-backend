@@ -54,7 +54,7 @@ class DefenseStartClosePermissionTests(TestCase):
     def _start_and_evaluate(self) -> None:
         start_defense(self.defense, actor=self.admin)
         # REJECTED evita purge_thesis_versions, que exige arquivo atual.
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.REJECTED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.")
 
     def test_advisor_of_own_thesis_starts_defense(self) -> None:
         response = self._post(self.advisor, "start")
@@ -74,7 +74,7 @@ class DefenseStartClosePermissionTests(TestCase):
     def test_coordinator_still_starts_and_closes(self) -> None:
         response = self._post(self.coordinator, "start")
         self.assertEqual(response.status_code, 200)
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.REJECTED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.REJECTED, score="8.00", notes="Parecer de teste.")
         response = self._post(self.coordinator, "close")
         self.assertEqual(response.status_code, 200)
 

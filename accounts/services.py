@@ -482,7 +482,7 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     return normalized_roles
 
 
-def create_institutional_user(*, email: str, name: str, roles: Iterable[str], assigned_by: User | None = None, request: HttpRequest | None = None,) -> User:
+def create_institutional_user(*, email: str, name: str, roles: Iterable[str], assigned_by: User | None = None, registration_number: str = "", research_area: str = "", department=None, request: HttpRequest | None = None,) -> User:
     """
     Pre-provision an institutional user without a local password.
     """
@@ -495,7 +495,13 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
         raise UserAlreadyExistsError("Já existe um usuário com este e-mail.")
 
     with transaction.atomic():
-        user = User.objects.create_user(email=normalized_email, name=name.strip())
+        user = User.objects.create_user(
+            email=normalized_email,
+            name=name.strip(),
+            registration_number=(registration_number or "").strip(),
+            research_area=(research_area or "").strip(),
+            department=department,
+        )
         set_user_roles(user, roles, assigned_by=assigned_by)
         # Resolve coordenações pendentes vinculadas ao e-mail institucional.
         try:

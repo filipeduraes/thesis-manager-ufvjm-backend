@@ -31,6 +31,7 @@ class ThesisMetadataSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=50, allow_blank=False),
         allow_empty=False,
     )
+    authors = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
     type = serializers.ChoiceField(choices=ThesisType.choices, default=ThesisType.MONOGRAPH, required=False)
     journal = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
 
@@ -90,6 +91,26 @@ class ThesisMetadataSerializer(serializers.Serializer):
         if len(cleaned) > maximum:
             raise serializers.ValidationError(f"Informe no máximo {maximum} palavras-chave.")
         return cleaned
+
+    def validate_authors(self, value: list) -> list:
+        """
+        Limit the co-author list so the group has at most five students.
+
+        Args:
+            value: Identifiers of co-authors (the requester is the main author).
+
+        Returns:
+            list: Validated identifiers.
+
+        Raises:
+            serializers.ValidationError: When there are too many or repeated authors.
+        """
+        maximum = getattr(settings, "THESIS_MAX_AUTHORS", 5)
+        if len(value) > maximum - 1:
+            raise serializers.ValidationError(f"O grupo pode ter no máximo {maximum} alunos, incluindo você.")
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("O mesmo aluno foi informado mais de uma vez.")
+        return value
 
 
 class ThesisReviewSerializer(serializers.Serializer):
@@ -223,8 +244,8 @@ class SubmitEvaluationSerializer(serializers.Serializer):
     """
 
     decision = serializers.ChoiceField(choices=DefenseResult.choices)
-    score = serializers.DecimalField(max_digits=4, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=10)
-    notes = serializers.CharField(required=False, allow_blank=True, default="")
+    score = serializers.DecimalField(max_digits=4, decimal_places=2, min_value=0, max_value=10)
+    notes = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
 class PublicThesisSearchSerializer(serializers.Serializer):

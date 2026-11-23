@@ -15,13 +15,16 @@ from academic.models import Course, Department
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditLog, InvitationStatus, ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
+from adjudication.consumer import HandleOutcome, handle_event as handle_adjudication_event
+from events.envelope import EventEnvelope
+from events.models import OutboxEvent, ProcessedEvent
+from events.catalog import EventType
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import AUTO_CLOSE_REASON, close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus
 from theses.tests.defense_helpers import confirm_committee
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
-NO_PDF_MESSAGE = "A monografia não possui versão atual."
 
 
 def create_user(email: str, name: str, role: str) -> User:
@@ -52,9 +55,20 @@ class DefenseAutoCloseTests(TestCase):
         start_defense(self.defense, actor=self.admin)
         self.client = APIClient()
 
+    def _drain_adjudication(self) -> None:
+        """Process the queued evaluation events like the adjudication worker."""
+        processed = set(ProcessedEvent.objects.filter(consumer_group="adjudication").values_list("event_id", flat=True))
+        events = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EVALUATION_RECORDED).exclude(pk__in=processed).order_by("created_at")
+        for event in events:
+            outcome = handle_adjudication_event(EventEnvelope.from_outbox(event))
+            self.assertIn(outcome, (HandleOutcome.PROCESSED, HandleOutcome.DUPLICATE))
+
     def _evaluate(self, principal, member: DefenseMember, decision: str):
         self.client.force_authenticate(user=principal)
-        return self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision}, format="json")
+        response = self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision, "score": "8.00", "notes": "Parecer de teste."}, format="json")
+        if response.status_code == 200:
+            self._drain_adjudication()
+        return response
 
     def _defense_status(self) -> str:
         return Defense.objects.get(pk=self.defense.pk).status
@@ -62,7 +76,7 @@ class DefenseAutoCloseTests(TestCase):
     def test_intermediate_evaluation_keeps_defense_in_progress(self) -> None:
         response = self._evaluate(self.evaluator1, self.member1, DefenseResult.APPROVED)
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(response.data["autoCloseError"])
+        self.assertTrue(response.data["resultCalculationQueued"])
         self.assertEqual(response.data["defenseStatus"], DefenseStatus.IN_PROGRESS)
         self.assertEqual(response.data["evaluation"]["decision"], DefenseResult.APPROVED)
 
@@ -70,8 +84,8 @@ class DefenseAutoCloseTests(TestCase):
         self._evaluate(self.evaluator1, self.member1, DefenseResult.APPROVED)
         response = self._evaluate(self.evaluator2, self.member2, DefenseResult.REJECTED)
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(response.data["autoCloseError"])
-        self.assertEqual(response.data["defenseStatus"], DefenseStatus.COMPLETED)
+        self.assertTrue(response.data["resultCalculationQueued"])
+        self.assertEqual(self._defense_status(), DefenseStatus.COMPLETED)
         self.assertEqual(self._defense_status(), DefenseStatus.COMPLETED)
         self.thesis.refresh_from_db()
         self.assertEqual(self.thesis.status, ThesisStatus.REJECTED)
@@ -93,7 +107,7 @@ class DefenseAutoCloseTests(TestCase):
         with patch("theses.defense_scheduling.purge_thesis_versions") as purge:
             self._evaluate(self.evaluator1, self.member1, DefenseResult.APPROVED)
             response = self._evaluate(self.evaluator2, self.member2, DefenseResult.APPROVED)
-        self.assertEqual(response.data["defenseStatus"], DefenseStatus.COMPLETED)
+        self.assertEqual(self._defense_status(), DefenseStatus.COMPLETED)
         purge.assert_called_once()
         self.assertIsNone(purge.call_args.kwargs["actor"])
         self.thesis.refresh_from_db()
@@ -101,12 +115,12 @@ class DefenseAutoCloseTests(TestCase):
 
     def test_failed_auto_close_keeps_evaluation_and_reports_error(self) -> None:
         self._evaluate(self.evaluator1, self.member1, DefenseResult.APPROVED)
-        with self.assertLogs("theses.defense_scheduling", level="WARNING") as captured:
+        with self.assertLogs("adjudication.consumer", level="WARNING") as captured:
             response = self._evaluate(self.evaluator2, self.member2, DefenseResult.APPROVED)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["autoCloseError"], NO_PDF_MESSAGE)
+        self.assertTrue(response.data["resultCalculationQueued"])
         self.assertEqual(response.data["defenseStatus"], DefenseStatus.IN_PROGRESS)
-        self.assertTrue(any("Automatic close failed" in line for line in captured.output))
+        self.assertTrue(any("Adjudication of defense" in line for line in captured.output))
         self.assertEqual(DefenseMemberEvaluation.objects.get(member=self.member2).decision, DefenseResult.APPROVED)
         self.assertEqual(self._defense_status(), DefenseStatus.IN_PROGRESS)
         self.thesis.refresh_from_db()
@@ -143,4 +157,4 @@ class DefenseAutoCloseTests(TestCase):
         self.assertEqual(self._defense_status(), DefenseStatus.IN_PROGRESS)
         response = self._evaluate(ExternalInvitationPrincipal(invitation), external_member, DefenseResult.REJECTED)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["defenseStatus"], DefenseStatus.COMPLETED)
+        self.assertEqual(self._defense_status(), DefenseStatus.COMPLETED)

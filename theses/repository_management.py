@@ -25,7 +25,9 @@ from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.models import AuditAction, ProfileRole, User
 from theses.models import ACTIVE_DEFENSE_STATUSES, PUBLISHED_DELETE_ERROR, DefenseResult, Thesis, ThesisAuthor, ThesisFile, ThesisOrigin, ThesisStatus, ThesisType, thesis_was_published
+from theses.events import record_thesis_text_extraction_requested
 from theses.repository_cache import invalidate_public_repository_cache
+from theses.search_index import refresh_search_text
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     _add_status_history,
@@ -316,6 +318,8 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     _add_status_history(thesis, "", ThesisStatus.PUBLISHED, user, "Monografia cadastrada manualmente a partir do acervo anterior ao sistema.", metadata=history_metadata)
     audit_metadata = event_payload(AuditEvent.LEGACY_IMPORT, result=result, defenseYear=clean.defense_year, sha256=stored_file.sha256_hex, sizeBytes=stored_file.size_bytes)
     _audit_thesis(AuditAction.CREATE, thesis, request, user, metadata=audit_metadata)
+    record_thesis_text_extraction_requested(thesis, stored_file, trigger="LEGACY_IMPORT")
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     logger.info("Legacy thesis %s imported by %s", thesis.pk, user.pk)
     return thesis
@@ -439,6 +443,7 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
     _add_status_history(thesis, thesis.status, thesis.status, user, clean_reason, metadata={"event": AuditEvent.PUBLISHED_METADATA_UPDATED.value, "changedFields": changed_fields})
     audit_metadata = event_payload(AuditEvent.PUBLISHED_METADATA_UPDATED, changedFields=changed_fields)
     _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata=audit_metadata, changes=changes)
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     logger.info("Published thesis %s updated by %s (fields=%s)", thesis.pk, user.pk, ",".join(changed_fields))
     return thesis
@@ -490,6 +495,8 @@ def replace_published_file(user: User, thesis: Thesis, uploaded_file: Any, chang
     _add_status_history(thesis, thesis.status, thesis.status, user, description, metadata=history_metadata)
     audit_metadata = event_payload(AuditEvent.PUBLISHED_FILE_REPLACED, sizeBytes=stored_file.size_bytes, **file_metadata)
     _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata=audit_metadata)
+    record_thesis_text_extraction_requested(thesis, stored_file, trigger="FILE_REPLACEMENT")
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     logger.info("Published thesis %s received version %s", thesis.pk, thesis_file.version_number)
     return thesis_file

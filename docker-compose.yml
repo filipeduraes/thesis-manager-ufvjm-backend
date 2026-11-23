@@ -23,6 +23,8 @@ x-backend-environment: &backend-environment
   TRUSTED_PROXY_COUNT: "0"
   ADMIN_ALLOWED_CIDRS: "127.0.0.1/32,::1/128,172.16.0.0/12"
   EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+  INDEXING_QUEUE: ${INDEXING_QUEUE:-indexing.thesis-events}
+  ADJUDICATION_QUEUE: ${ADJUDICATION_QUEUE:-adjudication.thesis-events}
 
 services:
   db:
@@ -141,6 +143,160 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+
+  indexing-consumer:
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "consume_indexing_events"]
+    environment: *backend-environment
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  adjudication-consumer:
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "consume_adjudication_events"]
+    environment: *backend-environment
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # APIs independentes por serviço (perfil "microservices"): cada processo expõe
+  # somente as rotas de sua fronteira. O serviço "backend" continua como gateway.
+  auth-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8011"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: auth
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8011:8011"
+
+  theses-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8012"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: theses
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8012:8012"
+
+  committee-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8013"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: committee
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8013:8013"
+
+  repository-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8014"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: repository
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8014:8014"
+
+  notifications-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8015"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: notifications
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8015:8015"
+
+  reports-service:
+    profiles: ["microservices"]
+    build: *backend-build
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8016"]
+    environment:
+      <<: *backend-environment
+      SERVICE_NAME: reports
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8016:8016"
 
   frontend:
     profiles: ["frontend"]

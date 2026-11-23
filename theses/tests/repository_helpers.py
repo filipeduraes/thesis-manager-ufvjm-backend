@@ -20,6 +20,7 @@ from rest_framework.test import APIClient
 from academic.models import Course, Department
 from accounts.models import ProfileRole, User
 from theses.models import Keyword, StoredFile, Thesis, ThesisAuthor, ThesisFile, ThesisKeyword, ThesisStatus
+from theses.search_index import refresh_search_text
 from theses.tests.test_api import TEST_CACHES, build_pdf_bytes, create_user
 
 
@@ -95,6 +96,7 @@ def create_thesis(spec: ThesisSpec) -> Thesis:
         ThesisKeyword.objects.create(thesis=thesis, keyword=keyword)
     stored_file = store_pdf(f"{spec.title}-{thesis.pk}", spec.authors[0])
     ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, uploaded_by=spec.authors[0])
+    refresh_search_text(thesis)
     return thesis
 
 

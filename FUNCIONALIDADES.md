@@ -2,7 +2,28 @@
 
 Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
 
-> Atualizado em: 2026-11-22. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em: 2026-11-23. Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+
+## Atualização de conformidade (2026-11-23, branch `feat/conformidade-requisitos`)
+
+| Item | Situação | Evidência |
+|---|---|---|
+| Extração de texto via fila + busca no texto e sem acento | **Implementado** | evento `thesis.text_extraction_requested`, app `indexing`, `Thesis.search_text`, `theses/search_index.py`, fila `indexing.thesis-events` |
+| Cálculo assíncrono do resultado da banca | **Implementado** | app `adjudication`, evento `defense.evaluation_recorded`, fila `adjudication.thesis-events` |
+| Convite por e-mail a todos os membros da banca | **Implementado** | evento `defense.member_invited`, template `DEFENSE_MEMBER_INVITED` (sem token no e-mail) |
+| Grupos de até 5 alunos no fluxo do aluno | **Implementado** | `authors` no `PUT /theses/me`, `THESIS_MAX_AUTHORS`, seletor `CoauthorPicker`, `/users/suggest` para estudantes |
+| Membro da banca ler/baixar a monografia avaliada | **Implementado** | ACL de leitura em `user_can_access_thesis`/`get_accessible_thesis`, sem ampliar gestão |
+| `upload_em_andamento:<sha256>` | **Implementado** | `theses/uploads.py`, integrado ao upload e à extração |
+| Conflito de horário de membros externos | **Implementado** | identidade por e-mail normalizado em `theses/defense_committee.py` |
+| Nota e parecer obrigatórios | **Implementado** | migration `theses/0012`, validação no serviço/serializer, UI atualizada |
+| Matrícula, departamento e área de pesquisa | **Implementado** | migration `accounts/0004`, campos no admin de usuários |
+| N+1 em `GET /theses` | **Corrigido** | `viewer_context` resolvido uma vez por página |
+| Verificador da cadeia de auditoria | **Implementado** | `accounts/audit_integrity.py` e `manage.py verify_audit_chain` |
+| APIs de serviço independentes | **Implementado (parcial)** | seis URLconfs por serviço e processos no Compose; banco ainda compartilhado |
+| Bug visual das palavras-chave no card público | **Corrigido** | `.tags` com `flex-wrap` e badges com quebra de linha |
+| E2E de avaliação e gestão de acervo | **Parcial** | nova spec `committee-evaluation.spec.ts`; gestão de acervo segue em checklist manual |
+
+Detalhes em `PROGRESSO_CONFORMIDADE.md`.
 
 ## Legenda
 - **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).

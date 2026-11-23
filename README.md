@@ -138,4 +138,26 @@ Operação dos eventos assíncronos (no Docker, prefixe com `docker compose exec
 python manage.py publish_outbox_events --once                 # publica um único lote (depuração)
 python manage.py publish_outbox_events --requeue-failed all   # devolve eventos FAILED para a fila
 python manage.py consume_notifications --retry-pending        # reenvia e-mails FAILED ou presos em PENDING
+python manage.py consume_indexing_events                      # extrai texto do PDF e atualiza o índice de busca
+python manage.py consume_adjudication_events                  # calcula o resultado da banca após a última avaliação
+python manage.py verify_audit_chain                           # verifica a integridade do log de auditoria
+```
+
+As filas `indexing.thesis-events` e `adjudication.thesis-events` (e suas DLQs) são declaradas por `declare_event_topology`. No Compose, os serviços `indexing-consumer` e `adjudication-consumer` rodam esses comandos.
+
+### APIs por serviço
+
+Além do gateway `backend` (URLconf completa), cada fronteira tem sua própria API quando o perfil `microservices` está ativo:
+
+| Serviço | Porta | URLconf |
+|---|---|---|
+| Autenticação e usuários | 8011 | `thesismanagerbackend.service_urls.auth` |
+| Monografias | 8012 | `thesismanagerbackend.service_urls.theses` |
+| Bancas e avaliação | 8013 | `thesismanagerbackend.service_urls.committee` |
+| Repositório público | 8014 | `thesismanagerbackend.service_urls.repository` |
+| Notificações | 8015 | `thesismanagerbackend.service_urls.notifications` |
+| Relatórios | 8016 | `thesismanagerbackend.service_urls.reports` |
+
+```bash
+docker compose --profile microservices up --build
 ```

@@ -35,9 +35,16 @@ class DeclareEventTopologyCommandTests(SimpleTestCase):
         call_command("declare_event_topology", stdout=output)
         self.assertEqual(self.channel.exchange_declare.call_count, 2)
         queue_names = [declare_call.kwargs["queue"] for declare_call in self.channel.queue_declare.call_args_list]
-        self.assertEqual(queue_names, ["notifications.thesis-events.dlq", "notifications.thesis-events"])
+        self.assertEqual(
+            queue_names,
+            [
+                "notifications.thesis-events.dlq", "notifications.thesis-events",
+                "indexing.thesis-events.dlq", "indexing.thesis-events",
+                "adjudication.thesis-events.dlq", "adjudication.thesis-events",
+            ],
+        )
         self.connection.close.assert_called_once()
-        self.assertIn("Topologia declarada: exchange thesis.events, filas notifications.thesis-events.", output.getvalue())
+        self.assertIn("Topologia declarada: exchange thesis.events, filas notifications.thesis-events, indexing.thesis-events, adjudication.thesis-events.", output.getvalue())
         self.sleep.assert_not_called()
 
     def test_retries_until_broker_accepts_connections(self) -> None:

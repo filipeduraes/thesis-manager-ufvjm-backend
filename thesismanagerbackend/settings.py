@@ -56,6 +56,8 @@ INSTALLED_APPS = [
     "reports",
     "events",
     "notifications",
+    "indexing",
+    "adjudication",
 ]
 
 MIDDLEWARE = [
@@ -72,7 +74,11 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "thesismanagerbackend.urls"
+SERVICE_NAME = env("SERVICE_NAME", default="")
+if SERVICE_NAME:
+    ROOT_URLCONF = f"thesismanagerbackend.service_urls.{SERVICE_NAME}"
+else:
+    ROOT_URLCONF = "thesismanagerbackend.urls"
 
 TEMPLATES = [
     {
@@ -311,6 +317,10 @@ OUTBOX_RETRY_BASE_SECONDS = env.int("OUTBOX_RETRY_BASE_SECONDS", default=5)
 OUTBOX_RETRY_MAX_SECONDS = env.int("OUTBOX_RETRY_MAX_SECONDS", default=900)
 NOTIFICATIONS_QUEUE = env("NOTIFICATIONS_QUEUE", default="notifications.thesis-events")
 NOTIFICATIONS_PREFETCH = env.int("NOTIFICATIONS_PREFETCH", default=10)
+INDEXING_QUEUE = env("INDEXING_QUEUE", default="indexing.thesis-events")
+INDEXING_PREFETCH = env.int("INDEXING_PREFETCH", default=5)
+ADJUDICATION_QUEUE = env("ADJUDICATION_QUEUE", default="adjudication.thesis-events")
+ADJUDICATION_PREFETCH = env.int("ADJUDICATION_PREFETCH", default=5)
 
 
 # Logging
@@ -372,6 +382,7 @@ THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
 THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
+UPLOAD_TRACKING_TTL_SECONDS = env.int("UPLOAD_TRACKING_TTL_SECONDS", default=3600)
 # Cache Redis do repositório público; a invalidação é explícita (publicação,
 # edição ou despublicação), então o TTL só limita dados velhos de curso/orientador.
 PUBLIC_REPOSITORY_CACHE_TTL_SECONDS = env.int("PUBLIC_REPOSITORY_CACHE_TTL_SECONDS", default=300)

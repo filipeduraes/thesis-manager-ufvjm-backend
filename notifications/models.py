@@ -22,6 +22,7 @@ class NotificationTemplateCode(models.TextChoices):
 
     THESIS_SUBMITTED = "THESIS_SUBMITTED", "Monografia submetida"
     DEFENSE_SCHEDULED = "DEFENSE_SCHEDULED", "Banca agendada"
+    DEFENSE_MEMBER_INVITED = "DEFENSE_MEMBER_INVITED", "Convite para banca"
     DEFENSE_EVALUATION_RECORDED = "DEFENSE_EVALUATION_RECORDED", "Avaliação registrada"
     DEFENSE_COMPLETED = "DEFENSE_COMPLETED", "Banca concluída"
     THESIS_DEFENSE_RESULT_RECORDED = "THESIS_DEFENSE_RESULT_RECORDED", "Resultado da banca registrado"

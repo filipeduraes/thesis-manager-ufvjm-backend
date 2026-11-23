@@ -24,9 +24,9 @@ from events.models import OutboxEvent, ProcessedEvent
 from events.outbox import EventPayload
 from notifications.delivery import send_notification
 from notifications.models import Notification, NotificationTemplate, NotificationTemplateCode
-from notifications.recipients import Recipient, evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
+from notifications.recipients import Recipient, defense_member, evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
 from notifications.rendering import TemplateContext, render_notification
-from theses.models import CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, Thesis
+from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, Thesis
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,28 @@ def _plan_defense_scheduled(payload: EventPayload) -> NotificationPlan:
     return NotificationPlan(NotificationTemplateCode.DEFENSE_SCHEDULED, thesis, recipients, context)
 
 
+def _plan_defense_member_invited(payload: EventPayload) -> NotificationPlan:
+    """
+    Plan the invitation e-mail of one committee member.
+
+    Args:
+        payload: ``defense.member_invited`` payload.
+
+    Returns:
+        NotificationPlan: Plan for the invited member.
+
+    Raises:
+        EntityNotFoundError: When the member no longer exists.
+    """
+    member = DefenseMember.objects.select_related("institutional_member", "external_invitation").filter(pk=payload["memberId"]).first()
+    if member is None:
+        raise EntityNotFoundError("Defense member referenced by the event was not found")
+    defense = _get_defense(payload["defenseId"])
+    thesis = _get_thesis(payload["thesisId"])
+    context: TemplateContext = {"scheduled_at": _format_datetime(defense.scheduled_datetime.isoformat())}
+    return NotificationPlan(NotificationTemplateCode.DEFENSE_MEMBER_INVITED, thesis, defense_member(member), context)
+
+
 def _plan_evaluation_recorded(payload: EventPayload) -> NotificationPlan:
     """
     Notify the advisor of the evaluation progress, without revealing any decision.
@@ -225,6 +247,7 @@ def _plan_thesis_published(payload: EventPayload) -> NotificationPlan:
 PLANNERS: dict[str, Callable[[EventPayload], NotificationPlan]] = {
     EventType.THESIS_SUBMITTED: _plan_thesis_submitted,
     EventType.DEFENSE_SCHEDULED: _plan_defense_scheduled,
+    EventType.DEFENSE_MEMBER_INVITED: _plan_defense_member_invited,
     EventType.DEFENSE_EVALUATION_RECORDED: _plan_evaluation_recorded,
     EventType.DEFENSE_COMPLETED: _plan_defense_completed,
     EventType.THESIS_DEFENSE_RESULT_RECORDED: _plan_defense_result_recorded,
@@ -297,6 +320,9 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
         HandleOutcome: ``PROCESSED``, ``DUPLICATE`` or ``REJECTED`` (unknown type,
             unsupported version or payload outside the catalog).
     """
+    if envelope.event_type not in PLANNERS:
+        logger.warning("Event %s (%s) has no notification planner; rejecting", envelope.event_id, envelope.event_type)
+        return HandleOutcome.REJECTED
     if not is_known_event(envelope.event_type, envelope.event_version) or not _payload_matches_catalog(envelope):
         logger.warning("Rejected event %s: unsupported type/version or payload (%s %s)", envelope.event_id, envelope.event_type, envelope.event_version)
         return HandleOutcome.REJECTED

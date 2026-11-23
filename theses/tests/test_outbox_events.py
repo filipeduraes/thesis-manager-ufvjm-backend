@@ -17,8 +17,10 @@ from rest_framework.test import APIClient
 
 from academic.models import Course, Department
 from accounts.models import ProfileRole, User
+from adjudication.consumer import handle_event as handle_adjudication_event
 from events.catalog import PAYLOAD_KEYS, EventType
-from events.models import OutboxEvent, OutboxStatus
+from events.envelope import EventEnvelope
+from events.models import OutboxEvent, OutboxStatus, ProcessedEvent
 from theses.defense_committee import add_institutional_member
 from theses.defense_evaluation import record_committee_evaluation
 from theses.defense_scheduling import close_defense, schedule_defense, start_defense
@@ -159,10 +161,18 @@ class DefenseOutboxEventTests(TestCase):
         start_defense(defense, actor=self.admin)
         return Defense.objects.get(pk=defense.pk)
 
-    def _evaluate(self, member, actor: User, decision: str) -> str | None:
+    def _drain_adjudication(self) -> None:
+        """Process queued evaluation events like the adjudication worker."""
+        processed = set(ProcessedEvent.objects.filter(consumer_group="adjudication").values_list("event_id", flat=True))
+        events = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EVALUATION_RECORDED).exclude(pk__in=processed).order_by("created_at")
+        for event in events:
+            handle_adjudication_event(EventEnvelope.from_outbox(event))
+
+    def _evaluate(self, member, actor: User, decision: str) -> bool:
         defense = Defense.objects.get(pk=member.defense_id)
-        outcome = record_committee_evaluation(defense, member, decision=decision, notes="Parecer sigiloso do avaliador.", actor=actor)
-        return outcome.auto_close_error
+        outcome = record_committee_evaluation(defense, member, decision=decision, score="8.00", notes="Parecer sigiloso do avaliador.", actor=actor)
+        self._drain_adjudication()
+        return outcome.result_calculation_queued
 
     def test_scheduling_records_defense_scheduled_without_location(self) -> None:
         defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), modality=DefenseModality.REMOTE, location=self.meeting_link, actor=self.admin)
@@ -200,8 +210,8 @@ class DefenseOutboxEventTests(TestCase):
     def test_automatic_close_records_defense_completed(self) -> None:
         defense = self._schedule_and_start()
         self._evaluate(self.member1, self.evaluator1, DefenseResult.APPROVED)
-        auto_close_error = self._evaluate(self.member2, self.evaluator2, DefenseResult.REJECTED)
-        self.assertIsNone(auto_close_error)
+        calculation_queued = self._evaluate(self.member2, self.evaluator2, DefenseResult.REJECTED)
+        self.assertTrue(calculation_queued)
         self.assertEqual(len(events_of(EventType.DEFENSE_EVALUATION_RECORDED)), 2)
         [event] = events_of(EventType.DEFENSE_COMPLETED)
         self.assertEqual(
@@ -214,9 +224,9 @@ class DefenseOutboxEventTests(TestCase):
     def test_failed_automatic_close_keeps_evaluation_event_only(self) -> None:
         self._schedule_and_start()
         self._evaluate(self.member1, self.evaluator1, DefenseResult.APPROVED)
-        with self.assertLogs("theses.defense_scheduling", level="WARNING"):
-            auto_close_error = self._evaluate(self.member2, self.evaluator2, DefenseResult.APPROVED)
-        self.assertIsNotNone(auto_close_error)
+        with self.assertLogs("adjudication.consumer", level="WARNING"):
+            calculation_queued = self._evaluate(self.member2, self.evaluator2, DefenseResult.APPROVED)
+        self.assertTrue(calculation_queued)
         self.assertEqual(len(events_of(EventType.DEFENSE_EVALUATION_RECORDED)), 2)
         self.assertFalse(events_of(EventType.DEFENSE_COMPLETED))
 

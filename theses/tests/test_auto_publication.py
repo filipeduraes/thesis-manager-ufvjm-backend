@@ -11,8 +11,10 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from accounts.models import AuditAction, AuditLog, ProfileRole
+from adjudication.consumer import handle_event as handle_adjudication_event
 from events.catalog import EventType
-from events.models import OutboxEvent
+from events.envelope import EventEnvelope
+from events.models import OutboxEvent, ProcessedEvent
 from theses.defense_committee import add_institutional_member
 from theses.defense_evaluation import record_committee_evaluation
 from theses.defense_scheduling import schedule_defense, start_defense
@@ -199,10 +201,14 @@ class DefenseCloseTriggersPublicationTests(AutoPublicationTestCase):
         member = add_institutional_member(defense, CommitteeRole.MEMBER, evaluator, actor=admin)
         confirm_committee(defense)
         start_defense(defense, actor=admin)
-        record_committee_evaluation(Defense.objects.get(pk=defense.pk), president, decision=DefenseResult.APPROVED, actor=self.other_advisor)
+        record_committee_evaluation(Defense.objects.get(pk=defense.pk), president, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=self.other_advisor)
         self.assert_not_published()
-        outcome = record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.APPROVED, actor=evaluator)
-        self.assertIsNone(outcome.auto_close_error)
+        outcome = record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.", actor=evaluator)
+        self.assertTrue(outcome.result_calculation_queued)
+        processed = set(ProcessedEvent.objects.filter(consumer_group="adjudication").values_list("event_id", flat=True))
+        pending = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EVALUATION_RECORDED).exclude(pk__in=processed).order_by("created_at")
+        for event in pending:
+            handle_adjudication_event(EventEnvelope.from_outbox(event))
         self.assert_published_automatically(PublicationTrigger.DEFENSE_CLOSED)
         defense.refresh_from_db()
         expected_date = timezone.localtime(defense.scheduled_datetime, timezone=timezone.get_fixed_timezone(-180)).date()

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.core.cache import cache
 from django.db import transaction
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
@@ -14,6 +15,8 @@ from django.utils import timezone
 from pypdf import PdfReader
 
 from theses.models import ProcessingStatus, StoredFile, ThesisFile
+from theses.search_index import refresh_search_text_for_files
+from theses.uploads import clear_upload_in_progress
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +41,13 @@ def extract_stored_file_text(stored_file: StoredFile) -> str:
     text_name = f"theses/extracted/{stored_file.sha256_hex}.txt"
     saved_name = default_storage.save(text_name, ContentFile(text.encode("utf-8")))
     stored_file.extracted_text_path = saved_name
+    stored_file.extracted_text = text
     stored_file.extracted_at = timezone.now()
     stored_file.processing_status = ProcessingStatus.COMPLETED
-    stored_file.save(update_fields=["extracted_text_path", "extracted_at", "processing_status"])
+    stored_file.save(update_fields=["extracted_text_path", "extracted_text", "extracted_at", "processing_status"])
     ThesisFile.objects.filter(stored_file=stored_file).update(text_extracted_at=stored_file.extracted_at)
+    refresh_search_text_for_files([stored_file.pk])
+    clear_upload_in_progress(stored_file.sha256_hex)
     return text
 
 
@@ -79,5 +85,6 @@ def extract_pending_thesis_text(limit: int = 10) -> dict[str, int]:
             failed += 1
             stored_file.processing_status = ProcessingStatus.FAILED
             stored_file.save(update_fields=["processing_status"])
+            clear_upload_in_progress(stored_file.sha256_hex)
             logger.exception("Failed to extract text from stored file %s", stored_file.pk)
     return {"completed": completed, "failed": failed}
