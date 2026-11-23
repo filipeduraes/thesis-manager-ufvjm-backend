@@ -285,14 +285,28 @@ entre bancos de serviços diferentes). Para validar a separação real, use o
 script — ele exporta as 6 URLs, garante os bancos/migrações e roda a suíte:
 
 ```bash
-./scripts/test-postgres.sh                          # completa (~8 min, 674 testes)
+./scripts/test-postgres.sh                          # completa (~8 min, 675 testes)
 ./scripts/test-postgres.sh theses.tests             # só um app/módulo
 ./scripts/test-postgres.sh --keepdb reports.tests   # opções repassadas ao Django
 ```
 
+**Pré-requisito:** o Postgres precisa estar acessível. O script **sobe o serviço
+`db` do Compose automaticamente** se ele não responder em `127.0.0.1:5433`
+(use `sudo docker` se o socket pedir permissão — veja a seção de sudo abaixo).
+Se preferir subir na mão antes:
+
+```bash
+sudo docker compose up -d db     # só o banco; não precisa do stack inteiro
+```
+
 Os defaults apontam para o Postgres do Compose (`127.0.0.1:5433`, usuário
-`thesis_manager_user`). Sobrescreva `POSTGRES_HOST`, `POSTGRES_HOST_PORT`,
-`POSTGRES_USER` e `POSTGRES_PASSWORD` se o ambiente for diferente.
+`thesis_manager_user`, senha `local-development-only`). Sobrescreva
+`POSTGRES_HOST`, `POSTGRES_HOST_PORT`, `POSTGRES_USER` e `POSTGRES_PASSWORD` se o
+ambiente for diferente:
+
+```bash
+POSTGRES_PASSWORD=outra-senha ./scripts/test-postgres.sh theses.tests
+```
 
 As falhas conhecidas do SQLite (`nulls_distinct`, `JSONField`) **não ocorrem** no
 Postgres. O `ServiceAwareTestRunner` declara automaticamente todos os aliases
