@@ -54,11 +54,12 @@ class MemberInvitationTests(TestCase):
         self.assertIn("Banca distribuída", mail.outbox[0].subject)
         self.assertEqual(ProcessedEvent.objects.filter(consumer_group=CONSUMER_GROUP).count(), 1)
 
-    def test_external_member_is_invited_without_token(self) -> None:
+    def test_external_member_receives_token_only_by_email(self) -> None:
         with transaction.atomic():
-            _member, token = add_external_member(self.defense, CommitteeRole.MEMBER, name="Dr. Externo", email="externo@example.com", institution="UFMG", actor=self.admin)
-        self.assertEqual(self.handle_last(), HandleOutcome.PROCESSED)
+            add_external_member(self.defense, CommitteeRole.MEMBER, name="Dr. Externo", email="externo@example.com", institution="UFMG", actor=self.admin)
+        event = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EXTERNAL_MEMBER_INVITED).latest("created_at")
+        self.assertEqual(handle_event(EventEnvelope.from_outbox(event)), HandleOutcome.PROCESSED)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["externo@example.com"])
-        self.assertNotIn(token, mail.outbox[0].body)
+        self.assertIn("UFVJM-", mail.outbox[0].body)
         self.assertTrue(DefenseMember.objects.filter(defense=self.defense, email="externo@example.com").exists())

@@ -112,6 +112,9 @@ class AuditEvent(StrEnum):
     EVALUATION_BLOCKED_AFTER_CLOSE = "EVALUATION_BLOCKED_AFTER_CLOSE"
     EVALUATION_SUBMITTED = "EVALUATION_SUBMITTED"
     EXTERNAL_TOKEN_REGENERATED = "EXTERNAL_TOKEN_REGENERATED"
+    INVITATION_EMAIL_RESENT = "INVITATION_EMAIL_RESENT"
+    INVITATION_EMAIL_SENT = "INVITATION_EMAIL_SENT"
+    INVITATION_RESEND_REQUESTED = "INVITATION_RESEND_REQUESTED"
     LEGACY_IMPORT = "LEGACY_IMPORT"
     MEMBER_ADDED = "MEMBER_ADDED"
     MEMBER_REMOVED = "MEMBER_REMOVED"
@@ -183,6 +186,9 @@ class AuditField(StrEnum):
     MEMBER_ROLE = "memberRole"
     INVITATION_ID = "invitationId"
     PREVIOUS_INVITATION_ID = "previousInvitationId"
+    EVENT_ID = "eventId"
+    NOTIFICATION_ID = "notificationId"
+    ATTEMPTS = "attempts"
     REVIEW_ID = "reviewId"
     REFERENCE_CODE = "referenceCode"
     REMOVED_VERSIONS = "removedVersions"
@@ -262,6 +268,9 @@ FIELD_LABELS: dict[AuditField, str] = {
     AuditField.MEMBER_ROLE: "Função na banca",
     AuditField.INVITATION_ID: "Convite",
     AuditField.PREVIOUS_INVITATION_ID: "Convite anterior",
+    AuditField.EVENT_ID: "Evento assíncrono",
+    AuditField.NOTIFICATION_ID: "Notificação",
+    AuditField.ATTEMPTS: "Tentativas de envio",
     AuditField.REVIEW_ID: "Parecer",
     AuditField.REFERENCE_CODE: "Código do TCC",
     AuditField.REMOVED_VERSIONS: "Versões removidas",

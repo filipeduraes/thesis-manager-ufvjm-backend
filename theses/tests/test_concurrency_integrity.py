@@ -17,7 +17,7 @@ from rest_framework.test import APIClient
 
 from academic.models import Course, Department
 from accounts.models import InvitationStatus, ProfileRole, User, UserProfileRole
-from accounts.services import create_external_invitation
+from accounts.services import create_external_invitation, issue_external_token
 from theses.defense_committee import add_institutional_member
 from theses.defense_evaluation import submit_committee_evaluation
 from theses.defense_scheduling import close_defense, schedule_defense, start_defense
@@ -89,9 +89,11 @@ class ExternalInvitationIntegrityTests(TestCase):
         self.client = APIClient()
 
     def test_expired_invitation_status_is_persisted(self) -> None:
-        invitation, token = create_external_invitation(
+        invitation = create_external_invitation(
             name="Externo", email="externo@example.com", invited_by=self.inviter
         )
+        # O token legível só existe no e-mail; o teste emite um diretamente, como o consumidor.
+        token = issue_external_token(invitation)
         invitation.expires_at = timezone.now() - timedelta(hours=1)
         invitation.save(update_fields=["expires_at"])
 

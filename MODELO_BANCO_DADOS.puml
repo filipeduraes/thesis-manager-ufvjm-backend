@@ -157,6 +157,7 @@ package "Enums" #EEEEEE {
     DELIVERED
     FAILED
     READ
+    CANCELLED
   }
 }
 
@@ -226,7 +227,11 @@ package "Authentication Service" #E8F4FF {
     revoked_at : timestamptz
     revoked_by_id : uuid <<FK>>
     * created_at : timestamptz = now()
+    token_event_id : uuid
+    token_sent_at : timestamptz
     ' Membro externo temporário - sem conta permanente
+    ' token_hash: hash do token enviado por e-mail (ou digest aleatório enquanto nenhum foi enviado)
+    ' token_event_id: único outbox_event autorizado a emitir o token; token_sent_at: envio do e-mail
   }
 
   entity audit_log {
@@ -804,7 +809,8 @@ note as N_RULES
   - Resultado calculado apenas após todos membros não-suplentes avaliados
   - PUBLICATION_AUTHORIZATION VALIDATED obrigatório p/ publicação
   - thesis PUBLISHED com deleted_at IS NULL mas proteção via trigger (não deletar)
-  - external_invitation: token_hash apenas, expiração obrigatória
+  - external_invitation: token_hash apenas, expiração obrigatória; o token legível existe só no e-mail
+  - notification de convite externo guarda o corpo com o token mascarado (UFVJM-****)
   - audit_log: INSERT apenas (sem UPDATE/DELETE)
   - repository_search_index atualizado via eventos
 end note

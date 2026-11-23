@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
 from datetime import timedelta
 from typing import Iterable
 from urllib.parse import urlsplit
@@ -616,6 +617,75 @@ def generate_external_token() -> str:
     return f"{TOKEN_PREFIX}-{'-'.join(groups)}"
 
 
+def unissued_token_hash() -> bytes:
+    """
+    Return a random digest that no token can match, used while no token was issued.
+
+    ``token_hash`` is unique and required, so an invitation whose token has not been
+    e-mailed yet (or was invalidated by a resend) holds the digest of random bytes
+    that are discarded immediately and never formatted as a token.
+
+    Returns:
+        bytes: 32-byte SHA-256 digest of discarded random bytes.
+    """
+    discarded_secret = secrets.token_bytes(32)
+    return hashlib.sha256(b"unissued:" + discarded_secret).digest()
+
+
+def invalidate_external_token(invitation: ExternalInvitation) -> None:
+    """
+    Make the current token of an invitation stop working immediately.
+
+    Clears ``token_sent_at`` too, so the UI shows the delivery as pending until
+    the consumer sends the next token. Sessions already opened with the previous
+    token are not affected (they depend on the invitation status, not on the hash).
+
+    Args:
+        invitation: Invitation to update; the caller should hold a row lock.
+    """
+    invitation.token_hash = unissued_token_hash()
+    invitation.token_sent_at = None
+    invitation.save(update_fields=["token_hash", "token_sent_at"])
+
+
+def issue_external_token(invitation: ExternalInvitation) -> str:
+    """
+    Generate a new readable token for an invitation and store only its hash.
+
+    The previous token stops working. The returned value must only be placed in
+    the e-mail sent to the invitee: never log it, audit it, persist it or put it in
+    an event payload.
+
+    Args:
+        invitation: Invitation to update; the caller should hold a row lock.
+
+    Returns:
+        str: Readable token ``UFVJM-XXXX-XXXX-XXXX-XXXX``.
+    """
+    token = generate_external_token()
+    invitation.token_hash = hash_external_token(token)
+    invitation.save(update_fields=["token_hash"])
+    return token
+
+
+def mark_external_token_sent(invitation_id: uuid.UUID, event_id: uuid.UUID) -> bool:
+    """
+    Record that the e-mail carrying the current token was accepted for delivery.
+
+    The update only applies while ``event_id`` is still the invitation's issuing
+    event, so a late confirmation never marks a token replaced by a resend as sent.
+
+    Args:
+        invitation_id: Invitation identifier.
+        event_id: Outbox event that issued the e-mailed token.
+
+    Returns:
+        bool: True when the invitation was updated.
+    """
+    updated = ExternalInvitation.objects.filter(pk=invitation_id, token_event_id=event_id).update(token_sent_at=timezone.now())
+    return updated == 1
+
+
 def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict[str, str]]:
     """
     Return the defense committee memberships bound to an external invitation.
@@ -636,13 +706,30 @@ def external_invitation_assignments(invitation: ExternalInvitation) -> list[dict
     return [{"defenseId": str(membership.defense_id), "memberId": str(membership.pk)}]
 
 
-def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None,) -> tuple[ExternalInvitation, str]:
+def create_external_invitation(*, name: str, email: str, institution: str = "", invited_by: User | None = None, expires_at: timezone.datetime | None = None, request: HttpRequest | None = None) -> ExternalInvitation:
     """
-    Create an external invitation and return its one-time readable token.
+    Create an external invitation without any usable token.
+
+    The token is issued later by the notification consumer and exists in plain
+    text only in the e-mail sent to the invitee (``issue_external_token``); until
+    then ``token_hash`` holds an unmatchable digest.
+
+    Args:
+        name: Invitee name.
+        email: Invitee e-mail address.
+        institution: Invitee institution.
+        invited_by: User who created the invitation.
+        expires_at: Expiration; defaults to now plus ``EXTERNAL_INVITATION_TOKEN_TTL_HOURS``.
+        request: HTTP request used for audit context.
+
+    Returns:
+        ExternalInvitation: Created invitation in ``PENDING`` status.
+
+    Raises:
+        ValidationError: When the e-mail address is invalid.
     """
     normalized_email = (email or "").strip().lower()
     validate_email(normalized_email)
-    token = generate_external_token()
     if expires_at is None:
         expires_at = timezone.now() + timedelta(
             hours=getattr(settings, "EXTERNAL_INVITATION_TOKEN_TTL_HOURS", 72)
@@ -654,7 +741,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             name=name.strip(),
             email=normalized_email,
             institution=(institution or "").strip(),
-            token_hash=hash_external_token(token),
+            token_hash=unissued_token_hash(),
             expires_at=expires_at,
         )
         record_audit(AuditEntry(
@@ -666,7 +753,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             metadata={"name": invitation.name, "email": invitation.email, "institution": invitation.institution},
         ))
     logger.info("External invitation created: invitation_id=%s", invitation.pk)
-    return invitation, token
+    return invitation
 
 
 def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitation:

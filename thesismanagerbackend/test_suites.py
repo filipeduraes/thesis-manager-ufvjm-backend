@@ -20,6 +20,7 @@ FAST_TEST_LABELS: tuple[str, ...] = (
     "thesismanagerbackend.tests.test_transaction_aliases",
     "thesismanagerbackend.tests.test_consumer_alias_order",
     "thesismanagerbackend.tests.test_migration_invariants",
+    "thesismanagerbackend.tests.test_invitation_cross_database",
     "theses.tests.test_cross_service_assignments",
     "theses.tests.test_defense_snapshot",
     "theses.tests.test_published_edit",

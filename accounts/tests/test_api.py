@@ -11,8 +11,8 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from accounts.models import ProfileRole, UserProfileRole
-from accounts.services import create_external_invitation
+from accounts.models import ExternalInvitation, ProfileRole, UserProfileRole
+from accounts.services import create_external_invitation, issue_external_token
 
 User = get_user_model()
 TEST_CACHES = {
@@ -172,7 +172,7 @@ class AdminUsersApiTests(TestCase):
         self.assertFalse(target.is_active)
 
     @override_settings(ADMIN_ALLOWED_CIDRS=["127.0.0.1/32"])
-    def test_admin_can_issue_and_revoke_external_invitation(self) -> None:
+    def test_admin_can_no_longer_issue_standalone_invitations(self) -> None:
         self.client.force_authenticate(user=self.admin)
         response = self.client.post(
             "/api/v1/admin/external-invitations",
@@ -184,15 +184,29 @@ class AdminUsersApiTests(TestCase):
             REMOTE_ADDR="127.0.0.1",
             format="json",
         )
-        self.assertEqual(response.status_code, 201)
-        self.assertTrue(response.json()["token"].startswith("UFVJM-"))
-        invitation_id = response.json()["id"]
+        self.assertEqual(response.status_code, 405)
+        self.assertNotIn("token", response.json())
+        self.assertFalse(ExternalInvitation.objects.exists())
+
+    @override_settings(ADMIN_ALLOWED_CIDRS=["127.0.0.1/32"])
+    def test_admin_can_list_and_revoke_external_invitation_without_token(self) -> None:
+        invitation = create_external_invitation(name="Membro Externo", email="membro@outra.org", invited_by=self.admin)
+        self.client.force_authenticate(user=self.admin)
+        list_response = self.client.get("/api/v1/admin/external-invitations", REMOTE_ADDR="127.0.0.1")
+        self.assertEqual(list_response.status_code, 200)
+        [listed] = list_response.json()["results"]
+        self.assertEqual(listed["id"], str(invitation.pk))
+        self.assertIsNone(listed["sentAt"])
+        self.assertNotIn("token", listed)
+        self.assertNotIn("tokenHash", listed)
 
         revoke_response = self.client.delete(
-            f"/api/v1/admin/external-invitations/{invitation_id}",
+            f"/api/v1/admin/external-invitations/{invitation.pk}",
             REMOTE_ADDR="127.0.0.1",
         )
         self.assertEqual(revoke_response.status_code, 204)
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.status, "REVOKED")
 
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
@@ -204,10 +218,11 @@ class ExternalTokenApiTests(TestCase):
         self.client = APIClient()
 
     def test_external_token_exchange_returns_200_with_session(self) -> None:
-        invitation, token = create_external_invitation(
+        invitation = create_external_invitation(
             name="Banca Externa",
             email="banca@avaliador.org",
         )
+        token = issue_external_token(invitation)
         response = self.client.post(
             "/api/v1/auth/external-token",
             {"token": token},

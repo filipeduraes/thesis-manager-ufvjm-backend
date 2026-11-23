@@ -112,7 +112,7 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertTrue(response.data["results"][0]["viewerMembership"]["hasEvaluated"])
 
     def test_external_member_cannot_access_institutional_list(self) -> None:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
         DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
@@ -325,7 +325,7 @@ class SchedulableThesisListApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertEqual(response.data["results"], [])
 
     def test_external_member_is_forbidden(self) -> None:
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
         self.client.force_authenticate(user=ExternalInvitationPrincipal(invitation))

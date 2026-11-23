@@ -233,6 +233,8 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
+        # Reenvio e novo convite de membro externo: cada pedido dispara um e-mail com token novo.
+        "invitation_resend": "5/min",
         "public_download": "30/min",
         "public_repository": "120/min",
         "reports": "60/min",
@@ -314,8 +316,10 @@ EXTERNAL_SESSION_TTL_MINUTES = env.int("EXTERNAL_SESSION_TTL_MINUTES", default=2
 
 
 # Email
+# Padrão SMTP, e não console: o backend de console imprimiria no log o token de acesso
+# enviado aos membros externos da banca (ver notifications.checks).
 EMAIL_BACKEND = env(
-    "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
+    "EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend"
 )
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="nao-responda@ufvjm.edu.br")
 EMAIL_HOST = env("EMAIL_HOST", default="")

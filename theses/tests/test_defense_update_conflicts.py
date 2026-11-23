@@ -95,9 +95,9 @@ class DefenseUpdateConflictApiTests(TestCase):
 
     def test_external_members_are_checked_by_email(self) -> None:
         DefenseMember.objects.filter(defense=self.defense_b).delete()
-        invitation_a, _token_a = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation_a = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation_a, name="Dr. Externo", email="ext@example.com")
-        invitation_b, _token_b = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation_b = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation=invitation_b, name="Dr. Externo", email="ext@example.com")
         response = self._patch(self.defense_b, {"scheduledDatetime": (self.start + timedelta(minutes=30)).isoformat()})
         self.assertEqual(response.status_code, 400)
@@ -106,7 +106,7 @@ class DefenseUpdateConflictApiTests(TestCase):
     def test_add_external_member_refuses_overlapping_guest(self) -> None:
         Defense.objects.filter(pk=self.defense_b.pk).update(scheduled_datetime=self.start + timedelta(minutes=30))
         self.defense_b.refresh_from_db()
-        invitation, _token = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
         with self.assertRaisesMessage(ValidationError, "já participa de outra banca"):
             add_external_member(self.defense_b, CommitteeRole.MEMBER, name="Dr. Externo", email="EXT@example.com", actor=self.admin)

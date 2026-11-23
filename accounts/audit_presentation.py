@@ -128,6 +128,9 @@ SKIP_DETAIL_KEYS = frozenset(
 TRIGGER_LABELS = {
     "AUTO_AFTER_LAST_EVALUATION": "Automático após a última avaliação",
     "MANUAL": "Manual",
+    "CREATED": "Inclusão do membro externo",
+    "RESENT": "Reenvio do convite",
+    "REGENERATED": "Novo convite",
 }
 
 DISPOSITION_LABELS = {
@@ -1460,6 +1463,11 @@ class AuditPresenter:
         name = self.entity_name(log) or "convidado não identificado"
         email = _text(metadata.get("email"))
         identity = f"{name} ({email})" if email and email != name else name
+        event = _text(metadata.get("event"))
+        if event == AuditEvent.INVITATION_EMAIL_SENT:
+            return f"Enviou por e-mail o código de acesso do convite de {identity}"
+        if event == AuditEvent.INVITATION_EMAIL_RESENT:
+            return f"Reenviou por e-mail um novo código de acesso do convite de {identity}"
         if log.action == AuditAction.INVITE:
             return f"Convidou {identity} para participar de uma banca"
         if log.action == AuditAction.TOKEN_ACCESS:
@@ -1620,6 +1628,9 @@ class AuditPresenter:
         if event == AuditEvent.EXTERNAL_TOKEN_REGENERATED:
             member = self._member_text(log)
             return f"Gerou um novo token de acesso para {member}, {committee_of_phrase}"
+        if event == AuditEvent.INVITATION_RESEND_REQUESTED:
+            member = self._member_text(log)
+            return f"Solicitou o reenvio do convite de {member}, {committee_of_phrase}"
         if event == AuditEvent.EVALUATION_SUBMITTED:
             evaluation = self._evaluation_for_log(log)
             score = ""

@@ -107,6 +107,23 @@ class CommitteePayload(EventPayload):
 
 
 @dataclass(frozen=True)
+class InvitationDeliveryPayload(EventPayload):
+    """
+    Contract of the external member invitation e-mail events.
+
+    Carries identifiers only: the access token never reaches the audit log.
+    """
+
+    memberId: str | None = None
+    invitationId: str | None = None
+    defenseId: str | None = None
+    eventId: str | None = None
+    notificationId: str | None = None
+    attempts: int | None = None
+    trigger: str | None = None
+
+
+@dataclass(frozen=True)
 class EvaluationPayload(EventPayload):
     memberId: str | None = None
     decision: str | None = None
@@ -143,6 +160,9 @@ PAYLOAD_TYPES: dict[AuditEvent, type[EventPayload]] = {
     AuditEvent.MEMBER_REMOVED: CommitteePayload,
     AuditEvent.AVAILABILITY_RESPONDED: CommitteePayload,
     AuditEvent.EXTERNAL_TOKEN_REGENERATED: CommitteePayload,
+    AuditEvent.INVITATION_EMAIL_SENT: InvitationDeliveryPayload,
+    AuditEvent.INVITATION_EMAIL_RESENT: InvitationDeliveryPayload,
+    AuditEvent.INVITATION_RESEND_REQUESTED: InvitationDeliveryPayload,
     AuditEvent.EVALUATION_SUBMITTED: EvaluationPayload,
     AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE: EvaluationPayload,
 }

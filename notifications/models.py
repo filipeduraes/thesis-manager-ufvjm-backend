@@ -30,6 +30,7 @@ class NotificationTemplateCode(models.TextChoices):
     DEFENSE_COMPLETED = "DEFENSE_COMPLETED", "Banca concluída"
     THESIS_DEFENSE_RESULT_RECORDED = "THESIS_DEFENSE_RESULT_RECORDED", "Resultado da banca registrado"
     THESIS_PUBLISHED = "THESIS_PUBLISHED", "Monografia publicada"
+    EXTERNAL_MEMBER_INVITED = "EXTERNAL_MEMBER_INVITED", "Convite de membro externo"
 
 
 class NotificationChannel(models.TextChoices):
@@ -51,6 +52,8 @@ class NotificationStatus(models.TextChoices):
     DELIVERED = "DELIVERED", "Entregue"
     FAILED = "FAILED", "Falhou"
     READ = "READ", "Lida"
+    # Não será reenviada: o convite foi substituído por um envio mais novo ou deixou de valer.
+    CANCELLED = "CANCELLED", "Cancelada"
 
 
 class NotificationTemplate(models.Model):

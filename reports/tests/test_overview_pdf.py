@@ -56,7 +56,7 @@ class ReportsOverviewPdfTests(ReportScenarioMixin, TestCase):
     def test_advisor_student_external_and_anonymous_are_denied(self) -> None:
         self.assertEqual(self.export(self.advisor_1).status_code, 403)
         self.assertEqual(self.export(self.student).status_code, 403)
-        invitation, _token = create_external_invitation(name="Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
+        invitation = create_external_invitation(name="Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         self.assertEqual(self.export(ExternalInvitationPrincipal(invitation)).status_code, 403)
         self.client.force_authenticate(user=None)
         self.assertIn(self.client.get(PDF_URL).status_code, (401, 403))
