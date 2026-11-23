@@ -33,7 +33,7 @@ class RemoteDefenseLocationTests(TestCase):
         self.coordinator = create_user("coord@ufvjm.edu.br", "Coord", ProfileRole.COORDINATOR)
         self.course = Course.objects.create(department=self.department, coordinator=self.coordinator, name="CC", code="CC001")
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.client = APIClient()
         self.client.force_authenticate(user=self.advisor)
         self.when = (timezone.now() + timedelta(days=7)).isoformat()

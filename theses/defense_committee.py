@@ -882,7 +882,7 @@ def resend_external_member_invitation(defense: Defense, member: DefenseMember, *
     refusal = _resend_refusal_message(invitation)
     if refusal is not None:
         raise ValidationError(refusal)
-    member.external_invitation = invitation
+    member.external_invitation_id = invitation.pk
     event = record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.RESENT)
     audit_defense(
         action=AuditAction.INVITE,

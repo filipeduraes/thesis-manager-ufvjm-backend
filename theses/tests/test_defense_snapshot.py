@@ -26,7 +26,7 @@ class DefenseSnapshotTests(TestCase):
         UserProfileRole.objects.create(user=advisor, role=ProfileRole.ADVISOR)
         department = Department.objects.create(name="Computação")
         course = Course.objects.create(department=department, name="Computação", code="CC")
-        thesis = Thesis.objects.create(course=course, advisor=advisor, title="Tese com snapshot", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title="Tese com snapshot", status=ThesisStatus.ADVISOR_APPROVED)
 
         defense = schedule_defense(thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=admin)
 

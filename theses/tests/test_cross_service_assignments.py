@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from django.test import TestCase, override_settings
+import tempfile
+from pathlib import Path
 from django.utils import timezone
 
 from theses.defense_committee import add_institutional_member
@@ -31,9 +33,14 @@ class StrictRelationRouter(ServiceDatabaseRouter):
 
 @override_settings(DATABASE_ROUTERS=["theses.tests.test_cross_service_assignments.StrictRelationRouter"])
 class CrossServiceAssignmentTests(TestCase):
-    """Core write paths use ``*_id`` fields for other services' objects."""
+    """Usa mídia temporária: em produção o MEDIA_ROOT pode não ser gravável."""
 
     def setUp(self) -> None:
+        self.media_root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.media_root, True)
+        media = override_settings(MEDIA_ROOT=Path(self.media_root))
+        media.enable()
+        self.addCleanup(media.disable)
         from academic.models import Course, Department
 
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", "ADMIN")

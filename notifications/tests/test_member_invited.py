@@ -36,8 +36,8 @@ class MemberInvitationTests(TestCase):
         student = create_user("aluno@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
         advisor = create_user("orientador@ufvjm.edu.br", "Orientadora", ProfileRole.ADVISOR)
         self.evaluator = create_user("avaliador@ufvjm.edu.br", "Avaliador", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=advisor, title="Banca distribuída", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=student, position=1, is_main_author=True)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=advisor.pk, title="Banca distribuída", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=student.pk, position=1, is_main_author=True)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
 
     def handle_last(self) -> HandleOutcome:

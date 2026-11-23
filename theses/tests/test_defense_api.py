@@ -42,7 +42,7 @@ class DefenseAuthTests(TestCase):
         self.other_advisor = create_user("other@ufvjm.edu.br", "Outro Orientador", ProfileRole.ADVISOR)
         self.student = create_user("student@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
         self.other_student = create_user("other_student@ufvjm.edu.br", "Outro Aluno", ProfileRole.STUDENT)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.client = APIClient()
 
     def _make_defense(self) -> Defense:
@@ -98,7 +98,7 @@ class DefenseSchedulingApiTests(TestCase):
         self.course = Course.objects.create(department=self.department, coordinator=self.coordinator, name="CC", code="CC001")
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.client = APIClient()
 
     def test_advisor_schedules_own_thesis(self) -> None:
@@ -169,7 +169,7 @@ class DefenseEvaluationApiTests(TestCase):
         self.evaluator2 = create_user("ev2@ufvjm.edu.br", "Avaliador 2", ProfileRole.ADVISOR)
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Suplente", ProfileRole.ADVISOR)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)
@@ -234,7 +234,7 @@ class DefenseEvaluationApiTests(TestCase):
         external_member = DefenseMember.objects.create(
             defense=self.defense,
             role=CommitteeRole.MEMBER,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name="Dr. Externo",
             email="ext@example.com",
         )
@@ -253,7 +253,7 @@ class DefenseEvaluationApiTests(TestCase):
         external_member = DefenseMember.objects.create(
             defense=self.defense,
             role=CommitteeRole.MEMBER,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name="Dr. Externo",
             email="ext2@example.com",
         )

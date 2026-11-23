@@ -38,7 +38,7 @@ class DefenseStatusHistoryTests(TestCase):
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         self.member_user = create_user("member@ufvjm.edu.br", "Membro", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.advisor)
         self.client = APIClient()
 

@@ -60,7 +60,7 @@ def store_pdf(marker: str, owner: User) -> StoredFile:
         size_bytes=len(content),
         sha256=hashlib.sha256(content).digest(),
         storage_path=stored_name,
-        uploaded_by=owner,
+        uploaded_by_id=owner.pk,
     )
 
 
@@ -79,8 +79,8 @@ def create_thesis(spec: ThesisSpec) -> Thesis:
     is_published = spec.status == ThesisStatus.PUBLISHED
     defense_date = spec.defense_date or date(2024, 6, 10)
     thesis = Thesis.objects.create(
-        course=spec.course,
-        advisor=spec.advisor,
+        course_id=spec.course.pk,
+        advisor_id=spec.advisor.pk,
         advisor_name=spec.advisor.name or spec.advisor.email,
         course_name=spec.course.name,
         course_code=spec.course.code,
@@ -94,12 +94,12 @@ def create_thesis(spec: ThesisSpec) -> Thesis:
         defense_year=defense_date.year if is_published else None,
     )
     for position, author in enumerate(spec.authors, start=1):
-        ThesisAuthor.objects.create(thesis=thesis, author=author, name=author.name or author.email, position=position, is_main_author=position == 1)
+        ThesisAuthor.objects.create(thesis=thesis, author_id=author.pk, name=author.name or author.email, position=position, is_main_author=position == 1)
     for keyword_name in spec.keywords:
         keyword, _ = Keyword.objects.get_or_create(normalized_name=keyword_name.casefold(), defaults={"name": keyword_name})
         ThesisKeyword.objects.create(thesis=thesis, keyword=keyword)
     stored_file = store_pdf(f"{spec.title}-{thesis.pk}", spec.authors[0])
-    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, uploaded_by=spec.authors[0])
+    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, uploaded_by_id=spec.authors[0].pk)
     refresh_search_text(thesis)
     return thesis
 

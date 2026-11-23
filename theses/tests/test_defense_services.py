@@ -42,7 +42,7 @@ class DefenseSchedulingServiceTests(TestCase):
         self.student = create_user("student@ufvjm.edu.br", "Estudante", ProfileRole.STUDENT)
 
     def _make_thesis(self, status: str = ThesisStatus.ADVISOR_APPROVED) -> Thesis:
-        thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese Teste", status=status)
+        thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese Teste", status=status)
         return thesis
 
     def _make_scheduled_defense(self, thesis: Thesis) -> Defense:
@@ -157,7 +157,7 @@ class CommitteeMemberServiceTests(TestCase):
         self.other_advisor = create_user("other@ufvjm.edu.br", "Outro Orientador", ProfileRole.ADVISOR)
         self.member_user = create_user("member@ufvjm.edu.br", "Membro", ProfileRole.ADVISOR)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
 
     # --- overlap ---
@@ -168,7 +168,7 @@ class CommitteeMemberServiceTests(TestCase):
         add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
 
         # Segunda tese com banca que se sobrepõe (mesma hora)
-        thesis2 = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese 2", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis2 = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese 2", status=ThesisStatus.ADVISOR_APPROVED)
         defense2 = schedule_defense(thesis2, scheduled_datetime=t1 + timedelta(minutes=60), actor=self.admin)
 
         with self.assertRaises(ValidationError):
@@ -179,7 +179,7 @@ class CommitteeMemberServiceTests(TestCase):
         t1 = timezone.now() + timedelta(days=7)
         add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
 
-        thesis2 = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese 2", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis2 = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese 2", status=ThesisStatus.ADVISOR_APPROVED)
         defense2 = schedule_defense(thesis2, scheduled_datetime=t1 + timedelta(minutes=120), actor=self.admin)
 
         # Não deve levantar ValidationError
@@ -233,7 +233,7 @@ class EvaluationServiceTests(TestCase):
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Suplente", ProfileRole.ADVISOR)
         self.other_user = create_user("other@ufvjm.edu.br", "Outro", ProfileRole.ADVISOR)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)

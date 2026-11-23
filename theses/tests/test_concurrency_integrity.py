@@ -46,7 +46,7 @@ class CommitteeIntegrityTests(TestCase):
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Advisor", ProfileRole.ADVISOR)
         self.evaluator = create_user("ev@ufvjm.edu.br", "Avaliador", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="TCC", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="TCC", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
 
     def test_same_institutional_member_cannot_be_added_twice(self) -> None:

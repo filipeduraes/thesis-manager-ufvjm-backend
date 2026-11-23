@@ -13,6 +13,7 @@ from django.test import TestCase
 from accounts.audit_entry import AuditEntry
 from accounts.audit_identifiers import EntityType
 from accounts.audit_integrity import verify_audit_chain
+from accounts.concurrency import database_for_model
 from accounts.models import AuditAction, User, UserProfileRole
 from accounts.services import record_audit
 
@@ -47,9 +48,9 @@ class AuditIntegrityTests(TestCase):
     def test_tampered_row_is_detected(self) -> None:
         self.append()
         from accounts.models import AuditLog
-        from django.db import connection
+        from django.db import connections
 
-        with connection.cursor() as cursor:
+        with connections[database_for_model(AuditLog)].cursor() as cursor:
             cursor.execute(f'UPDATE {AuditLog._meta.db_table} SET row_hash = %s', [b"\x00" * 32])
         report = verify_audit_chain()
         self.assertEqual(len(report.broken_rows), 1)

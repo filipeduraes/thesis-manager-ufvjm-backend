@@ -55,18 +55,18 @@ class ReportScenarioMixin:
         UserCourseAssignment.objects.create(user=self.coordinator_c, course=self.course_c)
 
         # t1: reprovada em 2025 (31 dias), reenviada e aprovada em 2025 (40 dias).
-        self.thesis_1 = Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_1), course=self.course_a, advisor=self.advisor_1, title="T1", status=ThesisStatus.SUBMITTED)
+        self.thesis_1 = Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_1), course_id=self.course_a.pk, advisor_id=self.advisor_1.pk, title="T1", status=ThesisStatus.SUBMITTED)
         self.complete_defense(self.thesis_1, DefenseResult.REJECTED, at(2025, 3, 1), at(2025, 4, 1))
         self.complete_defense(self.thesis_1, DefenseResult.APPROVED, at(2025, 5, 1), at(2025, 6, 10))
         # t2: aprovada com ressalvas em 2026 (30 dias).
-        self.thesis_2 = Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_2), course=self.course_a, advisor=self.advisor_2, title="T2", status=ThesisStatus.SUBMITTED)
+        self.thesis_2 = Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_2), course_id=self.course_a.pk, advisor_id=self.advisor_2.pk, title="T2", status=ThesisStatus.SUBMITTED)
         self.complete_defense(self.thesis_2, DefenseResult.APPROVED_WITH_REMARKS, at(2026, 1, 10), at(2026, 2, 9))
-        self.thesis_3 = Thesis.objects.create(**self.snapshot(self.course_b, self.advisor_1), course=self.course_b, advisor=self.advisor_1, title="T3", status=ThesisStatus.SUBMITTED)
-        self.thesis_7 = Thesis.objects.create(**self.snapshot(self.course_b, self.advisor_1), course=self.course_b, advisor=self.advisor_1, title="T7", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis_3 = Thesis.objects.create(**self.snapshot(self.course_b, self.advisor_1), course_id=self.course_b.pk, advisor_id=self.advisor_1.pk, title="T3", status=ThesisStatus.SUBMITTED)
+        self.thesis_7 = Thesis.objects.create(**self.snapshot(self.course_b, self.advisor_1), course_id=self.course_b.pk, advisor_id=self.advisor_1.pk, title="T7", status=ThesisStatus.ADVISOR_APPROVED)
         schedule_defense(self.thesis_7, scheduled_datetime=timezone.now() + timedelta(days=400), actor=self.admin)
-        Thesis.objects.create(**self.snapshot(self.course_c, self.advisor_2), course=self.course_c, advisor=self.advisor_2, title="T5", status=ThesisStatus.PUBLISHED)
-        Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_1), course=self.course_a, advisor=self.advisor_1, title="Rascunho", status=ThesisStatus.DRAFT)
-        Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_2), course=self.course_a, advisor=self.advisor_2, title="Excluída", status=ThesisStatus.SUBMITTED, deleted_at=timezone.now())
+        Thesis.objects.create(**self.snapshot(self.course_c, self.advisor_2), course_id=self.course_c.pk, advisor_id=self.advisor_2.pk, title="T5", status=ThesisStatus.PUBLISHED)
+        Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_1), course_id=self.course_a.pk, advisor_id=self.advisor_1.pk, title="Rascunho", status=ThesisStatus.DRAFT)
+        Thesis.objects.create(**self.snapshot(self.course_a, self.advisor_2), course_id=self.course_a.pk, advisor_id=self.advisor_2.pk, title="Excluída", status=ThesisStatus.SUBMITTED, deleted_at=timezone.now())
         self.client = APIClient()
 
     @staticmethod

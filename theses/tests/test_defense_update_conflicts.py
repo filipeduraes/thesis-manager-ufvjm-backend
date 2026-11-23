@@ -42,8 +42,8 @@ class DefenseUpdateConflictApiTests(TestCase):
 
         # Banca A: daqui 7 dias, 120 min. Banca B: 3 horas depois do início de A (sem sobreposição).
         self.start = (timezone.now() + timedelta(days=7)).replace(microsecond=0)
-        thesis_a = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
-        thesis_b = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese B", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis_a = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis_b = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese B", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense_a = schedule_defense(thesis_a, scheduled_datetime=self.start, actor=self.admin)
         self.defense_b = schedule_defense(thesis_b, scheduled_datetime=self.start + timedelta(hours=3), actor=self.admin)
         add_institutional_member(self.defense_a, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
@@ -96,9 +96,9 @@ class DefenseUpdateConflictApiTests(TestCase):
     def test_external_members_are_checked_by_email(self) -> None:
         DefenseMember.objects.filter(defense=self.defense_b).delete()
         invitation_a = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
-        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation_a, name="Dr. Externo", email="ext@example.com")
+        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation_id=invitation_a.pk, name="Dr. Externo", email="ext@example.com")
         invitation_b = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
-        DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation=invitation_b, name="Dr. Externo", email="ext@example.com")
+        DefenseMember.objects.create(defense=self.defense_b, role=CommitteeRole.MEMBER, external_invitation_id=invitation_b.pk, name="Dr. Externo", email="ext@example.com")
         response = self._patch(self.defense_b, {"scheduledDatetime": (self.start + timedelta(minutes=30)).isoformat()})
         self.assertEqual(response.status_code, 400)
         self.assertIn("Dr. Externo", response.data["detail"])
@@ -107,6 +107,6 @@ class DefenseUpdateConflictApiTests(TestCase):
         Defense.objects.filter(pk=self.defense_b.pk).update(scheduled_datetime=self.start + timedelta(minutes=30))
         self.defense_b.refresh_from_db()
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
-        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        DefenseMember.objects.create(defense=self.defense_a, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         with self.assertRaisesMessage(ValidationError, "já participa de outra banca"):
             add_external_member(self.defense_b, CommitteeRole.MEMBER, name="Dr. Externo", email="EXT@example.com", actor=self.admin)

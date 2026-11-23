@@ -7,10 +7,13 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand, CommandParser
-from django.db import transaction
+from django.db import connections, transaction
+
+from accounts.concurrency import database_for_model
 from django.utils import timezone
 
 from events.models import OutboxEvent, OutboxStatus, ProcessedEvent
+from notifications.models import Notification
 
 
 class Command(BaseCommand):
@@ -51,7 +54,12 @@ class Command(BaseCommand):
                 ids = list(OutboxEvent.objects.filter(status=OutboxStatus.COMPLETED, published_at__lt=cutoff).values_list("pk", flat=True)[:batch_size])
                 if not ids:
                     break
-                removed_events += OutboxEvent.objects.filter(pk__in=ids).delete()[0]
+                # O SET_NULL de Notification.event deve rodar no banco das
+                # notificações; o collector do Django usaria o alias do evento.
+                notification_db = database_for_model(Notification)
+                Notification.objects.using(notification_db).filter(event_id__in=ids).update(event_id=None)
+                event_db = database_for_model(OutboxEvent)
+                removed_events += OutboxEvent.objects.using(event_db).filter(pk__in=ids)._raw_delete(event_db)
 
         removed_markers = 0
         while True:

@@ -28,7 +28,7 @@ class RetryPendingNotificationsTests(TestCase):
 
     def _notification(self, status: str, minutes_ago: int, attempts: int = 1) -> Notification:
         scheduled_at = timezone.now() - timedelta(minutes=minutes_ago)
-        return Notification.objects.create(template=self.template, user=self.user, subject="Assunto", body="Corpo", body_html="<p>Corpo</p>", status=status, attempts=attempts, scheduled_at=scheduled_at)
+        return Notification.objects.create(template=self.template, user_id=self.user.pk, subject="Assunto", body="Corpo", body_html="<p>Corpo</p>", status=status, attempts=attempts, scheduled_at=scheduled_at)
 
     def test_resends_failed_and_stale_pending_only(self) -> None:
         failed = self._notification(NotificationStatus.FAILED, minutes_ago=30)

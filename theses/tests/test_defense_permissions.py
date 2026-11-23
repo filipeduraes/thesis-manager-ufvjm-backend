@@ -39,8 +39,8 @@ class DefenseStartClosePermissionTests(TestCase):
         self.other_advisor = create_user("other@ufvjm.edu.br", "Outro Orientador", ProfileRole.ADVISOR)
         self.unrelated_advisor = create_user("unrelated@ufvjm.edu.br", "Sem Vínculo", ProfileRole.ADVISOR)
         self.student = create_user("student@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, is_main_author=True)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=self.student.pk, is_main_author=True)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         # Orientador de outra tese que integra esta banca: enxerga a banca, mas não a gerencia.
         self.member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.other_advisor, actor=self.admin)

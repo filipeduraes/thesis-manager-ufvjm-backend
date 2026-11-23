@@ -121,6 +121,7 @@ for _alias in SERVICE_DATABASE_ALIASES:
 
 DATABASE_ROUTERS = ["thesismanagerbackend.routers.ServiceDatabaseRouter"]
 SERVICE_DATABASES_SHARED = env.bool("SERVICE_DATABASES_SHARED", default=True)
+TEST_RUNNER = "thesismanagerbackend.test_runner.ServiceAwareTestRunner"
 SERVICE_TOKEN = env("SERVICE_TOKEN", default="local-service-token-change-before-deploy")
 
 

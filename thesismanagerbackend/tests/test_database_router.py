@@ -12,6 +12,7 @@ from thesismanagerbackend.routers import ServiceDatabaseRouter
 from theses.models import Defense, Thesis
 
 
+@override_settings(SERVICE_DATABASES_SHARED=True)
 class SharedDatabaseRouterTests(SimpleTestCase):
     """In shared mode the router is transparent."""
 

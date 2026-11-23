@@ -40,7 +40,7 @@ class AdjudicationConsumerTests(TestCase):
         advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         evaluator1 = create_user("ev1@ufvjm.edu.br", "Avaliador Um", ProfileRole.ADVISOR)
         evaluator2 = create_user("ev2@ufvjm.edu.br", "Avaliador Dois", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, evaluator2, actor=self.admin)

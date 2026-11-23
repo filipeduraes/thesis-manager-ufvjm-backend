@@ -344,3 +344,17 @@ Camila entregou na `main` o envio do token do membro externo por e-mail. A branc
 - **Migrações**: a main trouxe `accounts/0002_external_invitation_token_delivery`, `0004_merge_token_delivery_audit_category`, `notifications/0003_seed_external_member_invited_template`, `0004_notification_status_cancelled`; a branch trouxe `accounts/0004_user_department...` e `notifications/0004_alter_notification_event_and_more`, `0005_seed_workflow_templates`. Criados os merges `accounts/0005_merge_invitation_and_profile_fields` e `notifications/0006_merge_invitation_and_workflow_templates`. `makemigrations --check` limpo e `migrate` validado nos 6 aliases em modo dividido.
 - **Correção adicional de arquitetura**: `notifications/invitations.py` fazia `select_related("event")` (JOIN com `outbox_event` de outro banco) e `select_for_update()` fora do alias dono. Agora `issue_token_locked()` abre `atomic(using=auth)` para travar o convite e emitir o token; `prepare_invitation_retry()` trava a notificação no alias `notifications` e carrega o evento em consulta separada no alias `default`. Guarda em `thesismanagerbackend/tests/test_invitation_cross_database.py`.
 - **Validação pós-merge**: backend 669 testes (`0 errors`, mesmas 6 falhas SQLite conhecidas), E2E 25/25, frontend 220 testes unitários, `tsc` limpo.
+
+## Validação em PostgreSQL real (modo dividido) — 2026-11-23
+
+Executada a suíte contra os 6 bancos separados do Compose (porta 5433), com `DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings` e `SERVICE_DATABASES_SHARED=False`: **674 testes, OK**. As 6 falhas do SQLite desapareceram (`nulls_distinct` e `JSONField`), confirmando que eram artefatos do banco de teste.
+
+O modo dividido revelou problemas que o modo compartilhado escondia, todos corrigidos com teste que falha antes/sucesso depois:
+
+- `TEST_RUNNER` `ServiceAwareTestRunner`: os testes declaravam apenas `default` e o Django bloqueava escritas nos outros aliases (`DatabaseOperationForbidden`). Agora todos os aliases são declarados quando `SERVICE_DATABASES_SHARED=False`.
+- Helpers e fixtures de teste passaram a gravar FKs cross-service via `*_id` (`course_id`, `advisor_id`, `author_id`, `uploaded_by_id`, `external_invitation_id`).
+- `select_related("external_invitation")` em fixtures/testes substituído por consulta separada no alias `auth`.
+- `cleanup_events`: o `SET_NULL` de `Notification.event` e o `DELETE` de `outbox_event` agora rodam nos aliases donos (collector do Django usava o alias do evento).
+- `resend_external_member_invitation`: corrigida atribuição cross-service que restava (`member.external_invitation_id = invitation.pk`).
+- `accounts/tests/test_audit_integrity`: cursor resolvido via `database_for_model(AuditLog)`.
+- Espelhamento SQLite (E2E) preservado: `test_fast` 185 testes OK, E2E 25/25, health do stack real 200.

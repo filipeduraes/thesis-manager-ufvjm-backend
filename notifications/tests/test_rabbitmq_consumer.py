@@ -41,8 +41,8 @@ class HandleDeliveryTests(TestCase):
         course = Course.objects.create(department=department, name="CC", code="CC001")
         student = create_user("aluno@ufvjm.edu.br", "Ana Aluna", ProfileRole.STUDENT)
         advisor = create_user("orientador@ufvjm.edu.br", "Olga Orientadora", ProfileRole.ADVISOR)
-        thesis = Thesis.objects.create(course=course, advisor=advisor, title="Tese", status=ThesisStatus.APPROVED)
-        ThesisAuthor.objects.create(thesis=thesis, author=student, position=1, is_main_author=True)
+        thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title="Tese", status=ThesisStatus.APPROVED)
+        ThesisAuthor.objects.create(thesis=thesis, author_id=student.pk, position=1, is_main_author=True)
         with transaction.atomic():
             event = record_thesis_published(thesis)
         self.envelope = EventEnvelope.from_outbox(event)

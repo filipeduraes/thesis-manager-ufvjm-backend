@@ -150,7 +150,7 @@ class DefenseOutboxEventTests(TestCase):
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         self.evaluator1 = create_user("ev1@ufvjm.edu.br", "Avaliador Um", ProfileRole.ADVISOR)
         self.evaluator2 = create_user("ev2@ufvjm.edu.br", "Avaliador Dois", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.meeting_link = "https://meet.example.com/sala-sigilosa"
 
     def _schedule_and_start(self) -> Defense:

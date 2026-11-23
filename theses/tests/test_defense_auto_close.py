@@ -46,7 +46,7 @@ class DefenseAutoCloseTests(TestCase):
         self.evaluator1 = create_user("ev1@ufvjm.edu.br", "Avaliador 1", ProfileRole.ADVISOR)
         self.evaluator2 = create_user("ev2@ufvjm.edu.br", "Avaliador 2", ProfileRole.ADVISOR)
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Suplente", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)
@@ -151,7 +151,7 @@ class DefenseAutoCloseTests(TestCase):
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         self._evaluate(self.evaluator1, self.member1, DefenseResult.REJECTED)
         self._evaluate(self.evaluator2, self.member2, DefenseResult.REJECTED)
         self.assertEqual(self._defense_status(), DefenseStatus.IN_PROGRESS)

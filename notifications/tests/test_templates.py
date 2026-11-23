@@ -101,7 +101,9 @@ class NotificationConstraintTests(TestCase):
             self.event = record_event(EventType.THESIS_PUBLISHED, AggregateRef("Thesis", thesis_id), payload)
 
     def _create(self, **recipient: object) -> Notification:
-        return Notification.objects.create(template=self.template, event=self.event, subject="Assunto", body="Corpo", **recipient)
+        if "user" in recipient:
+            recipient["user_id"] = recipient.pop("user").pk
+        return Notification.objects.create(template=self.template, event_id=self.event.pk, subject="Assunto", body="Corpo", **recipient)
 
     def test_same_user_cannot_receive_same_event_twice(self) -> None:
         self._create(user=self.user)
@@ -119,8 +121,8 @@ class NotificationConstraintTests(TestCase):
         self.assertEqual(Notification.objects.filter(event=self.event).count(), 2)
 
     def test_notifications_without_event_are_not_deduplicated(self) -> None:
-        Notification.objects.create(template=self.template, user=self.user, subject="A", body="B")
-        Notification.objects.create(template=self.template, user=self.user, subject="A", body="B")
+        Notification.objects.create(template=self.template, user_id=self.user.pk, subject="A", body="B")
+        Notification.objects.create(template=self.template, user_id=self.user.pk, subject="A", body="B")
         self.assertEqual(Notification.objects.filter(event__isnull=True).count(), 2)
 
     def test_notification_requires_a_recipient(self) -> None:

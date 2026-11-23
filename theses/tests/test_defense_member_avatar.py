@@ -51,14 +51,14 @@ class DefenseMemberAvatarTests(TestCase):
         self.google_user = create_user("google@ufvjm.edu.br", "Com Foto", ProfileRole.ADVISOR)
         self.plain_user = create_user("plain@ufvjm.edu.br", "Sem Conta", ProfileRole.ADVISOR)
         link_google_account(self.google_user, PICTURE_URL)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.google_member = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.google_user, actor=self.admin)
         self.plain_member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.plain_user, actor=self.admin)
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        self.external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        self.external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         self.external_principal = ExternalInvitationPrincipal(invitation)
         self.client = APIClient()
 

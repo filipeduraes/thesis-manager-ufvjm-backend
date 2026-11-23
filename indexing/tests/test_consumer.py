@@ -65,8 +65,8 @@ class IndexingConsumerTests(TestCase):
         student = create_user("aluno@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
         self.student = student
         self.thesis = Thesis.objects.create(
-            course=course,
-            advisor=advisor,
+            course_id=course.pk,
+            advisor_id=advisor.pk,
             title="Sistema de indexação",
             abstract="Resumo sobre busca.",
             status=ThesisStatus.PUBLISHED,
@@ -75,7 +75,7 @@ class IndexingConsumerTests(TestCase):
             defense_date=date(2026, 1, 1),
             defense_year=2026,
         )
-        ThesisAuthor.objects.create(thesis=self.thesis, author=student, position=1, is_main_author=True)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=student.pk, position=1, is_main_author=True)
         content = pdf_with_text("PalavraExotica")
         stored_name = default_storage.save(f"theses/test/{uuid4().hex}.pdf", ContentFile(content))
         self.stored_file = StoredFile.objects.create(
@@ -85,7 +85,7 @@ class IndexingConsumerTests(TestCase):
             sha256=hashlib.sha256(content).digest(),
             storage_path=stored_name,
         )
-        ThesisFile.objects.create(thesis=self.thesis, stored_file=self.stored_file, version_number=1, is_current=True, uploaded_by=student)
+        ThesisFile.objects.create(thesis=self.thesis, stored_file=self.stored_file, version_number=1, is_current=True, uploaded_by_id=student.pk)
 
     def envelope(self) -> EventEnvelope:
         """Build a valid indexing event for the test stored file."""
