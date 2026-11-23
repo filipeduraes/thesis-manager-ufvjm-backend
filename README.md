@@ -246,18 +246,20 @@ python manage.py test
 ```bash
 # Rápida (~1 min): rode a cada mudança. Regras de domínio, permissões,
 # roteamento entre serviços, transições de estado e contratos de API.
-DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e python manage.py test_fast
+python manage.py test_fast
 
 # Completa (~8 min): depois de mudanças grandes, antes de finalizar/mergear.
-DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e python manage.py test
+python manage.py test
 
 # E2E (frontend): inclui os fluxos de UI; ~1 min.
 cd ../thesis-manager-ufvjm-frontend && npm run test:e2e
 ```
 
-As duas suítes usam `settings_e2e` (SQLite, cache em memória, e-mail em memória). O
-banco, o cache e o diretório de mídia são derivados do PID do processo, então
-**dois agentes podem rodar `test_fast`/`test` ao mesmo tempo sem conflito**.
+Os comandos `test_fast` e `test` selecionam `settings_e2e` automaticamente
+(SQLite, cache em memória, e-mail em memória), a menos que
+`DJANGO_SETTINGS_MODULE` já esteja definido no ambiente. O banco, o cache e o
+diretório de mídia são derivados do PID do processo, então **dois agentes podem
+rodar `test_fast`/`test` ao mesmo tempo sem conflito**.
 
 Para duas suítes E2E simultâneas, use o script que aloca portas livres e nomes
 únicos (o `npm run test:e2e` comum usa as portas padrão 8001/3001/8002):

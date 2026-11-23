@@ -823,6 +823,33 @@ def verify_stored_file_integrity(stored_file: StoredFile) -> bool:
     return digest.digest() == bytes(stored_file.sha256)
 
 
+def verify_publication_authorization(thesis: Thesis) -> bool:
+    """
+    Verify the SHA-256 of the validated publication authorization file.
+
+    The human validation still decides whether the term is acceptable; this
+    check guarantees that the PDF validated by the coordinator is byte-for-byte
+    the one used when the thesis is published.
+
+    Args:
+        thesis: Thesis whose authorization must be verified.
+
+    Returns:
+        bool: True when a validated authorization exists and its file is intact.
+    """
+    document = (
+        thesis.documents.filter(
+            type=DocumentType.PUBLICATION_AUTHORIZATION,
+            status=DocumentStatus.VALIDATED,
+        )
+        .select_related("stored_file")
+        .first()
+    )
+    if document is None:
+        return False
+    return verify_stored_file_integrity(document.stored_file)
+
+
 def verify_thesis_file_integrity(thesis_file: ThesisFile) -> bool:
     """
     Verify a thesis version and record the verification timestamp.
@@ -1398,8 +1425,8 @@ def publish_if_ready(thesis: Thesis, trigger: str, request: HttpRequest | None =
     Called at the end of the steps that can complete the conditions (defense
     close, manual result, authorization validation and corrected version). It
     never raises for an unmet condition: the step that called it must still
-    succeed. A current PDF whose SHA-256 no longer matches blocks the
-    publication and is logged.
+    succeed. A current PDF or a validated publication authorization whose
+    SHA-256 no longer matches blocks the publication and is logged.
 
     Args:
         thesis: Thesis that may have become publishable.
@@ -1417,6 +1444,9 @@ def publish_if_ready(thesis: Thesis, trigger: str, request: HttpRequest | None =
     current = thesis.files.filter(is_current=True).select_related("stored_file").first()
     if not verify_thesis_file_integrity(current):
         logger.warning("Automatic publication of thesis %s blocked: integrity check failed", thesis.pk)
+        return False
+    if not verify_publication_authorization(thesis):
+        logger.warning("Automatic publication of thesis %s blocked: authorization integrity check failed", thesis.pk)
         return False
     _perform_publication(thesis, current, None, trigger, request)
     logger.info("Thesis %s published automatically (trigger=%s)", thesis.pk, trigger)
@@ -1454,6 +1484,8 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     current = thesis.files.filter(is_current=True).select_related("stored_file").first()
     if not verify_thesis_file_integrity(current):
         raise ValidationError("O arquivo da monografia falhou na verificação de integridade.")
+    if not verify_publication_authorization(thesis):
+        raise ValidationError("O termo de autorização falhou na verificação de integridade.")
     return _perform_publication(thesis, current, user, PublicationTrigger.MANUAL, request)
 
 

@@ -172,6 +172,14 @@ senha local sem decisão explícita e documentada.
 | Proteção contra exclusão de publicado | **Implementado** | `Thesis.delete`, `ThesisQuerySet.delete` e um receptor `pre_delete` recusam excluir monografia publicada ou já publicada (cobre exclusão em lote, cascata e Django admin). `DELETE /api/v1/theses/<id>` faz exclusão lógica só de monografias nunca publicadas (admin/coordenação do curso) e responde 400 para publicadas, mesmo para admin. |
 | Despublicação | **Implementado** | `POST /api/v1/theses/<id>/unpublish` com `reason` obrigatório (admin/coordenação do curso): `PUBLISHED → ARCHIVED`, sai do repositório na hora (cache invalidado), mantém arquivos, `published_at` e histórico; não volta a ser publicada automaticamente. Republicação ainda não existe. |
 
+### Integridade do termo de autorização (2026-11-23)
+
+Antes da publicação automática ou manual, o SHA-256 do PDF do termo de
+autorização validado é recalculado. Se o arquivo tiver sido alterado desde a
+validação, a publicação é bloqueada (log de aviso com identificador do TCC no
+caminho automático, `ValidationError` no manual). A conferência da assinatura
+humana continua sendo responsabilidade do coordenador.
+
 ## 10. Relatórios e dashboards
 
 | Item | Status | Observações |

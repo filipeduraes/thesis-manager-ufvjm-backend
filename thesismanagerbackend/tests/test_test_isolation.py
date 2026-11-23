@@ -21,7 +21,7 @@ from django.test import SimpleTestCase
 
 _CODE = (
     "import json, os, django;"
-    "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'thesismanagerbackend.settings_e2e');"
+    "os.environ['DJANGO_SETTINGS_MODULE'] = 'thesismanagerbackend.settings_e2e';"
     "django.setup();"
     "from django.conf import settings;"
     "print(json.dumps({"
@@ -34,7 +34,7 @@ _CODE = (
 )
 
 
-def _load_settings(run_id: str | None = None, frontend_port: str | None = None) -> dict[str, str | int]:
+def _load_settings(run_id: str | None = None, frontend_port: str | None = None, settings_module: str | None = None) -> dict[str, str | int]:
     environment = dict(os.environ)
     environment.pop("E2E_RUN_ID", None)
     environment.pop("E2E_DB_NAME", None)
@@ -44,6 +44,8 @@ def _load_settings(run_id: str | None = None, frontend_port: str | None = None) 
         environment["E2E_RUN_ID"] = run_id
     if frontend_port is not None:
         environment["E2E_FRONTEND_PORT"] = frontend_port
+    if settings_module is not None:
+        environment["DJANGO_SETTINGS_MODULE"] = settings_module
     result = subprocess.run(
         [sys.executable, "-c", _CODE],
         cwd=Path(settings.BASE_DIR),
@@ -78,6 +80,24 @@ class ProcessIsolationTests(SimpleTestCase):
     def test_cors_origin_follows_the_frontend_port(self) -> None:
         values = _load_settings(run_id="cors-token", frontend_port="45678")
         self.assertIn("45678", str(values["cors"]))
+
+    def test_manage_py_selects_e2e_settings_for_test_commands(self) -> None:
+        import manage
+
+        self.assertEqual(
+            manage.default_settings_module(["manage.py", "test"]), "thesismanagerbackend.settings_e2e"
+        )
+        self.assertEqual(
+            manage.default_settings_module(["manage.py", "test_fast", "--verbosity=2"]),
+            "thesismanagerbackend.settings_e2e",
+        )
+        self.assertEqual(
+            manage.default_settings_module(["manage.py", "runserver"]), "thesismanagerbackend.settings"
+        )
+
+    def test_isolation_ignores_an_explicit_default_settings_module(self) -> None:
+        values = _load_settings(settings_module="thesismanagerbackend.settings")
+        self.assertIn(str(values["pid"]), str(values["media"]))
 
     def test_playwright_passes_frontend_port_to_backend(self) -> None:
         config = (Path(settings.BASE_DIR).parent / "thesis-manager-ufvjm-frontend" / "playwright.config.ts").read_text()
