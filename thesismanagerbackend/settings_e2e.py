@@ -41,3 +41,7 @@ CSRF_TRUSTED_ORIGINS = ["http://localhost:3001", "http://127.0.0.1:3001"]
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
 MEDIA_ROOT = Path("/tmp/opencode/e2e-media")
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+
+# O worker de extração roda em processo separado com cache em memória; o marker
+# de upload pode ficar órfão. O ambiente E2E não precisa dessa proteção.
+UPLOAD_TRACKING_ENABLED = False

@@ -49,6 +49,8 @@ def upload_in_progress(sha256_hex: str) -> bool:
     Returns:
         bool: True when another upload/extraction is still running.
     """
+    if not getattr(settings, "UPLOAD_TRACKING_ENABLED", True):
+        return False
     return cache.get(upload_cache_key(sha256_hex)) is not None
 
 
