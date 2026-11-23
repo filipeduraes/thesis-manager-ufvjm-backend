@@ -19,6 +19,7 @@ from accounts.views import AdminUserDetailView, AdminUsersView, _dev_login_user
 from academic.services import create_course, delete_course, update_course
 from academic.views import AdminDepartmentDetailView, AdminDepartmentsView
 from notifications.delivery import retry_pending_notifications
+from theses.defense_committee import regenerate_external_member_invitation, resend_external_member_invitation
 
 
 def _source(target: Callable[..., object]) -> str:
@@ -73,3 +74,13 @@ class TransactionAliasTests(SimpleTestCase):
 
     def test_dev_login_uses_auth_alias(self) -> None:
         _assert_explicit_atomic(_dev_login_user)
+
+    def test_external_invitation_resend_locks_on_auth_alias(self) -> None:
+        source = _source(resend_external_member_invitation)
+        self.assertIn("with transaction.atomic(using=invitation_db)", source)
+        self.assertIn("ExternalInvitation.objects.using(invitation_db).select_for_update()", source)
+
+    def test_external_invitation_regeneration_locks_on_auth_alias(self) -> None:
+        source = _source(regenerate_external_member_invitation)
+        self.assertIn("with transaction.atomic(using=invitation_db)", source)
+        self.assertIn("ExternalInvitation.objects.using(invitation_db).select_for_update()", source)

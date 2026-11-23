@@ -1,11 +1,11 @@
 """
-Configuração isolada para a suíte End-to-End.
+Isolated configuration for the end-to-end suite.
 
-Não depende de PostgreSQL, Redis nem RabbitMQ: usa SQLite, cache em memória e
-backend de e-mail em memória. DEBUG permanece ligado para liberar o login de
-teste (`/api/v1/auth/dev-login`) e o frontend pode ser iniciado com `npm start`.
+It does not depend on PostgreSQL, Redis or RabbitMQ: it uses SQLite, an in-memory
+cache and an in-memory e-mail backend. DEBUG stays enabled for the development
+login (`/api/v1/auth/dev-login`) and the frontend can be started with `npm start`.
 
-Uso:
+Usage:
     DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e \
         python manage.py migrate --noinput
     DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e \

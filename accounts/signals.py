@@ -3,6 +3,7 @@ Signal handlers that maintain session and audit records.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from django.contrib.auth.signals import (
@@ -55,7 +56,7 @@ def handle_user_logged_in(sender, request, user, **kwargs) -> None:
         entity_id=str(user.pk),
         request=request,
         actor_user=user,
-        metadata={"session_key": session_key},
+        metadata={"sessionKeyHash": hashlib.sha256(session_key.encode()).hexdigest()[:16]},
     ))
 
 
@@ -82,7 +83,7 @@ def handle_user_logged_out(sender, request, user, **kwargs) -> None:
         entity_id=str(user.pk),
         request=request,
         actor_user=user,
-        metadata={"session_key": session_key},
+        metadata={"sessionKeyHash": hashlib.sha256(session_key.encode()).hexdigest()[:16]},
     ))
 
 

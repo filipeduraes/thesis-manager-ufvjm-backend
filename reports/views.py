@@ -11,6 +11,7 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.renderers import BaseRenderer
+from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -18,7 +19,8 @@ from rest_framework.views import APIView
 from accounts.audit_identifiers import EntityType
 from accounts.audit_entry import AuditEntry
 from accounts.models import AuditAction
-from accounts.permissions import IsCoordinatorOrAdmin
+from accounts.authentication import ExternalInvitationPrincipal
+from accounts.models import ProfileRole
 from accounts.services import record_audit
 from reports.csv_export import render_overview_csv
 from reports.models import ReportExecution
@@ -31,6 +33,24 @@ logger = logging.getLogger(__name__)
 PDF_CONTENT_TYPE = "application/pdf"
 
 
+class CanViewReports(BasePermission):
+    """Require a business ADMIN/COORDINATOR role; plain staff is not a report role."""
+
+    message = "Acesso restrito a coordenadores e administradores."
+
+    def has_permission(self, request: Request, view: APIView) -> bool:
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated or not user.is_active:
+            return False
+        if isinstance(user, ExternalInvitationPrincipal):
+            return False
+        has_role = getattr(user, "has_active_role", None)
+        return bool(
+            getattr(user, "is_superuser", False)
+            or (callable(has_role) and (has_role(ProfileRole.ADMIN) or has_role(ProfileRole.COORDINATOR)))
+        )
+
+
 class ReportsOverviewView(APIView):
     """
     ``GET /api/v1/reports/overview``: theses by course, advisor and defense year,
@@ -40,7 +60,7 @@ class ReportsOverviewView(APIView):
     coordinate. Advisors, students and external sessions receive 403.
     """
 
-    permission_classes = [IsCoordinatorOrAdmin]
+    permission_classes = [CanViewReports]
     throttle_scope = "reports"
 
     def get(self, request: Request) -> Response:
@@ -110,7 +130,7 @@ class ReportsOverviewPdfView(APIView):
     dashboard quota. Every export is recorded in ``audit_log`` as DOWNLOAD.
     """
 
-    permission_classes = [IsCoordinatorOrAdmin]
+    permission_classes = [CanViewReports]
     throttle_scope = "reports_export"
 
     def perform_content_negotiation(self, request: Request, force: bool = False) -> tuple[BaseRenderer, str]:

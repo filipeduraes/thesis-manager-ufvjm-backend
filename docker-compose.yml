@@ -10,8 +10,9 @@ x-backend-volumes: &backend-volumes
   - media_data:/app/media
 
 x-backend-environment: &backend-environment
-  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-only-change-before-deploy}
-  DEBUG: ${DEBUG:-True}
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-}
+  # DEBUG liga o login de teste sem Google; nunca use em ambiente acessível pela rede.
+  DEBUG: ${DEBUG:-False}
   DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,testserver}
   DATABASE_URL: postgres://${POSTGRES_USER:-thesis_manager_user}:${POSTGRES_PASSWORD:-local-development-only}@db:5432/${POSTGRES_DB:-thesis_manager}
   AUTH_DATABASE_URL: postgres://${POSTGRES_USER:-thesis_manager_user}:${POSTGRES_PASSWORD:-local-development-only}@db:5432/thesis_auth
@@ -34,7 +35,7 @@ x-backend-environment: &backend-environment
   TRUSTED_PROXY_COUNT: "1"
   TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
   ADMIN_ALLOWED_CIDRS: "127.0.0.1/32,::1/128,172.16.0.0/12"
-  SERVICE_TOKEN: ${SERVICE_TOKEN:-local-service-token-change-before-deploy}
+  SERVICE_TOKEN: ${SERVICE_TOKEN:-}
   MEDIA_ROOT: /app/media
   SERVICE_DATABASES_SHARED: "False"
   INDEXING_QUEUE: ${INDEXING_QUEUE:-indexing.thesis-events}
@@ -370,7 +371,7 @@ services:
       - notifications-service
       - reports-service
     ports:
-      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8000"
 
   frontend:
     profiles: ["frontend"]

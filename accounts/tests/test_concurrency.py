@@ -1,5 +1,5 @@
 """
-Testes das proteções de concorrência aplicadas em serviços de contas.
+Tests of the concurrency guards applied to account services.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from accounts.services import record_audit
 
 
 class AuditChainConcurrencyTests(TestCase):
-    """A cadeia de hash é serializada e permanece íntegra entre escritas."""
+    """The audit hash chain is serialized and stays intact across writes."""
 
     @patch("accounts.services.acquire_transaction_lock")
     def test_audit_append_uses_transaction_lock(self, acquire: object) -> None:

@@ -33,7 +33,7 @@ class StrictRelationRouter(ServiceDatabaseRouter):
 
 @override_settings(DATABASE_ROUTERS=["theses.tests.test_cross_service_assignments.StrictRelationRouter"])
 class CrossServiceAssignmentTests(TestCase):
-    """Usa mídia temporária: em produção o MEDIA_ROOT pode não ser gravável."""
+    """Use temporary media because production MEDIA_ROOT may be read-only here."""
 
     def setUp(self) -> None:
         self.media_root = tempfile.mkdtemp()

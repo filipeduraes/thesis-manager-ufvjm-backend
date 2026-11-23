@@ -95,6 +95,23 @@ class NotificationHandlerTests(TestCase):
         self.assertIn("Olá, Olga Orientadora.", message.body)
         self.assertIn("https://tcc.example.com", message.body)
 
+    def test_catalog_events_without_email_are_acknowledged(self) -> None:
+        for event_type, payload in (
+            (EventType.THESIS_TEXT_EXTRACTION_REQUESTED, {"thesisId": str(self.thesis.pk), "storedFileId": str(uuid.uuid4()), "trigger": "UPLOAD"}),
+            (EventType.THESIS_TEXT_EXTRACTED, {"thesisId": str(self.thesis.pk), "storedFileId": str(uuid.uuid4())}),
+            (EventType.THESIS_REPOSITORY_UPDATED, {"thesisId": str(self.thesis.pk), "trigger": "PUBLICATION"}),
+        ):
+            event = OutboxEvent.objects.create(
+                aggregate_type="Thesis",
+                aggregate_id=self.thesis.pk,
+                event_type=event_type,
+                payload=payload,
+            )
+            with self.subTest(event_type=event_type):
+                self.assertEqual(handle_event(envelope_for(event)), HandleOutcome.PROCESSED)
+        self.assertEqual(Notification.objects.count(), 0)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_defense_scheduled_notifies_authors_and_advisor_without_location(self) -> None:
         schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), modality=DefenseModality.REMOTE, location="https://meet.example.com/sala", actor=self.admin)
         self._handle_latest(EventType.DEFENSE_SCHEDULED)

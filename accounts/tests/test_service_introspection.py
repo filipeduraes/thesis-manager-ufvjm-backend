@@ -23,6 +23,15 @@ class ServiceIntrospectionTests(TestCase):
         response = self.client.get("/api/v1/auth/introspect", {"user_id": str(self.user.pk)})
         self.assertEqual(response.status_code, 401)
 
+    @override_settings(SERVICE_TOKEN="")
+    def test_endpoint_is_disabled_without_a_configured_token(self) -> None:
+        response = self.client.get(
+            "/api/v1/auth/introspect",
+            {"user_id": str(self.user.pk)},
+            headers={"X-Service-Token": "local-service-token-change-before-deploy"},
+        )
+        self.assertEqual(response.status_code, 401)
+
     def test_returns_identity_and_roles(self) -> None:
         response = self.client.get(
             "/api/v1/auth/introspect",

@@ -1,7 +1,17 @@
 """
 Authorization classes for administrative API endpoints.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from rest_framework.permissions import BasePermission
+
+# O DRF importa estas classes durante a inicialização das configurações. Trazer
+# rest_framework.views para runtime fecha um ciclo com as permissões padrão.
+if TYPE_CHECKING:
+    from rest_framework.request import Request
+    from rest_framework.views import APIView
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import ProfileRole
@@ -11,7 +21,7 @@ class IsInstitutionalUser(BasePermission):
     """Allow authenticated institutional accounts, excluding invitation sessions."""
     message = "Acesso restrito a usuários institucionais."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
         return bool(
             user
@@ -21,7 +31,8 @@ class IsInstitutionalUser(BasePermission):
         )
 
 
-def _has_role(user, roles: tuple[str, ...]) -> bool:
+# Sem django-stubs, o principal pode ser User, AnonymousUser ou ExternalInvitationPrincipal.
+def _has_role(user: Any, roles: tuple[str, ...]) -> bool:
     has_active_role = getattr(user, "has_active_role", None)
     if not callable(has_active_role):
         return False
@@ -37,7 +48,7 @@ class IsInstitutionalManager(BasePermission):
     """
     message = "Acesso restrito a administradores, coordenadores e orientadores."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
         if not user or not user.is_authenticated or not user.is_active:
             return False
@@ -56,7 +67,7 @@ class IsCoordinatorOrAdmin(BasePermission):
     """
     message = "Acesso restrito a coordenadores e administradores."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
         if not user or not user.is_authenticated or not user.is_active:
             return False
@@ -75,7 +86,7 @@ class IsInstitutionalAdmin(BasePermission):
     """
     message = "Acesso restrito a administradores."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
         if not user or not user.is_authenticated or not user.is_active:
             return False

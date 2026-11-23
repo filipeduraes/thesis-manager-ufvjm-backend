@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
-from rest_framework.test import APIClient
+from rest_framework.request import Request
+from rest_framework.test import APIClient, APIRequestFactory
+
+from accounts.directory import DIRECTORY_MAX_PAGE_SIZE, _pagination_cache_keys
 
 from accounts.models import ProfileRole, User, UserProfileRole
 from accounts.services import suggest_users
@@ -36,6 +39,10 @@ class UserDirectoryApiTests(TestCase):
         user = User.objects.create_user(email=email, password="senha123", name=name)
         UserProfileRole.objects.create(user=user, role=role)
         return user
+
+    def test_pagination_cache_keys_are_normalized(self) -> None:
+        request = Request(APIRequestFactory().get("/api/v1/public/advisors", {"page": "abc", "pageSize": "9999"}))
+        self.assertEqual(_pagination_cache_keys(request), (1, DIRECTORY_MAX_PAGE_SIZE))
 
     # ─── Public advisors list ───────────────────────────────────────────────
 

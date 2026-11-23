@@ -15,7 +15,7 @@ TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemC
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db", ADMIN_ALLOWED_CIDRS=["127.0.0.1/32"])
 class UserAcademicFieldsTests(TestCase):
-    """Matrícula, departamento e área de pesquisa are editable by administrators."""
+    """Registration number, department and research area are editable by administrators."""
 
     def setUp(self) -> None:
         self.client = APIClient()

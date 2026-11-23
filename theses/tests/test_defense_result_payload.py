@@ -20,7 +20,7 @@ from events.catalog import EventType
 from events.envelope import EventEnvelope
 from events.models import OutboxEvent, ProcessedEvent
 from theses.defense_committee import add_institutional_member
-from theses.defense_scheduling import close_defense, schedule_defense, start_defense
+from theses.defense_scheduling import cancel_defense, close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, DefenseMember, DefenseResult, DefenseStatus, Thesis, ThesisStatus
 from theses.services import record_defense_result
 from theses.tests.defense_helpers import confirm_committee, record_evaluation_without_auto_close
@@ -124,12 +124,12 @@ class DefenseResultPayloadTests(TestCase):
 
     def test_manual_thesis_level_result_does_not_leak_into_other_defenses(self) -> None:
         # record_defense_result grava defenseResult sem defenseId; não pode virar o resultado de uma banca.
-        start_defense(self.defense, actor=self.admin)
+        # Com banca ativa o resultado manual é recusado, então a banca é cancelada primeiro.
+        cancel_defense(self.defense, actor=self.admin)
         record_defense_result(self.coordinator, self.thesis, DefenseResult.REJECTED)
         self.assertIsNone(self._detail(self.admin)["result"])
 
     def test_cancelled_defense_has_no_result(self) -> None:
-        from theses.defense_scheduling import cancel_defense
         cancel_defense(self.defense, actor=self.admin)
         detail = self._detail(self.admin)
         self.assertEqual(detail["status"], DefenseStatus.CANCELLED)

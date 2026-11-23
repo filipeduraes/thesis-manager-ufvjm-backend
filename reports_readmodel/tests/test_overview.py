@@ -12,6 +12,9 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import ProfileRole, User, UserProfileRole
+from events.catalog import EventType
+from events.envelope import EventEnvelope
+from reports_readmodel.projections import handle_event
 from reports_readmodel.models import ReportFact
 from reports_readmodel.services import get_overview_payload
 from theses.models import ThesisStatus
@@ -26,6 +29,21 @@ class ReportsReadModelTests(TestCase):
         UserProfileRole.objects.create(user=self.coordinator, role=ProfileRole.COORDINATOR)
         self.client = APIClient()
         self.client.force_authenticate(user=self.coordinator)
+
+    def test_unsupported_event_version_is_rejected(self) -> None:
+        envelope = EventEnvelope(
+            event_id=uuid4(),
+            event_type=EventType.THESIS_SUBMITTED,
+            event_version="2.0",
+            occurred_at=timezone.now(),
+            aggregate_type="Thesis",
+            aggregate_id=uuid4(),
+            correlation_id=None,
+            causation_id=None,
+            payload={"thesisId": str(uuid4()), "submittedAt": timezone.now().isoformat()},
+        )
+        self.assertEqual(handle_event(envelope), "REJECTED")
+        self.assertEqual(ReportFact.objects.count(), 0)
 
     def test_aggregates_are_computed_from_facts(self) -> None:
         now = timezone.now()

@@ -11,10 +11,11 @@ from __future__ import annotations
 from django.db import transaction
 
 from accounts.concurrency import database_for_model
-from events.catalog import EventType
+from events.catalog import EventType, is_known_event
 from events.envelope import EventEnvelope
 from repository_readmodel.models import PublicAdvisor, PublicCourse, PublicKeyword, PublicThesis
 from theses.models import ProcessingStatus, Thesis, ThesisStatus
+from theses.repository_cache import invalidate_public_repository_cache_after_projection
 from theses.search_index import build_search_text
 
 
@@ -103,6 +104,8 @@ def handle_event(envelope: EventEnvelope) -> str:
     """
     if envelope.event_type not in SUPPORTED_EVENTS:
         return "SKIPPED"
+    if not is_known_event(envelope.event_type, envelope.event_version):
+        return "REJECTED"
     expected = {"thesisId"} if envelope.event_type == EventType.THESIS_TEXT_EXTRACTED else {"thesisId", "trigger"} if envelope.event_type == EventType.THESIS_REPOSITORY_UPDATED else {"thesisId", "referenceCode", "publishedAt"}
     if set(envelope.payload) != expected:
         return "REJECTED"
@@ -114,6 +117,7 @@ def handle_event(envelope: EventEnvelope) -> str:
         return "DUPLICATE"
     with transaction.atomic(using=database_for_model(PublicThesis)):
         project_thesis(envelope.payload["thesisId"])
+    invalidate_public_repository_cache_after_projection()
     try:
         with transaction.atomic(using=marker_db):
             ProcessedEvent.objects.using(marker_db).create(consumer_group="repository", event_id=envelope.event_id)

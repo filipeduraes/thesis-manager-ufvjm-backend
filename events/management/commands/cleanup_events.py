@@ -50,15 +50,17 @@ class Command(BaseCommand):
 
         removed_events = 0
         while True:
-            with transaction.atomic():
-                ids = list(OutboxEvent.objects.filter(status=OutboxStatus.COMPLETED, published_at__lt=cutoff).values_list("pk", flat=True)[:batch_size])
-                if not ids:
-                    break
-                # O SET_NULL de Notification.event deve rodar no banco das
-                # notificações; o collector do Django usaria o alias do evento.
-                notification_db = database_for_model(Notification)
+            ids = list(OutboxEvent.objects.filter(status=OutboxStatus.COMPLETED, published_at__lt=cutoff).values_list("pk", flat=True)[:batch_size])
+            if not ids:
+                break
+            # Não existe transação atômica entre bancos de serviços diferentes:
+            # cada alteração roda no alias dono. Se a exclusão falhar, as notificações
+            # apenas perdem a referência ao evento, sem perder o histórico.
+            notification_db = database_for_model(Notification)
+            with transaction.atomic(using=notification_db):
                 Notification.objects.using(notification_db).filter(event_id__in=ids).update(event_id=None)
-                event_db = database_for_model(OutboxEvent)
+            event_db = database_for_model(OutboxEvent)
+            with transaction.atomic(using=event_db):
                 removed_events += OutboxEvent.objects.using(event_db).filter(pk__in=ids)._raw_delete(event_db)
 
         removed_markers = 0

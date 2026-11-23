@@ -1,395 +1,312 @@
-# Thesis Manager UFVJM Backend
+# Backend do Gerenciador de TCCs da UFVJM
 
-Backend do sistema de gerenciamento de Trabalhos de Conclusão de Curso (TCC), desenvolvido com Django e Django REST Framework.
+Grupo:
 
-## Requisitos
+- Ana Carolina Pereira dos Santos
+- Ana Júlia Oliveira Araújo
+- Camila Santos Barbosa
+- Deivid Camargos Batista
+- Filipe Hipólito Diniz Durães
 
-Em Debian, Ubuntu ou Linux Mint, instale os pacotes necessários:
+Professor: Alessandro Vivas Andrade
+
+Disciplina: Sistemas Distribuídos
+
+## Visão geral
+
+Backend do Gerenciador de TCCs da UFVJM. O aluno envia o PDF, o orientador dá o parecer, a banca julga e a coordenação publica o trabalho aprovado no acervo público. A interface fica no repositório `thesis-manager-ufvjm-frontend`.
+
+O sistema cuida de:
+
+- submissão com PDF, validação e SHA-256;
+- parecer do orientador e agendamento de bancas;
+- avaliação dos membros e fechamento do resultado;
+- publicação no repositório público e relatórios para a coordenação.
+
+## Autenticação
+
+O projeto não mantém login com senha, hash de senha nem recuperação de senha. Essa é uma decisão de política. A credencial é conferida pelo Google Workspace institucional e o backend recebe a sessão já autenticada, sem guardar dados sensíveis que a UFVJM já mantém no provedor.
+
+O login usa django-allauth em modo headless. O backend valida o domínio institucional, o email_verified e o hd devolvidos pelo Google. O primeiro login cria o usuário local com o papel de aluno. Os papéis seguintes vêm das tabelas do banco, nunca do cliente.
+
+Quando não há credenciais do Google disponíveis, o modo de teste com DEBUG=True libera o login de desenvolvimento descrito mais adiante.
+
+## Tecnologias
+
+Python 3.12, Django 6.1, Django REST Framework 3.18 e django-allauth 65. PostgreSQL 16 guarda os dados, Redis 7 cuida de sessão e cache, e RabbitMQ 4.1 move os eventos. O texto dos PDFs sai com pypdf e os relatórios em PDF saem com ReportLab. O frontend usa React 19 e fica em outro repositório.
+
+## Arquitetura
+
+Cada processo sai da mesma imagem Django. Cada app grava no banco do seu serviço por meio de `thesismanagerbackend.routers.ServiceDatabaseRouter`. Quando um processo precisa de um id de outro serviço, ele faz uma consulta separada e filtra a coluna local.
+
+O diagrama mostra as peças e onde cada uma entra. Azul são a API e os serviços. Âmbar são os bancos e o Redis. Roxo é a fila de eventos.
+
+![Arquitetura do backend: entrada, serviços, bancos PostgreSQL, Redis, RabbitMQ e consumidores](readme/arquitetura.png)
+
+| Peça | Papel |
+|---|---|
+| `backend` | API principal, com `/api/v1`, `/admin/` e `/health`. |
+| Serviços | Autenticação, monografias, bancas, repositório, notificações e relatórios. Cada um tem API e banco próprios. |
+| `gateway` | nginx que distribui as chamadas entre as APIs no perfil `microservices`. |
+| Eventos | A outbox alimenta o RabbitMQ. Consumidores enviam e-mail, extraem texto, fecham bancas e atualizam os bancos de leitura. |
+| `init` | Cria os bancos, aplica migrações e declara as filas na primeira subida. |
+
+## Rodando o projeto
+
+### 1. Preparar o Linux
+
+Os comandos são para Ubuntu, Debian ou Linux Mint.
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-venv python3-pip git postgresql postgresql-contrib redis-server docker.io docker-compose-v2
-```
-
-Com Docker Compose, PostgreSQL, Redis e RabbitMQ serão iniciados em containers; os serviços instalados no sistema não são usados nesse modo.
-
-Os comandos `docker compose` abaixo são executados sem `sudo`. Para isso, adicione seu usuário ao grupo `docker` uma única vez e abra uma nova sessão:
-
-```bash
+sudo apt install -y git curl ca-certificates docker.io docker-compose-plugin
 sudo usermod -aG docker "$USER"
 ```
 
-## Configuração
+Saia da sessão e entre de novo, ou rode `newgrp docker`, para o grupo valer. Se `docker compose` ainda pedir senha, use `sudo` na frente dos comandos. Para não digitar a senha, libere só o binário do Docker:
 
-Clone o backend e entre na pasta:
+```bash
+echo "$(whoami) ALL=(root) NOPASSWD: /usr/bin/docker" | sudo tee /etc/sudoers.d/docker-nopass
+sudo chmod 440 /etc/sudoers.d/docker-nopass
+sudo visudo -c
+```
+
+### 2. Colocar os arquivos no lugar
+
+Clone o backend e o frontend lado a lado. O Compose monta o frontend a partir de `../thesis-manager-ufvjm-frontend`.
 
 ```bash
 git clone https://github.com/filipeduraes/thesis-manager-ufvjm-backend.git
 cd thesis-manager-ufvjm-backend
+cd ..
+git clone https://github.com/filipeduraes/thesis-manager-ufvjm-frontend.git
+cd thesis-manager-ufvjm-backend
 ```
 
-Copie `.env.example` para `.env` e configure `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET` para habilitar o login Google:
+Coloque o arquivo `.env` que acompanha a entrega na raiz do backend. Ele já vem com as credenciais do Google. Se você não recebeu esse arquivo, use o modelo:
 
 ```bash
 cp .env.example .env
 ```
 
-O arquivo `.env` contém valores locais e não deve ser enviado ao Git. Defina também a senha local do RabbitMQ em `RABBITMQ_DEFAULT_PASS` (só letras, números, `-` ou `_`) e repita a mesma senha em `RABBITMQ_URL`, usada quando o backend roda fora do Docker.
+### 3. Subir backend e frontend juntos
 
-No Google OAuth, cadastre este endereço de retorno:
-
-```text
-http://localhost:8000/accounts/google/login/callback/
-```
-
-O `redirect_uri` é derivado do `Host` da requisição ao backend (o allauth usa
-`build_absolute_uri`). Portanto o frontend **deve** chamar a API por
-`http://localhost:8000` — usar `http://127.0.0.1:8000` gera
-`http://127.0.0.1:8000/accounts/google/login/callback/` e o Google responde
-`Erro 400: redirect_uri_mismatch`. Se precisar trocar o host, cadastre também a
-URL correspondente no Google Cloud Console.
-
-### Decisão de autenticação: Google Workspace institucional
-
-O sistema **não mantém login e senha locais** para usuários institucionais. A
-autenticação é feita exclusivamente pelo Google Workspace, por meio do
-`django-allauth` em modo headless/social (`SOCIALACCOUNT_ONLY=True`). Além da
-autenticação do próprio Google, o backend valida o domínio institucional
-(`INSTITUTIONAL_EMAIL_DOMAIN`), o `email_verified` e o `hd` retornados pelo
-provedor.
-
-Assim, a credencial (login e senha) é conferida pelo provedor de identidade da
-UFVJM e a aplicação recebe apenas uma sessão já autenticada. Não armazenamos
-senhas, hashes de senha nem fluxo de recuperação no banco: isso reduz a
-superfície de exposição e evita duplicar a política de senhas da instituição.
-O primeiro login provê o usuário local e atribui o perfil padrão `STUDENT`; os
-demais perfis são derivados do banco, nunca do cliente.
-
-Membros externos da banca não possuem conta permanente: acessam por token
-temporário com TTL e escopo limitado, sem cadastro local.
-
-Essa decisão é tratada como política do projeto: o requisito de "login e senha"
-do enunciado é atendido por delegação ao IdP institucional, com integração ao
-domínio da faculdade. Não introduzir formulário de senha, cadastro local nem
-recuperação de senha sem uma decisão explícita e documentada.
-
-## Iniciar o backend com Docker Compose
-
-O comando padrão inicia PostgreSQL, Redis, RabbitMQ, Mailpit, o backend e os workers de eventos. Não requer o repositório do frontend:
-
-```bash
-docker compose up --build
-```
-
-Ordem de inicialização:
-
-1. `db`, `redis`, `rabbitmq` e `mailpit` sobem e passam nos healthchecks.
-2. `init` roda uma única vez `migrate` e `declare_event_topology` (exchange `thesis.events`, fila `notifications.thesis-events` e DLQ) e termina.
-3. Só depois que `init` termina com sucesso sobem:
-   - `backend`, em `http://localhost:8000`;
-   - `event-publisher`, que publica no RabbitMQ os eventos gravados na outbox;
-   - `notification-consumer`, que envia as notificações por e-mail. No Compose, todo e-mail vai para o Mailpit (veja "E-mail em desenvolvimento: Mailpit").
-
-Para parar, pressione `Ctrl+C`; os dados permanecem nos volumes Docker. O painel do RabbitMQ fica em `http://localhost:15672`, com o usuário e a senha de `RABBITMQ_DEFAULT_USER` e `RABBITMQ_DEFAULT_PASS`.
-
-Para acompanhar os eventos e as notificações:
-
-```bash
-docker compose logs -f event-publisher notification-consumer
-```
-
-### E-mail em desenvolvimento: Mailpit
-
-#### O que é e por que usamos
-
-O [Mailpit](https://mailpit.axllent.org/) é uma caixa de entrada falsa para desenvolvimento. No Docker Compose, todo e-mail que o sistema envia (notificações, convites de banca e qualquer outro) é entregue a ele e para por ali: **nenhuma mensagem sai para a internet**, mesmo quando o destinatário é um endereço real como `alguem@gmail.com`. Assim dá para testar o envio sem incomodar ninguém.
-
-O motivo principal é o convite do membro externo da banca. O código de acesso dele (`UFVJM-XXXX-XXXX-XXXX-XXXX`) só existe no e-mail: o banco guarda apenas o hash e a tabela `notification` guarda uma cópia com `UFVJM-****`. A alternativa comum em desenvolvimento, o backend de console do Django (`django.core.mail.backends.console.EmailBackend`), imprimiria o e-mail inteiro, com o código, no log dos containers. Com o Mailpit, o código fica só na caixa de entrada local.
-
-O serviço `mailpit` do `docker-compose.yml` usa a imagem `axllent/mailpit:v1.32.0` e sobe junto com os outros (`docker compose up`); não há nada para instalar.
-
-#### Abrir a caixa de entrada
-
-Com o Compose no ar, abra no navegador:
-
-```text
-http://localhost:8025
-```
-
-A interface só responde na própria máquina (`127.0.0.1`); outras máquinas da rede não a alcançam. A porta SMTP do Mailpit (1025) não é publicada: só os containers do Compose conseguem entregar e-mails a ele.
-
-#### Encontrar o convite e copiar o token
-
-1. Na lista, procure o e-mail com o assunto **"Convite para banca de TCC: <título da monografia>"**. A coluna "To" mostra o e-mail do membro externo. Para filtrar, digite na busca do topo `to:email-do-membro@exemplo.com` ou `subject:Convite`.
-2. Clique no e-mail para abri-lo. O código aparece logo abaixo de "Seu código de acesso é:", no formato `UFVJM-XXXX-XXXX-XXXX-XXXX`.
-3. Selecione o código e copie. Use-o em `http://localhost:3000/login`, opção **"Sou membro de banca externo"**, de preferência numa janela anônima para não misturar com a sua sessão.
-
-Cuidados:
-
-- Cada "Reenviar convite" ou "Gerar novo convite" envia um e-mail novo e invalida o código anterior. Use sempre o e-mail **mais recente** daquele destinatário; os mais antigos continuam na caixa, mas os códigos deles não funcionam mais.
-- O código funciona uma única vez. Depois de entrar, o convite fica como "utilizado" e é preciso gerar um novo convite.
-- Não cole o código em issues, chats ou commits. Ele é uma credencial de acesso, mesmo em desenvolvimento.
-
-#### Apagar os e-mails
-
-- **Um e-mail:** abra a mensagem e clique em **Delete** na barra de cima.
-- **Todos:** clique em **Delete all** na barra lateral esquerda.
-- **Pelo terminal** (apaga todos):
-
-  ```bash
-  curl -X DELETE http://localhost:8025/api/v1/messages
-  ```
-
-#### Os e-mails não ficam guardados
-
-O Mailpit guarda as mensagens num banco temporário dentro do próprio container, sem volume Docker. Elas **somem quando o container do Mailpit é parado, reiniciado ou recriado** (`docker compose down`, `docker compose restart mailpit`, `docker compose up --force-recreate`). Além disso, a caixa guarda no máximo 500 mensagens (`MP_MAX_MESSAGES`); acima disso, as mais antigas são apagadas.
-
-Se você precisa de um código que sumiu, não tente recuperá-lo: na tela da banca, use "Reenviar convite" (ou "Gerar novo convite", se o convite já foi usado ou expirou) e um código novo chega em instantes.
-
-#### A caixa está vazia: o que conferir
-
-Siga a ordem abaixo; cada passo elimina uma causa.
-
-1. **O consumidor de notificações está rodando?** É ele quem envia os e-mails.
-
-   ```bash
-   docker compose ps notification-consumer event-publisher
-   docker compose logs --tail 30 notification-consumer
-   ```
-
-   Os dois serviços devem estar `running`. No log, cada envio aparece como `Notification … sent`. Se o consumidor estava parado, os eventos esperam na fila do RabbitMQ: ao religá-lo (`docker compose start notification-consumer`), os e-mails chegam.
-
-2. **O `EMAIL_BACKEND` não está como console?** Dentro do Docker, o `docker-compose.yml` define o `EMAIL_BACKEND` e o SMTP diretamente, então as variáveis `EMAIL_*` do `.env` **não** valem nos containers. Para ver o valor que o consumidor está usando:
-
-   ```bash
-   docker compose exec notification-consumer python manage.py shell -c "from django.conf import settings; print(settings.EMAIL_BACKEND, settings.EMAIL_HOST)"
-   ```
-
-   O esperado é `django.core.mail.backends.smtp.EmailBackend mailpit`. O `python manage.py check` também avisa (`notifications.W001`) quando o backend de console está configurado.
-
-   Confira também o seu `.env`: se ele tiver `EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend` (o padrão de versões antigas do `.env.example`), troque pela linha atual do `.env.example` (`django.core.mail.backends.smtp.EmailBackend`). Ela só faz diferença quando o backend roda fora do Docker, mas com console o código do convite seria impresso no terminal. Fora do Docker, os e-mails também não chegam ao Mailpit, porque a porta SMTP dele não é publicada; para testar e-mails, rode o consumidor pelo Compose.
-
-3. **O envio falhou?** Procure `failed` no log do consumidor. As notificações que falharam ficam `FAILED` e podem ser reenviadas com:
-
-   ```bash
-   docker compose exec -T backend python manage.py consume_notifications --retry-pending
-   ```
-
-   Para convites, esse comando gera um código novo em vez de reenviar o antigo.
-
-4. **O Mailpit foi recriado depois do envio?** Nesse caso, a mensagem se perdeu (veja "Os e-mails não ficam guardados"). Reenvie o convite pela tela da banca.
-
-### E-mail em produção
-
-O `EMAIL_BACKEND` e o SMTP institucional (`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USE_TLS`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` e `DEFAULT_FROM_EMAIL`) são configurados à parte, nas variáveis do ambiente de implantação. Não use o Mailpit, o backend de console nem os valores do `.env.example` em produção.
-
-Para iniciar também o frontend em `http://localhost:3000`, clone `thesis-manager-ufvjm-frontend` ao lado do repositório do backend e use:
+Este é o caminho mais simples para ver o sistema funcionando:
 
 ```bash
 docker compose --profile frontend up --build
 ```
 
-Se o frontend já estiver rodando localmente com `npm start`, use o comando padrão do backend e mantenha o frontend local. Não inicie as duas cópias do frontend ao mesmo tempo na mesma porta.
+A aplicação abre em `http://localhost:3000`. A API fica em `http://localhost:8000`. O endpoint de saúde é `http://localhost:8000/health`.
 
-## Executar sem Docker
+Na primeira subida, o Compose espera PostgreSQL, Redis, RabbitMQ e Mailpit ficarem prontos. Depois o serviço `init` aplica as migrações e declara as filas. Só então sobem o backend e os consumidores.
 
-Crie e ative o ambiente virtual, instale as dependências e inicie os serviços locais:
+Os e-mails de desenvolvimento ficam no Mailpit, em `http://localhost:8025`. Nada é entregue para fora da máquina.
+
+### 4. Rodar só o backend
+
+Se você quiser usar o frontend que já está rodando na sua máquina, suba apenas o backend:
+
+```bash
+docker compose up --build
+```
+
+Comandos que ajudam nesse momento:
+
+```bash
+docker compose logs -f event-publisher notification-consumer
+docker compose exec -T backend python manage.py check
+docker compose exec -T backend python manage.py verify_audit_chain
+```
+
+## Configuração
+
+O `.env` que você recebeu já traz as credenciais do Google. Se precisar revisar algum valor, estas são as variáveis mais usadas:
+
+| Variável | Para que serve |
+|---|---|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Login institucional. Sem eles, o provedor Google não é registrado. |
+| `DJANGO_SECRET_KEY` | Pode ficar vazia no uso comum. Defina um valor fixo antes de usar o perfil `microservices`. |
+| `DEBUG` | Padrão `False`. Com `True`, libera o login de teste descrito mais adiante. |
+| `DATABASE_URL` e as outras `*_DATABASE_URL` | Bancos por serviço. O Compose monta as seis URLs. |
+| `REDIS_URL`, `RABBITMQ_URL` | Usadas quando os processos rodam fora do Compose. |
+| `ADMIN_ALLOWED_CIDRS`, `TRUSTED_PROXY_COUNT`, `TRUSTED_PROXY_CIDRS` | Origem de rede da área administrativa. |
+| `BACKEND_PORT`, `FRONTEND_PORT`, `GATEWAY_PORT` | Portas publicadas. Os padrões são 8000, 3000 e 8080. |
+
+O Compose também publica PostgreSQL na 5433, RabbitMQ na 5672, o painel do RabbitMQ em `http://localhost:15672` e o Mailpit em `http://localhost:8025`. Todas as portas ficam em `127.0.0.1`.
+
+Para login com Google, cadastre `http://localhost:8000/accounts/google/login/callback/` no Google Cloud Console. O allauth monta o `redirect_uri` a partir do `Host` da requisição, então use `localhost` na API.
+
+## Outros modos de execução
+
+### Entrar sem Google
+
+Se você não tem as credenciais do Google Workspace, suba o stack com `DEBUG=True` na linha de comando:
+
+```bash
+DEBUG=True docker compose --profile frontend up --build
+```
+
+Crie uma sessão de teste com papel de orientador:
+
+```bash
+curl -i -c cookies.txt -X POST http://localhost:8000/api/v1/auth/dev-login \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Orientador Teste","email":"orientador@ufvjm.edu.br","roles":["ADVISOR"]}'
+```
+
+Os papéis aceitos são `ADMIN`, `COORDINATOR`, `ADVISOR` e `STUDENT`. Com `roles: ["ADMIN"]`, o mesmo cookie serve para `/admin/` no navegador. A rota de login de teste deixa de existir quando `DEBUG` é `False`.
+
+### Rodar sem Docker
+
+Em versões mais antigas do Ubuntu e do Mint, o `apt` traz PostgreSQL 14. Para garantir a versão 16, use o repositório oficial:
+
+```bash
+sudo apt install -y postgresql-common python3 python3-venv python3-pip
+sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+sudo apt install -y postgresql-16 redis-server rabbitmq-server
+sudo systemctl enable --now postgresql redis-server rabbitmq-server
+```
+
+No Linux Mint, se o script da PGDG não reconhecer a distro, instale o pacote `postgresql-16` do repositório Ubuntu equivalente.
+
+Crie o usuário e o banco principal. O papel precisa de `CREATEDB`, porque o projeto cria cinco bancos de serviço:
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE thesis_manager_user WITH LOGIN CREATEDB PASSWORD 'local-development-only';"
+sudo -u postgres psql -c "CREATE DATABASE thesis_manager OWNER thesis_manager_user;"
+```
+
+Configure o RabbitMQ com o usuário e o vhost do `.env.example`:
+
+```bash
+sudo rabbitmqctl add_user thesis_events change-me
+sudo rabbitmqctl add_vhost thesis_manager
+sudo rabbitmqctl set_permissions -p thesis_manager thesis_events ".*" ".*" ".*"
+```
+
+Ajuste as seis URLs de banco no `.env` e ligue a separação de bancos:
+
+```dotenv
+DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_manager
+AUTH_DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_auth
+COMMITTEE_DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_committee
+REPOSITORY_DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_repository
+REPORTS_DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_reports
+NOTIFICATIONS_DATABASE_URL=postgres://thesis_manager_user:local-development-only@localhost:5432/thesis_notifications
+SERVICE_DATABASES_SHARED=False
+```
+
+Instale as dependências, crie os bancos de serviço e aplique as migrações:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-sudo systemctl enable --now postgresql redis-server
+python manage.py ensure_service_databases
+for alias in auth default committee repository reports notifications; do python manage.py migrate --database "$alias" --noinput; done
+python manage.py declare_event_topology
 ```
 
-Crie um usuário e banco PostgreSQL:
+Inicie a API:
 
 ```bash
-sudo -u postgres psql
-```
-
-No `psql`, execute, usando uma senha forte:
-
-```sql
-CREATE ROLE thesis_manager_user WITH LOGIN PASSWORD 'escolha-uma-senha-forte';
-CREATE DATABASE thesis_manager OWNER thesis_manager_user;
-```
-
-Configure `DATABASE_URL` no `.env` para esse usuário e banco:
-
-```dotenv
-DATABASE_URL=postgresql://thesis_manager_user:escolha-uma-senha-forte@localhost:5432/thesis_manager
-```
-
-Aplique as migrações e inicie o backend:
-
-```bash
-python manage.py migrate
 python manage.py runserver
 ```
 
-O backend estará disponível em `http://127.0.0.1:8000/`. Para iniciar o frontend, abra outro terminal na pasta `thesis-manager-ufvjm-frontend` e execute `npm start`.
-
-Os eventos assíncronos precisam de um RabbitMQ acessível em `RABBITMQ_URL`. Com ele no ar, declare a topologia uma vez e inicie os workers, cada um em um terminal:
+Os consumidores podem rodar em outros terminais:
 
 ```bash
-python manage.py declare_event_topology
 python manage.py publish_outbox_events
 python manage.py consume_notifications
+python manage.py consume_indexing_events
+python manage.py consume_adjudication_events
+python manage.py consume_repository_events
+python manage.py consume_reports_events
 ```
 
-Sem os workers, o backend continua funcionando: os eventos ficam pendentes na tabela `outbox_event` e são publicados quando o publicador subir.
+### Rodar as APIs separadas
 
-## Comandos úteis
+Cada serviço tem sua própria URLconf. Para subir as seis APIs e o gateway nginx:
 
 ```bash
-python manage.py createsuperuser
-python manage.py check
-python manage.py test
+DJANGO_SECRET_KEY=escolha-uma-chave-fixa docker compose --profile microservices up --build
 ```
 
-### Suítes de teste
+As APIs ficam nas portas 8011 a 8016. O gateway usa a 8080 porque o `backend` já ocupa a 8000. Os PDFs ficam no volume nomeado `media_data`. O comando `docker compose down -v` apaga bancos, filas, cache e uploads.
+
+## Testes
+
+Crie o ambiente virtual antes de rodar qualquer suíte, mesmo se você subiu o projeto com Compose:
 
 ```bash
-# Rápida (~1 min): rode a cada mudança. Regras de domínio, permissões,
-# roteamento entre serviços, transições de estado e contratos de API.
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Comece pela suíte rápida. Ela cobre regras de negócio, permissões e contratos principais:
+
+```bash
 python manage.py test_fast
+```
 
-# Completa (~8 min): depois de mudanças grandes, antes de finalizar/mergear.
+Depois rode a suíte completa. Leva cerca de oito minutos e ainda tem seis falhas conhecidas no SQLite, ligadas a diferenças do banco. Para ver tudo passando, use o `test-postgres.sh` mais adiante:
+
+```bash
 python manage.py test
-
-# E2E (frontend): inclui os fluxos de UI; ~1 min.
-cd ../thesis-manager-ufvjm-frontend && npm run test:e2e
 ```
 
-Os comandos `test_fast` e `test` selecionam `settings_e2e` automaticamente
-(SQLite, cache em memória, e-mail em memória), a menos que
-`DJANGO_SETTINGS_MODULE` já esteja definido no ambiente. O banco, o cache e o
-diretório de mídia são derivados do PID do processo, então **dois agentes podem
-rodar `test_fast`/`test` ao mesmo tempo sem conflito**.
-
-Para duas suítes E2E simultâneas, use o script que aloca portas livres e nomes
-únicos (o `npm run test:e2e` comum usa as portas padrão 8001/3001/8002):
+Para os testes da interface, instale as dependências do frontend e o navegador uma vez:
 
 ```bash
-cd ../thesis-manager-ufvjm-frontend && ./scripts/run-e2e-isolated.sh
+cd ../thesis-manager-ufvjm-frontend
+npm install
+npx playwright install chromium
+npm run test:e2e
 ```
 
-As variáveis `E2E_RUN_ID`, `E2E_DB_NAME`, `E2E_MEDIA_ROOT`, `E2E_BACKEND_PORT`,
-`E2E_FRONTEND_PORT` e `E2E_WORKER_PORT` permitem controlar manualmente o isolamento.
-
-### Suíte completa em PostgreSQL real (modo dividido)
-
-A suíte SQLite acima é rápida, mas **não detecta problemas cross-DB** (JOINs
-entre bancos de serviços diferentes). Para validar a separação real, use o
-script — ele exporta as 6 URLs, garante os bancos/migrações e roda a suíte:
+Se quiser validar as regras em PostgreSQL dividido, use o banco do Compose:
 
 ```bash
-./scripts/test-postgres.sh                          # completa (~8 min, 675 testes)
-./scripts/test-postgres.sh theses.tests             # só um app/módulo
-./scripts/test-postgres.sh --keepdb reports.tests   # opções repassadas ao Django
+cd ../thesis-manager-ufvjm-backend
+./scripts/test-postgres.sh
 ```
 
-**Pré-requisito:** o Postgres precisa estar acessível. O script **sobe o serviço
-`db` do Compose automaticamente** se ele não responder em `127.0.0.1:5433`
-(use `sudo docker` se o socket pedir permissão — veja a seção de sudo abaixo).
-Se preferir subir na mão antes:
+## Exemplos de API
+
+Rotas públicas:
 
 ```bash
-sudo docker compose up -d db     # só o banco; não precisa do stack inteiro
+curl http://localhost:8000/api/v1/session
+curl 'http://localhost:8000/api/v1/public/theses?q=sistemas'
+curl http://localhost:8000/api/v1/public/courses
 ```
 
-Os defaults apontam para o Postgres do Compose (`127.0.0.1:5433`, usuário
-`thesis_manager_user`, senha `local-development-only`). Sobrescreva
-`POSTGRES_HOST`, `POSTGRES_HOST_PORT`, `POSTGRES_USER` e `POSTGRES_PASSWORD` se o
-ambiente for diferente:
+Rotas autenticadas precisam do cookie. Escritas também precisam do CSRF. Com `DEBUG=True`, crie uma sessão de aluno e este comando responde:
 
 ```bash
-POSTGRES_PASSWORD=outra-senha ./scripts/test-postgres.sh theses.tests
+curl -c cookies-aluno.txt -X POST http://localhost:8000/api/v1/auth/dev-login \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Aluno Teste","email":"aluno@ufvjm.edu.br","roles":["STUDENT"]}'
+curl -b cookies-aluno.txt http://localhost:8000/api/v1/theses/me
 ```
 
-As falhas conhecidas do SQLite (`nulls_distinct`, `JSONField`) **não ocorrem** no
-Postgres. O `ServiceAwareTestRunner` declara automaticamente todos os aliases
-quando `SERVICE_DATABASES_SHARED=False`.
+O fluxo do aluno começa em `PUT /api/v1/theses/me`, segue com `POST /api/v1/theses/me/files` e termina em `POST /api/v1/theses/me/submit`. O relatório da coordenação fica em `GET /api/v1/reports/overview`.
 
-### Smoke no stack real (isolado)
+## Estrutura do diretório
 
-No frontend: `./scripts/smoke-stack.sh` sobe um stack Compose descartável
-(`COMPOSE_PROJECT_NAME=thesis-smoke`, portas 9000/9001/9025/5434), roda o smoke
-e destrói tudo com `down -v`. Se o Docker pedir senha, conceda acesso sem senha
-**apenas ao binário do Docker** (nunca compartilhe sua senha de sudo):
-
-```bash
-echo 'fhdd ALL=(root) NOPASSWD: /usr/bin/docker' | sudo tee /etc/sudoers.d/docker-nopass
-sudo chmod 440 /etc/sudoers.d/docker-nopass
-sudo visudo -c
+```text
+accounts/                 usuário, papéis, sessão, auditoria, diretórios
+academic/                 cursos, departamentos e vínculos
+theses/                   monografias, bancas, avaliações, upload, repositório
+events/                   catálogo, outbox, publicador, topologia RabbitMQ
+notifications/            templates, destinatários, consumidor e convites externos
+indexing/                 extração de texto e índice de busca
+adjudication/             cálculo assíncrono do resultado da banca
+repository_readmodel/     banco de leitura do repositório público
+reports/                  indicadores e exportações PDF/CSV
+reports_readmodel/        banco de leitura dos relatórios
+thesismanagerbackend/     configuração, roteador de bancos, URLs e utilitários
+docker/, scripts/         infraestrutura e scripts de teste
 ```
-
-Operação dos eventos assíncronos (no Docker, prefixe com `docker compose exec -T backend`):
-
-```bash
-python manage.py publish_outbox_events --once                 # publica um único lote (depuração)
-python manage.py publish_outbox_events --requeue-failed all   # devolve eventos FAILED para a fila
-python manage.py consume_notifications --retry-pending        # reenvia e-mails FAILED ou presos em PENDING
-python manage.py consume_indexing_events                      # extrai texto do PDF e atualiza o índice de busca
-python manage.py consume_adjudication_events                  # calcula o resultado da banca após a última avaliação
-python manage.py consume_repository_events                    # projeta publicações no banco do repositório
-python manage.py consume_reports_events                       # projeta fatos no banco de relatórios
-python manage.py verify_audit_chain                           # verifica a integridade do log de auditoria
-python manage.py cleanup_events --days 30 --dry-run            # simula a limpeza de eventos antigos
-python manage.py cleanup_events --days 30                      # remove eventos publicados e marcadores antigos
-```
-
-As filas `indexing.thesis-events` e `adjudication.thesis-events` (e suas DLQs) são declaradas por `declare_event_topology`. No Compose, os serviços `indexing-consumer` e `adjudication-consumer` rodam esses comandos.
-
-### APIs por serviço
-
-Além do gateway `backend` (URLconf completa), cada fronteira tem sua própria API quando o perfil `microservices` está ativo:
-
-| Serviço | Porta | URLconf |
-|---|---|---|
-| Autenticação e usuários | 8011 | `thesismanagerbackend.service_urls.auth` |
-| Monografias | 8012 | `thesismanagerbackend.service_urls.theses` |
-| Bancas e avaliação | 8013 | `thesismanagerbackend.service_urls.committee` |
-| Repositório público | 8014 | `thesismanagerbackend.service_urls.repository` |
-| Notificações | 8015 | `thesismanagerbackend.service_urls.notifications` |
-| Relatórios | 8016 | `thesismanagerbackend.service_urls.reports` |
-
-```bash
-docker compose --profile microservices up --build
-```
-
-Os uploads (PDFs, documentos e texto extraído) ficam no volume nomeado `media_data`, montado em `/app/media`. `docker compose down` preserva o volume; `docker compose down -v` remove banco, cache, fila **e arquivos enviados**. O diretório `./media` do checkout é ignorado pelo Git e não é mais usado pelo Compose.
-
-Cada serviço tem seu próprio banco (`AUTH_DATABASE_URL`, `REPOSITORY_DATABASE_URL`, etc.). O Compose define `SERVICE_DATABASES_SHARED=False`, ativando a separação física. Fora do Compose (desenvolvimento/E2E) o padrão é `True`, com todos os aliases no mesmo SQLite/Postgres.
-
-As leituras entre serviços foram convertidas para **snapshots locais** (`Thesis.advisor_name/course_name/course_code/main_author_name`, `Defense.thesis_snapshot`) e para consultas de tabela única roteadas ao banco dono; não há mais JOINs SQL entre bancos de serviços diferentes. `ServiceDatabaseRouter` está coberto por testes de separação.
-
-**Solução de problemas:** se você subiu o Compose com versões anteriores do roteador, os bancos `thesis_*` podem conter registros em `django_migrations` sem as tabelas correspondentes (o erro `relation "auth_group" does not exist`). Como o ambiente é de desenvolvimento sem dados reais, recrie os volumes:
-
-```bash
-sudo docker compose down -v
-sudo docker compose --profile frontend up --build
-```
-
-## Teste de fumaça: convite de membro externo por e-mail
-
-Roteiro manual com o RabbitMQ real e o Mailpit (os testes automatizados usam um broker em memória):
-
-1. Suba o ambiente com `docker compose --profile frontend up --build` e entre como quem gerencia uma banca agendada (administrador, coordenador do curso ou orientador da tese).
-2. Na tela da banca, adicione um membro externo. A tela mostra "Envio do convite em processamento" e, em seguida, "Convite enviado para <e-mail>"; nenhuma resposta da API traz o token.
-3. Abra `http://localhost:8025`, leia o e-mail "Convite para banca de TCC" e use o código na tela de login ("Sou membro de banca externo") em uma janela anônima.
-4. Em outro membro externo (ainda não usado), clique em "Reenviar convite": o código anterior deixa de funcionar na hora e chega um e-mail novo com outro código.
-5. Pare o consumidor (`docker compose stop notification-consumer`), reenvie o convite, confirme que a tela mostra o envio em processamento e religue-o (`docker compose start notification-consumer`): o e-mail chega uma única vez.
-6. Procure o token recebido em todos os lugares onde ele não pode aparecer (troque `UFVJM-XXXX-XXXX-XXXX-XXXX` pelo código do e-mail); todos os comandos devem retornar vazio ou `0`:
-
-```bash
-TOKEN=UFVJM-XXXX-XXXX-XXXX-XXXX
-docker compose logs --no-color | grep -c "$TOKEN"
-docker compose exec -T db psql -U thesis_manager_user -d thesis_manager -tAc "SELECT count(*) FROM outbox_event WHERE payload::text LIKE '%$TOKEN%'"
-docker compose exec -T db psql -U thesis_manager_user -d thesis_manager -tAc "SELECT count(*) FROM notification WHERE body LIKE '%$TOKEN%' OR body_html LIKE '%$TOKEN%' OR error_message LIKE '%$TOKEN%'"
-docker compose exec -T db psql -U thesis_manager_user -d thesis_manager -tAc "SELECT count(*) FROM audit_log WHERE metadata::text LIKE '%$TOKEN%' OR changes::text LIKE '%$TOKEN%'"
-```
-
-As mensagens publicadas também podem ser inspecionadas no painel do RabbitMQ (`http://localhost:15672`, fila `notifications.thesis-events`, "Get messages" com o consumidor parado): o payload de `defense.external_member_invited` só tem identificadores e o `trigger`.
-

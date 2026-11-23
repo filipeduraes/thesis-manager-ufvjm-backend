@@ -32,6 +32,14 @@ class DailyUploadThrottleTests(TestCase):
         self.assertTrue(throttle.allow_request(self._request(), None))
         self.assertFalse(throttle.allow_request(self._request(), None))
 
+    def test_concurrent_requests_cannot_exceed_the_limit(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        throttle = DailyUploadThrottle()
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            outcomes = list(pool.map(lambda _: throttle.allow_request(self._request(), None), range(5)))
+        self.assertEqual(sum(outcomes), 2)
+
     def test_budget_is_isolated_per_user(self) -> None:
         throttle = DailyUploadThrottle()
         throttle.allow_request(self._request(), None)

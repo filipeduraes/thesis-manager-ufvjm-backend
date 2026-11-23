@@ -78,6 +78,18 @@ def invalidate_public_repository_cache() -> None:
     transaction.on_commit(_rotate_version)
 
 
+def invalidate_public_repository_cache_after_projection() -> None:
+    """
+    Rotate the version after the asynchronous read model has been committed.
+
+    The source-side invalidation happens before the projector writes, so a
+    search between both events could cache stale projected data under the new
+    version. This second rotation closes that window without registering an
+    ``on_commit`` callback in the long-running consumer.
+    """
+    _rotate_version()
+
+
 def search_cache_key(filters: PublicSearchFilters, page: str, page_size: str) -> str:
     """
     Build the ``busca:<hash_da_query>`` key of a search page.

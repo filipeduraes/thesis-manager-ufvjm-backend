@@ -8,7 +8,12 @@ own URL and only the owning service writes to its tables.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django.conf import settings
+
+if TYPE_CHECKING:
+    from django.db import models
 
 SERVICE_APP_ALIASES: dict[str, str] = {
     # Apps de identidade e suas dependências do Django/Allauth precisam
@@ -62,7 +67,7 @@ class ServiceDatabaseRouter:
         """
         return SERVICE_APP_ALIASES.get(app_label, "default")
 
-    def db_for_read(self, model, **hints) -> str | None:
+    def db_for_read(self, model: type[models.Model], **hints: object) -> str | None:
         """
         Choose the read database of a model.
 
@@ -77,7 +82,7 @@ class ServiceDatabaseRouter:
             return None
         return self._alias_for(model._meta.app_label)
 
-    def db_for_write(self, model, **hints) -> str | None:
+    def db_for_write(self, model: type[models.Model], **hints: object) -> str | None:
         """
         Choose the write database of a model.
 
@@ -90,7 +95,7 @@ class ServiceDatabaseRouter:
         """
         return self.db_for_read(model, **hints)
 
-    def allow_relation(self, obj1, obj2, **hints) -> bool | None:
+    def allow_relation(self, obj1: models.Model, obj2: models.Model, **hints: object) -> bool | None:
         """
         Allow relations only inside the same physical database.
 
@@ -106,7 +111,7 @@ class ServiceDatabaseRouter:
             return None
         return obj1._state.db == obj2._state.db
 
-    def allow_migrate(self, db: str, app_label: str, **hints) -> bool | None:
+    def allow_migrate(self, db: str, app_label: str, **hints: object) -> bool | None:
         """
         Restrict migrations to the owning alias when databases are split.
 

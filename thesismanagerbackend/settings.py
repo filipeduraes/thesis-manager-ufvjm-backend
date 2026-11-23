@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import secrets
 from pathlib import Path
 
 import environ
@@ -23,10 +24,15 @@ env = environ.Env(
 
 env.read_env(BASE_DIR / ".env")
 
-SECRET_KEY = env("DJANGO_SECRET_KEY")
-
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DEBUG")
+
+# Sem valor configurado, a chave é aleatória por processo: nada é publicado no
+# repositório e um deploy com valores padrão não aceita cookies forjados. Defina
+# DJANGO_SECRET_KEY explicitamente em produção para não invalidar sessões a cada
+# reinício de processo.
+SECRET_KEY = env("DJANGO_SECRET_KEY", default="")
+if not SECRET_KEY:
+    SECRET_KEY = secrets.token_urlsafe(50)
 
 ALLOWED_HOSTS = env.list(
     "DJANGO_ALLOWED_HOSTS",
@@ -122,7 +128,11 @@ for _alias in SERVICE_DATABASE_ALIASES:
 DATABASE_ROUTERS = ["thesismanagerbackend.routers.ServiceDatabaseRouter"]
 SERVICE_DATABASES_SHARED = env.bool("SERVICE_DATABASES_SHARED", default=True)
 TEST_RUNNER = "thesismanagerbackend.test_runner.ServiceAwareTestRunner"
-SERVICE_TOKEN = env("SERVICE_TOKEN", default="local-service-token-change-before-deploy")
+# Sem token configurado a introspecção entre serviços permanece desligada;
+# em desenvolvimento uma chave efêmera evita um segredo público no repositório.
+SERVICE_TOKEN = env("SERVICE_TOKEN", default="")
+if not SERVICE_TOKEN and DEBUG:
+    SERVICE_TOKEN = secrets.token_urlsafe(32)
 
 
 # Password validation
@@ -369,6 +379,10 @@ LOGGING = {
         "events": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
         "notifications": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
     },
+    # Os demais apps (accounts, theses, indexing, adjudication, read models) também
+    # rodam em processos fora do runserver; sem um handler raiz seus logs saem sem
+    # nível nem timestamp pelo lastResort do logging.
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
 }
 
 

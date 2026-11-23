@@ -243,7 +243,7 @@ class ExternalTokenApiTests(TestCase):
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db", DEBUG=True)
 class DevLoginApiTests(TestCase):
     """
-    Testa o login de usuário de teste, disponível apenas em desenvolvimento.
+    Test the development-only test user login flow.
     """
 
     def setUp(self) -> None:

@@ -37,7 +37,7 @@ class EvaluationOutcome:
     result_calculation_queued: bool = True
 
 
-def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score=None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> DefenseMemberEvaluation:
+def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score: Decimal | None = None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> DefenseMemberEvaluation:
     """
     Submit or update a committee member's evaluation and return only the evaluation.
 
@@ -63,7 +63,7 @@ def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
     return outcome.evaluation
 
 
-def record_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score=None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> EvaluationOutcome:
+def record_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score: Decimal | None = None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> EvaluationOutcome:
     """
     Submit or update a committee member's evaluation for an in-progress defense.
 

@@ -184,5 +184,5 @@ class PublicCoursesReadModelView(ReadModelBaseView):
             results = [{"id": str(c.pk), "name": c.name, "code": c.code, "publishedThesesCount": c.total} for c in queryset]
             return {"count": len(results), "results": results}
 
-        payload, _ = cached_payload(courses_cache_key(), build)
+        payload, _ = cached_payload(courses_cache_key(True), build)
         return Response(payload)

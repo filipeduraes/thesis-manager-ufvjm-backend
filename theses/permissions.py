@@ -4,13 +4,20 @@ Authorization classes for the thesis API.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from rest_framework.permissions import BasePermission
+
+# Evita ciclo com rest_framework.views durante a carga das permissões padrão.
+if TYPE_CHECKING:
+    from rest_framework.request import Request
+    from rest_framework.views import APIView
 
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import ProfileRole
 
 
-def _institutional_user(user) -> bool:
+def _institutional_user(user: Any) -> bool:
     """
     Return whether the request principal is an active institutional user.
 
@@ -28,7 +35,7 @@ def _institutional_user(user) -> bool:
     )
 
 
-def _has_role(user, role: str) -> bool:
+def _has_role(user: Any, role: str) -> bool:
     """
     Return whether the principal owns an active business role.
 
@@ -52,7 +59,7 @@ class IsStudentUser(BasePermission):
 
     message = "Acesso restrito a alunos."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         """
         Check the student role.
 
@@ -74,7 +81,7 @@ class IsAdvisorUser(BasePermission):
 
     message = "Acesso restrito a orientadores."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         """
         Check the advisor role.
 
@@ -99,7 +106,7 @@ class IsDefenseCommitteeMember(BasePermission):
 
     message = "Acesso restrito a membros desta banca."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         """
         Check committee membership for the request principal.
 
@@ -132,7 +139,7 @@ class IsAcademicManager(BasePermission):
 
     message = "Acesso restrito a coordenadores e administradores."
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: APIView) -> bool:
         """
         Check the administrative or coordinator role.
 

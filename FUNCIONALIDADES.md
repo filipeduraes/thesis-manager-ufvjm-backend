@@ -1,360 +1,146 @@
-# Funcionalidades — Thesis Manager UFVJM (status)
+# Funcionalidades do Gerenciador de TCCs da UFVJM (status)
 
-Este arquivo resume o que já está implementado e o que ainda falta no sistema, com foco no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend é mantido em repositório separado (`thesis-manager-ufvjm-frontend`); alguns itens abaixo indicam integração frontend já realizada quando relevante.
+Este documento descreve o que está implementado no **backend** deste repositório (`thesis-manager-ufvjm-backend`). O frontend vive em `thesis-manager-ufvjm-frontend`; quando uma integração de tela é citada, ela foi verificada no repositório separado. A referência oficial dos requisitos é [`Requisitos.md`](Requisitos.md), que não foi alterado.
 
-> Atualizado em: 2026-11-23 (segunda revisão). Este status é descritivo e pode ficar desatualizado conforme o projeto evolui.
+> Atualizado em 2026-11-23, após a auditoria final de encerramento.
 
-## Atualização de conformidade (2026-11-23, branch `feat/conformidade-requisitos`)
+Legenda: **Implementado** = código e teste/validação existentes; **Parcial** = há implementação com limitação explícita; **Pendente** = sem implementação funcional; **Não verificável** = faltam condições de evidência.
 
-| Item | Situação | Evidência |
-|---|---|---|
-| Extração de texto via fila + busca no texto e sem acento | **Implementado** | evento `thesis.text_extraction_requested`, app `indexing`, `Thesis.search_text`, `theses/search_index.py`, fila `indexing.thesis-events` |
-| Cálculo assíncrono do resultado da banca | **Implementado** | app `adjudication`, evento `defense.evaluation_recorded`, fila `adjudication.thesis-events` |
-| Convite por e-mail a todos os membros da banca | **Implementado** | evento `defense.member_invited`, template `DEFENSE_MEMBER_INVITED` (sem token no e-mail) |
-| Grupos de até 5 alunos no fluxo do aluno | **Implementado** | `authors` no `PUT /theses/me`, `THESIS_MAX_AUTHORS`, seletor `CoauthorPicker`, `/users/suggest` para estudantes |
-| Membro da banca ler/baixar a monografia avaliada | **Implementado** | ACL de leitura em `user_can_access_thesis`/`get_accessible_thesis`, sem ampliar gestão |
-| `upload_em_andamento:<sha256>` | **Implementado** | `theses/uploads.py`, integrado ao upload e à extração |
-| Conflito de horário de membros externos | **Implementado** | identidade por e-mail normalizado em `theses/defense_committee.py` |
-| Nota e parecer obrigatórios | **Implementado** | migration `theses/0012`, validação no serviço/serializer, UI atualizada |
-| Matrícula, departamento e área de pesquisa | **Implementado** | migration `accounts/0004`, campos no admin de usuários |
-| N+1 em `GET /theses` | **Corrigido** | `viewer_context` resolvido uma vez por página |
-| Verificador da cadeia de auditoria | **Implementado** | `accounts/audit_integrity.py` e `manage.py verify_audit_chain` |
-| APIs de serviço independentes | **Implementado** | seis URLconfs, gateway nginx, read models com bancos próprios, introspecção de serviço e `SERVICE_DATABASES_SHARED=False` no Compose; leituras entre domínios usam snapshots |
-| Bug visual das palavras-chave no card público | **Corrigido** | `.tags` com `flex-wrap` e badges com quebra de linha |
-| E2E de avaliação e gestão de acervo | **Implementado** | specs `committee-evaluation.spec.ts` e `repository-management.spec.ts` (acervo, edição e despublicação) |
+## 1. Matriz de conformidade com `Requisitos.md`
 
-Detalhes em `PROGRESSO_CONFORMIDADE.md`.
-
-## Legenda
-- **Implementado**: funcionalidade disponível no backend (e, quando indicado, integrada no frontend).
-- **Parcial**: base/endpoints existem, mas faltam regras de domínio, escopo, UI de fluxo ou integrações.
-- **Pendente**: não implementado.
-
----
-
-## 1. Infraestrutura e base do projeto
-
-| Item | Status | Observações |
-|---|---|---|
-| Django + DRF + Python | **Implementado** | Projeto `thesismanagerbackend`; apps `accounts`, `academic`, `theses`, `reports`, `events` e `notifications`. |
-| PostgreSQL | **Implementado** | Configuração via `DATABASE_URL`; Docker Compose com serviço `db`. |
-| Redis | **Parcial** | `REDIS_URL`/cache configurados (`CACHES`, sessão `cached_db`); cache da busca pública (`busca:<sha256>`, invalidado por versão na publicação, edição, cadastro de acervo e despublicação), dos relatórios e dos diretórios; throttles DRF guardados no cache. Rastreamento de upload em andamento (`upload_em_andamento:<sha256>`) implementado em `theses/uploads.py`. |
-| Fila de eventos (RabbitMQ/Kafka) | **Implementado** | RabbitMQ com *transactional outbox* (apps `events` e `notifications`, biblioteca `pika`). As transições gravam `outbox_event` na mesma transação; o comando `publish_outbox_events` publica na exchange `topic` `thesis.events` com *publisher confirms*, tentativas e backoff exponencial (`attempts`, `max_attempts`, `next_attempt_at`, `last_error`); o comando `consume_notifications` consome a fila `notifications.thesis-events` (DLQ `notifications.thesis-events.dlq`) de forma idempotente via `processed_event`. Variáveis `RABBITMQ_*`, `EVENTS_EXCHANGE`, `OUTBOX_*`, `NOTIFICATIONS_*` no `.env.example`. Conexões ociosas mantidas por heartbeat (`keep_alive`); queda do broker (inclusive host sem DNS) interrompe o lote sem gastar tentativas e os workers reconectam sozinhos com backoff até 60 s (validado com o RabbitMQ parado e religado). Extração/indexação de texto pela fila (`indexing`), com índice normalizado e insensível a acento. |
-| Variáveis de ambiente / `.env` | **Implementado** | Segredos/configurações via ambiente; `.env.example` com nomes e valores fictícios (inclui `THESIS_MAX_PDF_SIZE_MB`, `THESIS_MAX_DOCUMENT_SIZE_MB`, `THESIS_MAX_KEYWORDS`). |
-| Health check | **Implementado** | `GET /health` (`HealthView`). |
-| Docker Compose | **Implementado** | Postgres, Redis, RabbitMQ (`rabbitmq:4.1-management-alpine`, painel só em `127.0.0.1:15672`), Mailpit (`axllent/mailpit:v1.32.0`, caixa de e-mail de desenvolvimento: interface só em `127.0.0.1:8025`, SMTP 1025 sem porta publicada; o compose envia todos os e-mails para ele, nunca para o console), serviço one-shot `init` (cria bancos, `migrate` por alias e `declare_event_topology`), backend, workers e serviços de API (backend e workers `event-publisher`/`notification-consumer` com `restart: unless-stopped`), que só sobem após o `init` concluir; perfil opcional para frontend. Uploads ficam no volume nomeado `media_data` (`/app/media`): `down -v` limpa banco, cache, fila **e arquivos enviados**. O `CMD` do `Dockerfile` ainda executa `migrate` antes do `runserver` (útil ao rodar a imagem sozinha), mas o Compose sobrescreve o comando do serviço `backend` com apenas `runserver`; no Compose, as migrações rodam só no `init`. |
-| Migrations versionadas | **Implementado** | `accounts/migrations/0001_initial.py` e `0002_external_invitation_token_delivery.py`, `academic/migrations/0001_initial.py`, `theses/migrations/0001_initial.py` a `0016` (+ `0016_thesis_search_text_gin`), `events/migrations/0001_initial.py`, `notifications/migrations/0001_initial.py`, `0002_seed_templates.py`, `0003_seed_external_member_invited_template.py`, `0004_notification_status_cancelled.py` e `0005_seed_workflow_templates.py`; `reports/migrations` (histórico de execução). |
-
-## 2. Autenticação e sessão
-
-| Item | Status | Observações |
-|---|---|---|
-| Usuário customizado (`accounts.User`) | **Implementado** | UUID, e-mail único, `name`, `AbstractBaseUser + PermissionsMixin`, `USERNAME_FIELD=email`. |
-| Papéis de negócio com histórico | **Implementado** | `UserProfileRole` (`ADMIN`, `COORDINATOR`, `ADVISOR`, `STUDENT`), revogação sem apagar histórico, restrição de um papel ativo por (usuário, papel). Papel efetivo derivado do banco por prioridade. |
-| Múltiplos papéis (exceto Aluno) | **Implementado** | Backend e UI admin permitem combinar perfis institucionais (ex.: Orientador+Coordenador+Administrador); `STUDENT` não pode ser combinado com outros. |
-| Login institucional Google Workspace | **Implementado** | `django-allauth` (headless/social), validação de domínio `@ufvjm.edu.br`, `email_verified`/`hd`, provisionamento no primeiro login, papel padrão `STUDENT`. Sem cadastro/senha local. |
-| Início do OAuth | **Implementado** | `GET /api/v1/auth/google/start?next=` retorna URL de autenticação. |
-| Sessão versionada `/api/v1` | **Implementado** | `GET /api/v1/session` retorna estado da sessão, usuário, papéis, CSRF e contexto de convite externo; `DELETE /api/v1/session` encerra sessão. |
-| Sessão em `cached_db` + cookies/CSRF/CORS | **Implementado** | Cookies HttpOnly; CSRF no frontend; CORS/CSRF confiáveis via ambiente. |
-| Avatar Google na sessão/admin | **Implementado** | `avatarUrl` (URL `https`) quando disponível na conta social Google. |
-
-Decisão consciente: o requisito "login e senha" do enunciado é atendido por
-delegação ao IdP institucional (Google Workspace), que valida a credencial e o
-domínio `@ufvjm.edu.br`. O backend não armazena senhas, hashes de senha nem
-fluxo de recuperação, evitando duplicar a política de senhas da instituição e
-reduzindo a superfície de exposição. Não introduzir cadastro ou recuperação de
-senha local sem decisão explícita e documentada.
-
-## 3. Administração de usuários
-
-| Item | Status | Observações |
-|---|---|---|
-| Listagem administrativa paginada | **Implementado** | `GET /api/v1/admin/users` (admin, IP/VPN), paginação com metadados (`count,page,pageSize,totalPages,lastPageCount,next,previous,results`), busca por nome/e-mail, filtros por papel/status. |
-| Criação administrativa | **Implementado** | `POST /api/v1/admin/users`; valida e-mail institucional e papéis. Nome/e-mail institucionais tratados como fonte confiável (sincronização pelo login). |
-| Edição administrativa restrita | **Implementado** | `PATCH /api/v1/admin/users/<id>` altera papéis, status (`is_active`) e `courseId`; nome/e-mail não editáveis. Auditoria consolidada com antes/depois em atualizações relevantes. |
-| Desativação (soft delete) | **Implementado** | `DELETE /api/v1/admin/users/<id>` desativa usuário e revoga papéis ativos; protege último administrador e impede auto-desativação administrativa. |
-| Associação usuário–curso | **Implementado** | `courseId` no admin de usuários; vínculo ativo único por usuário (`academic_user_course_assignment`). |
-| Resolução de coordenador por e-mail | **Implementado** | Ao salvar curso/ao provisionar/logar usuário com e-mail correspondente, coordenação pendente pode ser resolvida e papel `COORDINATOR` garantido (conforme serviços `academic`/`accounts`). |
-| Lookup de usuário por e-mail | **Implementado** | `GET /api/v1/admin/users/lookup?email=` para apoio à UI (ex.: coordenador de curso). |
-| UI admin de usuários (frontend) | **Implementado** | Lista paginada, busca/filtros automáticos, papéis em checkbox (regra do Aluno), curso, avatar/iniciais, edição sem nome/e-mail, desativação. |
-
-## 4. Convites externos e acesso por token (membro de banca)
-
-| Item | Status | Observações |
-|---|---|---|
-| Modelo de convite externo | **Implementado** | `ExternalInvitation`: dados do convidado, `token_hash` SHA-256, status, expiração, uso/revogação, `token_event_id` (único evento autorizado a emitir o token) e `token_sent_at` (envio do e-mail); sem armazenar token legível. |
-| Geração de token temporário | **Implementado** | Token humano `UFVJM-XXXX-...`, gerado pelo consumidor de notificações e enviado só por e-mail (ver "Envio do token por e-mail"); nenhuma resposta da API devolve o token. TTL configurável (`EXTERNAL_INVITATION_TOKEN_TTL_HOURS`). Uso único: a troca por sessão marca o convite como `USED`. |
-| Restrição de cargos para criar convite | **Implementado** | Convites só nascem pela inclusão de membro externo na banca, por quem gerencia a banca (admin, coordenador do curso, orientador da tese). A criação avulsa `POST /api/v1/admin/external-invitations` foi removida (405), junto com `CanInviteExternalCommitteeMember`. |
-| Listar/revogar convites | **Implementado** | `GET /api/v1/admin/external-invitations` (admin; inclui `sentAt`, nunca o token), `DELETE /api/v1/admin/external-invitations/<id>` (admin). |
-| Troca de token por sessão externa | **Implementado** | `POST /api/v1/auth/external-token`; valida hash/estado/expiração, `flush` da sessão, TTL da sessão externa, auditoria `TOKEN_ACCESS`. |
-| Autenticação de sessão externa | **Implementado** | `ExternalInvitationSessionAuthentication` + `ExternalInvitationPrincipal`; CSRF em métodos não seguros; bloqueio por expiração/revogação. |
-| Login por token no frontend | **Implementado** | `LoginView` envia token; sessão externa direciona para fluxo de avaliação externa. |
-| Convite no frontend | **Implementado** | Branch `feat/external-invite-email` do frontend: a tela da banca e o agendamento mostram "Convite enviado para <e-mail>" (ou envio em processamento), com "Reenviar convite" e "Gerar novo convite"; nenhuma tela exibe o token. A criação avulsa saiu de `AdminUsers`. |
-| Escopo do convite à banca/defesa/membro | **Implementado** | Cada `DefenseMember` externo aponta para o seu `ExternalInvitation` (one-to-one). `POST /api/v1/defenses/<id>/members/external` cria o convite e o membro (201, só `member`, sem token). `POST /api/v1/defenses/<id>/members/<memberId>/regenerate-token` ("Gerar novo convite"; mesma permissão de gerenciar a banca; banca `SCHEDULED`/`IN_PROGRESS`) revoga o convite atual, cria outro com validade nova para o mesmo membro (mantém disponibilidade e avaliação; serve para convites usados, expirados ou revogados) e responde 202. O payload do membro traz, só para quem gerencia a banca, `invitationStatus`/`invitationStatusLabel` (expirado é informado mesmo antes de alguém tentar o token), `invitationExpiresAt`, `invitationSentAt` e `canResendInvitation`. `GET /api/v1/session` e `POST /api/v1/auth/external-token` incluem `externalInvitation.assignments` (`[{defenseId, memberId}]`). A sessão externa só lê o detalhe da própria banca, confirma disponibilidade e avalia; outras bancas e ações de gestão retornam 403. |
-| Envio do token por e-mail | **Implementado** | Evento `defense.external_member_invited` (payload só com ids e `trigger` `CREATED`/`RESENT`/`REGENERATED`) gravado na mesma transação da inclusão, do reenvio e do novo convite; o token anterior deixa de valer na hora. O consumidor gera o token, grava só o hash, envia o e-mail (template `EXTERNAL_MEMBER_INVITED`: papel, data/hora da banca, código, validade e instruções; sem local/link) e guarda em `notification` só a cópia mascarada (`UFVJM-****`). Reentrega ou evento substituído não geram token nem e-mail. `--retry-pending` gera token novo (nunca reenvia o corpo salvo) e cancela (`CANCELLED`) envios de convites substituídos ou inválidos. Auditoria `INVITE` do envio/reenvio (ator Sistema) e do pedido de reenvio (ator), só com ids. Testes garantem que o token não aparece na outbox, no envelope publicado, em `notification`, no `audit_log` nem nos logs. |
-| Reenvio do convite | **Implementado** | `POST /api/v1/defenses/<id>/members/<memberId>/resend-invitation` (202): quem gerencia a banca; banca `SCHEDULED`/`IN_PROGRESS`; convite `PENDING`/`ACCEPTED`, não expirado nem revogado (revogado, usado ou expirado → 400 orientando a gerar novo convite). Não renova a validade. Throttle `invitation_resend` (5/min por usuário, compartilhado com "Gerar novo convite"). |
-
-## 5. Cursos e departamentos (cadastro acadêmico)
-
-| Item | Status | Observações |
-|---|---|---|
-| Departamentos | **Implementado** | CRUD administrativo: `GET/POST/PATCH/DELETE /api/v1/admin/departments`. |
-| Cursos | **Implementado** | CRUD administrativo paginado: `GET/POST/PATCH/DELETE /api/v1/admin/courses`, busca e filtro por departamento. |
-| Coordenador por e-mail | **Implementado** | Curso armazena `coordinator` (FK opcional) e `coordinator_email` normalizado; status pendente/ativo/inativo; lookup; frontend normaliza parte local para `@ufvjm.edu.br`. |
-| Contagens no curso | **Implementado** | `activeStudents` por vínculos ativos e `publishedTheses` contado no serviço de monografias via snapshots. |
-| Limpeza de departamentos órfãos | **Implementado** | Departamentos sem cursos associados são removidos/evitados conforme regras do serviço. |
-| UI admin de cursos/departamentos (frontend) | **Implementado** | CRUD, filtro/busca automáticos, seleção/criação de departamento, indicação de coordenação pendente. |
-
-## 6. Auditoria e segurança operacional
-
-| Item | Status | Observações |
-|---|---|---|
-| Auditoria append-only com hash chain | **Implementado** | `AuditLog` com SHA-256 encadeado, proteção contra update/delete em nível de modelo/queryset. Snapshot de todos os papéis ativos do ator (`actor_roles`) e campos legíveis (`summary`, `details`, `entityName`, `entityReference`, `verbosity`). Mensagens de alto nível e detalhes em português, nomes de TCC/curso/usuário em vez de códigos; título do TCC truncado no resumo e completo no detalhe. |
-| Auditoria de sessão | **Implementado** | `SessionAudit` com IP, user agent, origem de rede, login/logout/atividade. |
-| Endpoints de auditoria admin | **Implementado** | `GET /api/v1/admin/audit-logs` (filtros por data, cargo, texto, `verbosity=all|trace|relevant`) e `GET /api/v1/admin/audit-logs?export=csv|json` / `/api/v1/admin/audit-logs/export`. Resposta inclui `verbosity`, `verbosityLabel`, `roles`, `roleCodes`, `entityTypeLabel`, `entityName`, `entityNameShort`, `entityReference`, `details`. |
-| Resumos descritivos e antes/depois | **Implementado** | Serializer gera resumos legíveis; atualizações de usuário podem registrar transições (ex.: perfil de X para Y, curso/status); UI mostra detalhes, canal e origem da rede/IP. |
-| Restrição IP/VPN para áreas admin | **Implementado** | Middleware/CIDRs confiáveis para `/admin/` e `/api/v1/admin/`; nega sem vazar detalhes. |
-| Rate limiting | **Implementado** | Throttles DRF por escopo (`ClientIpScopedRateThrottle`, subclasse de `ScopedRateThrottle` em `thesismanagerbackend/throttling.py`, contadores no cache Redis): sessão, token externo, TCC, uploads (`thesis_upload` 30/h), relatórios, autocomplete e repositório público (`public_repository` 120/min, `public_download` 30/min). O cliente anônimo é identificado por `accounts.network.get_client_ip` (mesma regra da área administrativa): `X-Forwarded-For` só vale com `TRUSTED_PROXY_COUNT>0` e `REMOTE_ADDR` em `TRUSTED_PROXY_CIDRS`, então um cabeçalho forjado não abre novos contadores. Política global diária por usuário implementada (`DailyUploadThrottle`, `UPLOAD_GLOBAL_DAILY_LIMIT`). |
-| Proteção de segredos e privacidade em logs | **Implementado (diretriz)** | Tokens/senhas não devem ser logados; auditoria evita payloads sensíveis. Revisão contínua recomendada ao adicionar novos fluxos. |
-
-## 7. Domínio de TCC (núcleo do produto)
-
-| Item | Status | Observações |
-|---|---|---|
-| Modelos de monografia/TCC | **Implementado** | App `theses`: `Thesis`, `ThesisAuthor`, `StoredFile`, `ThesisFile` (versões), `ThesisReview`, `ThesisStatusHistory`, `Keyword`/`ThesisKeyword`, `ThesisDocument`. Status conforme `MODELO_BANCO_DADOS.puml`. |
-| Rascunho, submissão e acompanhamento | **Implementado** | `GET/PUT /api/v1/theses/me` cria/atualiza rascunho com metadados, curso, orientador e palavras-chave; `POST /api/v1/theses/me/submit` envia ao orientador; `GET /api/v1/theses/<id>` retorna versões, pareceres, documentos e linha do tempo. |
-| Upload de PDF com validação | **Implementado** | `POST /api/v1/theses/me/files` aceita somente PDF (magic bytes `%PDF-`), limite configurável (`THESIS_MAX_PDF_SIZE_MB`, padrão 50 MB), nome de armazenamento gerado, sem confiar em filename/MIME do cliente. |
-| SHA-256 do arquivo | **Implementado** | Hash calculado no upload para integridade/deduplicação; rechecagem antes de submissão, parecer e publicação. Metadados expostos sem caminho interno de armazenamento. |
-| CRUD de monografias com permissões/estado | **Implementado** | `GET /api/v1/theses` (escopos `advised`, `authored`, `coordinated`, filtros e paginação), `GET /api/v1/theses/<id>`, `POST /api/v1/theses/<id>/reviews` (orientador), `POST /api/v1/theses/<id>/defense-result` e `POST /api/v1/theses/<id>/publish` (coordenação/admin). Permissões e estados validados no backend. |
-| Busca/filtros de TCC | **Implementado** | Busca por título, resumo, referência, autor, orientador e palavra-chave; filtros por status, curso, orientador, ano e `pendingReview`; paginação com metadados. |
-| Histórico de versões | **Implementado** | Versões mantidas durante a orientação; `purge_thesis_versions` remove versões antigas após aprovação final da banca e na publicação, mantendo apenas o arquivo atual. Depois de publicada, cada troca de PDF cria uma versão nova e mantém as anteriores. |
-| Documentos complementares | **Implementado** | Upload e validação de ata, autorização de publicação, comprovante de revisão ortográfica e outros documentos; publicação exige autorização validada, e validar o termo pode disparar a publicação automática. |
-| UI de submissão/acompanhamento (frontend) | **Implementado** | `StudentSubmission` integra metadados, upload, envio, acompanhamento, linha do tempo, pareceres, versões, leitor de PDF e documentos. Dashboard do aluno usa dados reais. |
-| UI de orientação/aprovação (frontend) | **Implementado** | `AdvisorApproval` lista orientandos com filtros/paginação, abre detalhe, lê o PDF com zoom/download, aprova, solicita ajustes, reprova, registra resultado da banca, valida documentos e publica. |
-
-## 8. Banca, avaliação e defesa
-
-| Item | Status | Observações |
-|---|---|---|
-| Modelos de defesa/banca/membro/avaliação | **Implementado** | `Defense`, `DefenseMember`, `DefenseMemberEvaluation` com `DefenseStatus`, `CommitteeRole`, `DefenseResult`, `DefenseModality`; migration 0002 + 0003 (`duration_minutes`); `DefenseStatusHistory` na migration 0005. |
-| Agendamento após aprovação do orientador | **Implementado** | `POST /api/v1/theses/<id>/defenses` exige `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`; admin, coordenador do curso da tese e orientador da própria tese podem agendar; transições de `ThesisStatus` e histórico registrados. Nota: orientador agenda diretamente (sem "solicitação") — pendente decisão do Filipe. |
-| Defesa remota com link | **Implementado** | Com `modality=REMOTE`, `location` é obrigatório e precisa ser URL `http`/`https` (`validate_defense_location`; 400 com `errors.location`). Com `IN_PERSON`, `location` continua texto livre. Validado no agendamento e, no `PATCH`, só quando `modality` ou `location` são enviados e mudam de valor, para que bancas antigas com local fora do padrão continuem editáveis nos demais campos. |
-| Disponibilidade e conflitos de horário | **Implementado** | Verificação de sobreposição de horário por membro institucional (intervalo semiaberto: `A.start < B.end AND B.start < A.end`; sessões adjacentes não conflitam) ao adicionar membro à banca e também no `PATCH /api/v1/defenses/<id>` quando `scheduledDatetime` ou `durationMinutes` mudam (`check_committee_schedule_conflicts`, mesma função `_has_schedule_overlap`). Em conflito, retorna 400 com o nome do membro (`"O membro <nome> já participa de outra banca no mesmo período."`). Edições só de local/modalidade/observações não verificam conflito. Membros externos são verificados por e-mail normalizado. Membro pode fornecer `conflictReason` para registrar conflito de interesse. |
-| Avaliação individual por membro | **Implementado** | `PUT /api/v1/defenses/<id>/members/<memberId>/evaluation` — cada membro (institucional ou externo via convite válido) registra decisão, nota (0–10) e notas; suplentes não podem avaliar (403); membro não vê nota/notas de outro membro. |
-| Encerramento automático com cálculo de resultado | **Implementado** | `POST /api/v1/defenses/<id>/close` (admin/coordenador/orientador da própria tese) verifica quórum, calcula resultado por maioria, transita `ThesisStatus` e chama `purge_thesis_versions` para aprovados. **Mudança de comportamento:** a avaliação registrada (`PUT .../evaluation`, via `record_committee_evaluation`) verifica se todos os não suplentes já avaliaram e, nesse caso, encerra a banca automaticamente pela mesma lógica (`_finalize_defense`, compartilhada com o `close_defense`), num savepoint separado. O histórico grava `changed_by` nulo e motivo "Resultado calculado automaticamente após a última avaliação."; a aprovação dispara `purge_thesis_versions`, como no encerramento manual. Se o encerramento automático levantar `ValidationError` (ex.: aprovação sem PDF atual), a avaliação continua salva, a banca fica `IN_PROGRESS`, é gravado `logger.warning` e a resposta traz `autoCloseError`; o encerramento manual continua disponível. Depois de encerrada, nenhuma avaliação pode ser alterada (400). |
-| Registro do resultado final (manual) | **Implementado** | `POST /api/v1/theses/<id>/defense-result` (coordenação/admin) ainda disponível para lançamento manual retroativo. |
-| Confirmação de disponibilidade dos membros | **Implementado** | `DefenseMember.availability_status` (`PENDING`/`CONFIRMED`/`DECLINED`), `availability_responded_at`, `availability_note` (migration `0006_defense_member_availability`: membros de bancas `IN_PROGRESS`/`COMPLETED` já existentes ficam `CONFIRMED`; demais, `PENDING`). `POST /api/v1/defenses/<id>/members/<memberId>/availability` com `{"status": "CONFIRMED"|"DECLINED", "note"}`: só o próprio membro (institucional ou sessão externa do seu convite), só com a banca `SCHEDULED`; outro membro/gestor recebe 403; registra `AVAILABILITY_RESPONDED` no AuditLog (sem copiar a nota). O `PATCH` volta todos para `PENDING` apenas quando data/horário ou duração mudam de valor. `start_defense` exige todos os não suplentes `CONFIRMED` (400 com os nomes que faltam); banca sem não suplentes mantém o comportamento anterior. Payload de membro ganha `availabilityStatus`, `availabilityStatusLabel`, `availabilityRespondedAt`, `availabilityNote`; o detalhe ganha `allMembersConfirmed` (há não suplentes e todos confirmaram) e `pendingConfirmations` (`memberId`, `name`, `role`, `roleLabel`, `availabilityStatus`). |
-| Abertura automática para avaliação | **Implementado** | `sync_defense_status` transita `SCHEDULED → IN_PROGRESS` quando `scheduled_datetime` já passou, sem job assíncrono. Chamada no início dos endpoints de detalhe, membros e avaliação. Idempotente (audit event `AUTO_STARTED_BY_SCHEDULE`; `AuditAction.UPDATE`). Teses transitam para `UNDER_EVALUATION` pelo mesmo código-caminho do `start_defense` manual. **Mudança de regra (pedida pelo Filipe):** a abertura automática agora exige, como o início manual, que todos os membros não suplentes tenham confirmado disponibilidade; se faltar confirmação no horário, a banca continua `SCHEDULED` sem erro na leitura e o detalhe lista quem falta em `pendingConfirmations`. Banca sem membros não suplentes mantém o comportamento anterior. |
-| Reversão de status pelo administrador | **Implementado** | `POST /api/v1/defenses/<id>/revert-status` (somente admin). Permite `IN_PROGRESS → SCHEDULED` e `CANCELLED → status anterior` (campo `previous_status` em `Defense`; fallback para `SCHEDULED`). `COMPLETED` não reverte (400). Campo `auto_start_suspended` impede reabertura automática até que o horário seja reagendado via `PATCH` ou a banca seja iniciada manualmente. `reason` obrigatório (400 se vazio). Audit event `STATUS_REVERTED_BY_ADMIN`. Migration `0004_add_defense_revert_fields`. |
-| Iniciar/encerrar banca pelo orientador | **Implementado** | `start_defense` e `close_defense` usam `_can_manage_defense`: admin, coordenador e orientador da própria tese (decisão da revisão: manter o controle da banca com o orientador). Orientador de outra tese que integra a banca recebe 403; usuário que não enxerga a banca recebe 404 (mesmo escopo do detalhe); aluno recebe 403. `revert-status` continua somente admin. |
-| Histórico de status da banca | **Implementado** | Modelo `DefenseStatusHistory` (tabela `defense_status_history`, migration `0005_defense_status_history`): `previous_status`, `new_status`, `changed_by` (nulo em transições automáticas), `reason`, `created_at`. Gravado por um único helper (`record_defense_status_change`) dentro da mesma transação de cada transição: agendamento (vazio → `SCHEDULED`), início manual, abertura automática (`changed_by` nulo), encerramento (com resultado), cancelamento (com motivo) e reversão do admin (com motivo). Exposto como `statusHistory` (ordem cronológica) somente em `GET /api/v1/defenses/<id>`, não na listagem. Bancas criadas antes da migration não têm histórico retroativo (sem backfill). |
-| Escopo do coordenador nas bancas | **Implementado** | `_can_manage_defense`, `defenses_visible_to`, `schedulable_theses_for` e o `GET/POST /api/v1/theses/<id>/defenses` limitam o coordenador às teses dos cursos que coordena, reaproveitando `theses_visible_to` de `theses/services.py` (vínculo por `course.coordinator`, `coordinator_email` ou `UserCourseAssignment` ativo) via `coordinator_managed_theses`; teses de autoria do próprio coordenador ficam fora. Coordenador de outro curso recebe lista vazia e 404 nas ações (403 se for membro da banca, pois a enxerga mas não a gerencia). Admin continua com acesso total; orientador continua gerenciando só a própria tese e vendo as bancas que integra. |
-| Listagem de bancas visíveis ao usuário | **Implementado** | `GET /api/v1/defenses` (paginado). Filtros no padrão de `GET /api/v1/theses`: `?q=` busca sem diferenciar maiúsculas em título da tese, código de referência, nome do aluno principal (coautores não), nome do orientador e local; `?status=` com códigos `DefenseStatus` separados por vírgula (códigos inválidos são ignorados); `?pendingEvaluation=true` (`1`/`yes`) mantém só bancas `SCHEDULED`/`IN_PROGRESS` em que o usuário é membro institucional não suplente sem avaliação enviada. Filtros combináveis; resultado com `distinct()`. Escopo em `theses/defense_listing.py::defenses_visible_to` (mesma regra do detalhe): admin vê todas; coordenador vê as das teses dos cursos que coordena; orientador vê as das teses que orienta e as que integra; aluno vê a da própria tese; membro institucional vê as que integra. Sessão de convite externo recebe 403. Cada item = `defense_payload` + `thesisTitle`, `thesisReferenceCode`, `student`, `advisor`, `viewerMembership` (`isMember`, `memberId`, `role`, `roleLabel`, `canEvaluate`, `hasEvaluated`). Bancas agendadas com horário vencido são iniciadas (`sync_defense_status`) antes do filtro. |
-| Teses aptas a agendar banca | **Implementado** | `GET /api/v1/defenses/schedulable-theses` (paginado): status `ADVISOR_APPROVED`/`READY_FOR_DEFENSE`, sem banca `SCHEDULED`/`IN_PROGRESS`, regra de `_can_manage_defense` (admin todas; coordenador só as dos cursos que coordena; orientador só as próprias; demais perfis recebem lista vazia; convite externo 403). Itens no formato de `GET /api/v1/theses`. |
-| Resultado e vínculo do usuário no payload da banca | **Implementado** | `defense_payload` (detalhe, listagem e demais respostas de banca) inclui `result` e `resultLabel`: `null` até a banca ficar `COMPLETED`; depois, o resultado calculado no encerramento manual ou automático, lido do registro gravado por `_finalize_defense` em `ThesisStatusHistory.metadata` (`defenseId` + `defenseResult`; prefetch na listagem, sem N+1). O resultado manual da tese (`POST /api/v1/theses/<id>/defense-result`) não tem `defenseId` e não é atribuído a nenhuma banca. O detalhe `GET /api/v1/defenses/<id>` passa a ter `viewerMembership` no mesmo formato da listagem (`isMember`, `memberId`, `role`, `roleLabel`, `canEvaluate`, `hasEvaluated`), para usuário institucional e sessão externa (`viewer_membership_payload`). |
-| Foto dos membros da banca | **Implementado** | `defense_member_payload` inclui `avatarUrl`: foto da conta Google (`socialaccount`) do membro institucional, pelas mesmas regras de `_avatar_url` (só URL `https`), via `user_avatar_url` em `accounts/services.py`; `null` para membros externos e para quem não tem conta Google ou foto. Detalhe e listagem resolvem avatares em lote (`avatar_urls_for`) e calculam uma vez por banca se o leitor é admin, então o número de consultas não cresce com o número de membros. `GET /api/v1/admin/users/lookup` também devolve `user.avatarUrl` (campo novo). |
-| Permissões do usuário no payload da banca | **Implementado** | Detalhe (`GET /api/v1/defenses/<id>`) e listagem (`GET /api/v1/defenses`) incluem `viewerPermissions` com `canManage`, `canEdit`, `canCancel`, `canStart`, `canClose`, `canRevert` e `canManageMembers`. `canManage` usa a mesma regra de `_can_manage_defense` (que agora delega a `build_defense_viewer_context`); `canEdit`, `canCancel` e `canStart` exigem `canManage` e banca `SCHEDULED`; `canClose`, `canManage` e `IN_PROGRESS`; `canManageMembers`, `canManage` e `SCHEDULED`/`IN_PROGRESS` (remoção de membro continua só em `SCHEDULED`); `canRevert`, admin e `IN_PROGRESS`/`CANCELLED`. Pré-condições que não dependem do usuário não entram nas flags: iniciar também exige `allMembersConfirmed` e encerrar exige todas as avaliações. Sessão de convite externo recebe tudo `false`. Na listagem, os direitos são resolvidos uma vez para a página inteira (consultas fixas, sem consulta extra por banca). |
-| Privacidade da disponibilidade da banca | **Implementado** | Em todas as respostas que trazem membros (`defense_payload`/`defense_member_payload`: detalhe, listagem, `GET /api/v1/theses/<id>/defenses` e ações), `availabilityStatus`, `availabilityStatusLabel`, `availabilityRespondedAt` e `availabilityNote` só vêm preenchidos para quem tem `canManage` (admin, coordenador do curso, orientador da tese) e, para os demais, apenas no próprio membro (o mesmo de `viewerMembership`); nos outros membros vêm `null`. `pendingConfirmations` no detalhe só é enviado a quem tem `canManage` (demais recebem `null`); `allMembersConfirmed` continua para todos. Sessão externa vê só a própria disponibilidade. Coordenador de outro curso que integra a banca é tratado como membro comum. |
-| Eventos de banca/avaliação | **Implementado** | Rodando no Docker Compose (ver "Fila de eventos"); teste de fumaça com RabbitMQ real em 2026-11-21 (submissão, agendamento, avaliação e encerramento automático, inclusive com o broker parado). Cada transição grava um `OutboxEvent` (versão `1.0`, payload só com identificadores e códigos, chaves fixas em `events/catalog.py`) na mesma transação, por helpers de `theses/events.py`: `thesis.submitted` (`submit_thesis`), `defense.scheduled` (`schedule_defense`), `defense.evaluation_recorded` (`record_committee_evaluation`, sem decisão/nota/parecer), `defense.completed` (`_finalize_defense`, encerramento manual e automático, com `result` e `automatic`; desfeito junto se o auto-close falhar), `thesis.defense_result_recorded` (`record_defense_result`, resultado manual sem banca) e `thesis.published` (`publish_thesis` e publicação automática `publish_if_ready`; o cadastro de acervo não emite). O cálculo do resultado é assíncrono (`adjudication`); a resposta da avaliação usa `resultCalculationQueued`. O consumidor envia e-mail pelo `EMAIL_BACKEND` com os templates de `notification_template` (migration `notifications/0002_seed_templates`): submissão → orientador; banca agendada → autores e orientador (sem local/link); avaliação registrada → orientador (só o progresso "X de Y"); banca concluída → autores, orientador e membros avaliadores (suplentes não avaliam nem recebem); resultado manual e publicação → autores e orientador. Coordenador não recebe. Reentrega é detectada por `processed_event` (sem e-mail duplicado); falhas de envio ficam `FAILED` em `notification` e são reenviadas manualmente com `consume_notifications --retry-pending`. Eventos `FAILED` na outbox voltam com `publish_outbox_events --requeue-failed <id|all>`. |
-
-## 9. Repositório público e publicação
-
-| Item | Status | Observações |
-|---|---|---|
-| Busca pública de TCCs publicados | **Implementado** | `GET /api/v1/public/theses` (app `theses`, `theses/repository.py`), sem autenticação. Texto livre `q` (título, resumo, autor, orientador, curso, palavra-chave) e filtros por campo: `title`, `author` (inclui autores sem conta), `advisor`, `course` (nome ou código), `keyword` (repetível, exato, combinado com E), `courseId`, `advisorId`, `year` (**ano de defesa**, sem limite fixo). Ordenação `ordering=relevance|recent|title` (padrão: relevância quando há `q`, senão mais recentes por data de defesa). Só `PUBLISHED` + `is_public` + não excluídas. Parâmetro inválido → 400. Consultas constantes por página (EXISTS, sem `DISTINCT`), testado. Busca no texto extraído do PDF e insensível a acento via `Thesis.search_text`. |
-| Detalhe e download públicos | **Implementado** | `GET /api/v1/public/theses/<id>` (com `integrity.sha256` do PDF publicado e `fileVersions` com o hash de cada versão) e `GET /api/v1/public/theses/<id>/download` (rechecagem SHA-256 antes do stream; erros sempre em JSON). Payloads públicos sem e-mail e com URLs anônimas. |
-| Filtros dinâmicos e cursos públicos | **Implementado** | `GET /api/v1/public/theses/filters` devolve `courses`, `advisors` (só quem tem monografia publicada), `years` e `keywords` (top 100) calculados dos publicados, com contagem. `GET /api/v1/public/courses` lista os cursos com `publishedThesesCount` (`withPublished=true` filtra). `GET /api/v1/public/advisors` continua listando todos os orientadores ativos (contrato do diretório). |
-| Cache Redis e rate limiting da busca | **Implementado** | Páginas de busca em `busca:<sha256>` (filtros normalizados + página + versão); detalhe, filtros e cursos em `repositorio:*`. Publicação, edição, troca de PDF, cadastro de acervo e despublicação giram a versão (`busca:versao`) imediatamente e após o commit; TTL `PUBLIC_REPOSITORY_CACHE_TTL_SECONDS` (300 s). Cabeçalho `X-Repository-Cache: HIT|MISS`. Throttles `public_repository` (120/min) e `public_download` (30/min) por IP. |
-| Publicação automática | **Implementado** | `publish_if_ready` publica sozinho quando há aprovação final da banca, versão corrigida (se aprovada com ressalvas) e termo de autorização validado. É chamado ao encerrar a banca (manual/automático), registrar resultado manual, validar o termo e enviar a versão corrigida; nunca faz a etapa chamadora falhar e bloqueia a publicação se o PDF falhar no SHA-256. Grava `ThesisStatusHistory` (`changed_by` nulo, `metadata.trigger`), `AuditLog` `PUBLISH` e o evento `thesis.published`. `POST /api/v1/theses/<id>/publish` continua (mesmas regras, agora exigindo a correção; idempotente para já publicadas). |
-| Versão corrigida (aprovação com ressalvas) | **Implementado** | Em `APPROVED_WITH_REMARKS` o aluno envia a correção por `POST /api/v1/theses/me/files` (`ThesisFile.is_correction`); histórico `CORRECTED_VERSION_UPLOADED` e auditoria. Payload interno ganha `publicationRequirements` e `permissions.canUploadCorrection`. |
-| Cadastro de monografias antigas | **Implementado** | `POST /api/v1/theses/legacy` (multipart; admin ou coordenação do curso): título, resumo, palavras-chave, autores por nome com vínculo opcional a usuário, orientador (usuário com papel de orientador, mesmo revogado), curso, ano/data de defesa, resultado (`APPROVED`/`APPROVED_WITH_REMARKS`) e PDF (mesmas validações do upload; recusado se já estiver em outra monografia). Entra `PUBLISHED` com `origin=LEGACY_IMPORT`, histórico e auditoria; o PDF fica `PENDING` para a extração de texto existente. Não emite `thesis.published` (sem e-mail para autores de trabalhos antigos). |
-| Edição de monografias publicadas | **Implementado** | `PATCH /api/v1/theses/<id>/published` (edição parcial de título, resumo, palavras-chave, autores, orientador, curso, ano/data de defesa, tipo e periódico) e `POST /api/v1/theses/<id>/published/files` (novo PDF vira nova versão com novo hash; a anterior fica no histórico). Admin ou coordenação do curso (mudar de curso exige os dois cursos). Cada edição grava `ThesisStatusHistory` (`changedFields`) e `AuditLog` com valores antigos e novos. |
-| Proteção contra exclusão de publicado | **Implementado** | `Thesis.delete`, `ThesisQuerySet.delete` e um receptor `pre_delete` recusam excluir monografia publicada ou já publicada (cobre exclusão em lote, cascata e Django admin). `DELETE /api/v1/theses/<id>` faz exclusão lógica só de monografias nunca publicadas (admin/coordenação do curso) e responde 400 para publicadas, mesmo para admin. |
-| Despublicação | **Implementado** | `POST /api/v1/theses/<id>/unpublish` com `reason` obrigatório (admin/coordenação do curso): `PUBLISHED → ARCHIVED`, sai do repositório na hora (cache invalidado), mantém arquivos, `published_at` e histórico; não volta a ser publicada automaticamente. Republicação ainda não existe. |
-
-### Integridade do termo de autorização (2026-11-23)
-
-Antes da publicação automática ou manual, o SHA-256 do PDF do termo de
-autorização validado é recalculado. Se o arquivo tiver sido alterado desde a
-validação, a publicação é bloqueada (log de aviso com identificador do TCC no
-caminho automático, `ValidationError` no manual). A conferência da assinatura
-humana continua sendo responsabilidade do coordenador.
-
-## 10. Relatórios e dashboards
-
-| Item | Status | Observações |
-|---|---|---|
-| Relatórios administrativos | **Implementado** | `GET /api/v1/reports/overview` (app `reports`): resumo, `byCourse`, `byAdvisor`, `byDefenseYear` e `options`, com filtros `courseId`, `advisorId`, `year` (ano da banca, America/Sao_Paulo) e `scope=coordinated`. Admin vê todos os cursos; coordenador vê só os cursos vinculados (FK `coordinator`, `coordinator_email` ou `UserCourseAssignment` ativo); orientador/aluno/externo recebem 403. Agregação no banco (`Count`/`Avg` com `GROUP BY`), cache Redis de 60 s (`reports:overview:*`) e throttle `reports` (60/min). Taxa de aprovação **por banca concluída**: (aprovadas + com ressalvas) / bancas com resultado. Tempo médio: da última submissão (`thesis_status_history` `SUBMITTED`) anterior à banca até `scheduled_datetime`. O resultado vem de `thesis_status_history.metadata` (`defenseId`/`defenseResult`, gravados por `_finalize_defense`); `Defense` não tem coluna `result` (diferente do `.puml`). |
-| Exportação de relatórios em PDF | **Implementado** | `GET /api/v1/reports/overview/pdf` (app `reports`, `reports/pdf.py`, biblioteca ReportLab). Mesmos filtros, permissões, escopo e payload em cache de `reports/overview`; o PDF só formata os números calculados pelo backend. Conteúdo em português: título, data/hora da geração (America/Sao_Paulo), escopo e filtros por nome, resumo (com "Taxa de aprovação em bancas") e tabelas por curso, orientador e ano de defesa. Arquivo `relatorio-tcc-AAAAMMDD-HHMM.pdf` (`attachment`, `no-store`); erros sempre em JSON. Throttle próprio `reports_export` (10/min). Cada exportação gera `audit_log` `DOWNLOAD` (`ReportOverview`) só com identificadores dos filtros. CSV em `GET /api/v1/reports/overview/csv` e histórico em `ReportExecution` (JSON/PDF/CSV) implementados. |
-| Dashboards frontend | **Implementado** | Telas iniciais de aluno, orientador, coordenador e administrador usam dados reais; coordenação e administração consomem `reports/overview`. |
-
-## 11. Frontend (repositório separado, resumo de integração)
-
-| Item | Status | Observações |
-|---|---|---|
-| Login Google + sessão | **Implementado** | Integração com `/api/v1/session` e início OAuth. |
-| Login por token externo | **Implementado** | Troca de token e rota para avaliação externa. |
-| Área admin: usuários/cursos/auditoria | **Implementado** | Integrada aos endpoints administrativos; multi-papéis e navegação combinada. |
-| Convite de membro externo | **Implementado** | Tela de bancas e agendamento: convite vinculado ao membro, enviado por e-mail, com status, "Reenviar convite" e "Gerar novo convite"; o token não aparece em nenhuma tela. |
-| Fluxos de TCC/orientação | **Implementado** | Submissão do aluno, acompanhamento, upload de PDF/versões/documentos, parecer do orientador (aprovar/ajustes/reprovar), leitor de PDF com zoom/download, resultado da banca e publicação. |
-| Fluxos de banca/avaliação | **Implementado** | Agendamento (`DefenseScheduling`), gestão da banca (`DefenseCommittee`), avaliação individual (`DefenseEvaluation`) e avaliação externa (`ExternalEvaluation`) consomem os endpoints de `/api/v1/defenses`. |
-| Relatórios e dashboards | **Implementado** | `ReportsView` e os dashboards de coordenação/administração consomem `GET /api/v1/reports/overview`; o botão "Exportar PDF" baixa `GET /api/v1/reports/overview/pdf` com os filtros atuais. |
-| Repositório público | **Parcial** | O backend possui busca, filtros dinâmicos, cursos, detalhe com hash e download públicos, mas a tela `PublicRepository` consome a API e o E2E não tem mais `fixme`; o frontend tem cadastro de acervo, edição e despublicação na aba de monografias. |
-
-## 12. Endpoints de TCC implementados
-
-| Método | Rota | Acesso | Observação |
+| Requisito do enunciado | Status | Evidência | Observação |
 |---|---|---|---|
-| `GET` | `/api/v1/theses/me` | Aluno | Contexto da monografia, opções de curso/orientador e limites. |
-| `PUT` | `/api/v1/theses/me` | Aluno | Cria/atualiza rascunho e metadados. |
-| `POST` | `/api/v1/theses/me/files` | Aluno | Upload de nova versão em PDF com SHA-256. |
-| `POST` | `/api/v1/theses/me/submit` | Aluno | Envia a versão atual ao orientador. |
-| `POST` | `/api/v1/theses/me/withdraw` | Aluno | Descarta o envio ainda não avaliado pelo orientador (só com status `SUBMITTED`) e devolve a monografia ao estado editável. |
-| `GET` | `/api/v1/theses` | Autenticado | Lista com escopo por papel e filtros (`scope`, `q`, `status`, `courseId`, `advisorId`, `year`, `pendingReview`). |
-| `GET` | `/api/v1/theses/<id>` | Autor/orientador/coordenação/admin | Detalhe com versões, pareceres, documentos e histórico. |
-| `POST` | `/api/v1/theses/<id>/reviews` | Orientador | Parecer: aprovar, solicitar ajustes ou reprovar. |
-| `POST` | `/api/v1/theses/<id>/defense-result` | Coordenação/admin | Registra resultado final da banca. |
-| `POST` | `/api/v1/theses/<id>/publish` | Coordenação/admin | Publicação manual (a publicação normal é automática); exige aprovação, correção quando houver ressalvas e termo validado; idempotente para já publicada. |
-| `DELETE` | `/api/v1/theses/<id>` | Admin/coordenação do curso | Exclusão lógica (`deleted_at`) só de monografias nunca publicadas; publicada → 400. |
-| `POST` | `/api/v1/theses/<id>/unpublish` | Admin/coordenação do curso | Despublica com `reason` obrigatório (`PUBLISHED → ARCHIVED`). |
-| `PATCH` | `/api/v1/theses/<id>/published` | Admin/coordenação do curso | Edita metadados de monografia publicada; registra quem, o quê e quando. |
-| `POST` | `/api/v1/theses/<id>/published/files` | Admin/coordenação do curso | Novo PDF da publicada (multipart `file`, `changeDescription`); nova versão com novo SHA-256, anterior mantida. |
-| `POST` | `/api/v1/theses/legacy` | Admin/coordenação do curso | Cadastro manual de monografia antiga (multipart), já publicada com `origin=LEGACY_IMPORT`. |
-| `GET` | `/api/v1/theses/<id>/files/<fileId>/download` | Autorizado | Download/preview do PDF (`disposition=inline|attachment`). |
-| `POST` | `/api/v1/theses/<id>/documents` | Autorizado | Upload de documento complementar. |
-| `POST` | `/api/v1/theses/<id>/documents/<documentId>/validate` | Coordenação/admin | Valida documento complementar. |
-| `GET` | `/api/v1/theses/<id>/documents/<documentId>/download` | Autorizado | Download de documento complementar. |
-| `GET` | `/api/v1/public/theses` | Anônimo | Busca pública (`q`, `title`, `author`, `advisor`, `course`, `keyword`, `courseId`, `advisorId`, `year`, `ordering`, `page`, `pageSize`); cache `busca:<hash>`; throttle `public_repository`. |
-| `GET` | `/api/v1/public/theses/filters` | Anônimo | Cursos, orientadores, anos de defesa e palavras-chave presentes em publicados, com contagem. |
-| `GET` | `/api/v1/public/courses` | Anônimo | Cursos com `publishedThesesCount` (`withPublished=true` filtra). |
-| `GET` | `/api/v1/public/theses/<id>` | Anônimo | Detalhe público com `integrity.sha256` e `fileVersions`. |
-| `GET` | `/api/v1/public/theses/<id>/download` | Anônimo | Download da versão publicada (rechecagem SHA-256; throttle `public_download`). |
-| `GET` | `/api/v1/public/advisors` | Anônimo | Lista de orientadores (somente ativos); busca por nome, paginado (`q`, `page`, `pageSize`); sem e-mail no payload público. |
-| `GET` | `/api/v1/users` | Coordenação/admin | Diretório paginado de usuários; filtro `role` (`STUDENT`/`ADVISOR`/`COORDINATOR`/`ADMIN`) e `q`; inclui e-mail. |
-| `GET` | `/api/v1/users/suggest` | ADMIN/COORDINATOR/ADVISOR/STUDENT | Autocomplete de usuários institucionais (máx. 3): filtro `q` (mín. 2 caracteres; >80 ignorado), somente ativos, ordenado por nome/e-mail; orientador vê somente outros orientadores; coordenação/admin veem o diretório completo (ou `role=` para filtrar); throttle 60/min; resposta em cache curto (45 s). |
-| `POST` | `/api/v1/auth/dev-login` | Anônimo, **só com `DEBUG=True`** | Login de teste em desenvolvimento (`name`, `email`, `roles`); sem `DEBUG` responde 404. |
-| `GET` | `/api/v1/auth/dev-users` | Anônimo, **só com `DEBUG=True`** | Lista usuários ativos e perfis para o login de teste; sem `DEBUG` responde 404. |
-| `GET` | `/api/v1/theses/<id>/defenses` | Institucional | Lista defesas da tese (escopo por papel). |
-| `POST` | `/api/v1/theses/<id>/defenses` | Admin/coord/orientador | Agenda nova defesa; exige status `ADVISOR_APPROVED` ou `READY_FOR_DEFENSE`. |
-| `GET` | `/api/v1/defenses` | Institucional | Lista paginada de bancas visíveis ao usuário; filtros `?q=`, `?status=` e `?pendingEvaluation=true`; inclui dados da tese, aluno, situação do usuário na banca (`viewerMembership`) e `viewerPermissions`. |
-| `GET` | `/api/v1/defenses/schedulable-theses` | Institucional | Lista paginada de teses aptas a agendar banca (escopo de `_can_manage_defense`). |
-| `GET` | `/api/v1/defenses/<id>` | Institucional ou membro da banca | Detalhe da defesa com membros, avaliações, `statusHistory` (ordem cronológica), `allMembersConfirmed`, `pendingConfirmations` (só para quem gerencia a banca), `result`/`resultLabel`, `viewerMembership` e `viewerPermissions`. |
-| `PATCH` | `/api/v1/defenses/<id>` | Admin/coord/orientador | Atualiza data, duração, modalidade, local ou notas (só `SCHEDULED`); mudança de data/duração valida conflito de horário dos membros institucionais (400). |
-| `POST` | `/api/v1/defenses/<id>/cancel` | Institucional | Cancela a defesa e restaura status da tese. |
-| `POST` | `/api/v1/defenses/<id>/start` | Admin/coord/orientador da própria tese | Inicia a defesa (transição para `IN_PROGRESS`); exige confirmação de todos os membros não suplentes. |
-| `POST` | `/api/v1/defenses/<id>/close` | Admin/coord/orientador da própria tese | Encerra a defesa, calcula resultado e transita status da tese. |
-| `POST` | `/api/v1/defenses/<id>/members` | Institucional | Adiciona membro institucional à banca. |
-| `POST` | `/api/v1/defenses/<id>/members/external` | Admin/coord do curso/orientador da própria tese | Cria convite externo e adiciona membro externo à banca (201); o token vai só por e-mail. |
-| `POST` | `/api/v1/defenses/<id>/members/<memberId>/regenerate-token` | Admin/coord do curso/orientador da própria tese | "Gerar novo convite": revoga o convite do membro externo, cria outro e envia o token por e-mail (202). Throttle `invitation_resend`. |
-| `POST` | `/api/v1/defenses/<id>/members/<memberId>/resend-invitation` | Admin/coord do curso/orientador da própria tese | Reenvia o convite ainda válido com token novo por e-mail (202); o anterior deixa de valer. Throttle `invitation_resend` (5/min). |
-| `DELETE` | `/api/v1/defenses/<id>/members/<memberId>` | Institucional | Remove membro da banca (exige status `SCHEDULED` e sem avaliação). |
-| `POST` | `/api/v1/defenses/<id>/members/<memberId>/availability` | O próprio membro (institucional ou convite externo) | Confirma (`CONFIRMED`) ou recusa (`DECLINED`) disponibilidade; só com a banca `SCHEDULED`. |
-| `GET` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Institucional ou membro da banca | Lê avaliação; nota/notas visíveis somente ao próprio membro. |
-| `PUT` | `/api/v1/defenses/<id>/members/<memberId>/evaluation` | Membro da banca | Registra ou atualiza avaliação individual (decisão, nota 0–10, notas); a última avaliação encerra a banca automaticamente. Resposta: `evaluation`, `resultCalculationQueued`, `defenseStatus`, `defenseStatusLabel`. |
-| `POST` | `/api/v1/defenses/<id>/revert-status` | Admin | Reverte `IN_PROGRESS → SCHEDULED` ou `CANCELLED → status anterior`; `reason` obrigatório; `COMPLETED` não reverte. |
+| Django, DRF, Python, PostgreSQL | Implementado | `requirements.txt`, `docker-compose.yml`, migrações em 6 aliases | Django 6.1, DRF 3.18, Python 3.12, PostgreSQL 16. |
+| Redis (cache, sessão, uploads, rate limit) | Implementado | `CACHES`, `SESSION_ENGINE`, `theses/uploads.py`, `thesismanagerbackend/throttling.py` | Busca `busca:<sha256>`, diretórios, relatórios, limitadores e marcação `upload_em_andamento:<sha256>`. |
+| RabbitMQ + processamento assíncrono | Implementado | `events/` (outbox), `notifications/`, `indexing/`, `adjudication/`, read models | Publicação com confirms, DLQ, idempotência e retry manual. |
+| Extração de texto de PDF pela fila | Implementado | evento `thesis.text_extraction_requested`, `indexing/consumer.py` | Busca no texto extraído, sem acento, via `Thesis.search_text`. |
+| Frontend em JavaScript / React | Implementado (repo separado) | `thesis-manager-ufvjm-frontend`, 25 specs E2E ativas | Consome `/api/v1`. |
+| Grupos de até 5 alunos | Implementado | `THESIS_MAX_AUTHORS`, `authors` em `PUT /theses/me`, `/users/suggest` | Seletor de coautores no frontend. |
+| Linux | Implementado | Dockerfile, Compose, scripts | Ambiente de desenvolvimento e testes validado em Linux. |
+| Autenticação django-allauth | Implementado | `SOCIALACCOUNT_ONLY`, adaptadores em `accounts/adapters.py` | Google Workspace institucional; sem cadastro/senha local (delegação ao IdP). |
+| Perfis e permissões | Implementado | `accounts/permissions.py`, `theses/permissions.py`, serviços de domínio | ADMIN > COORDINATOR > ADVISOR > STUDENT; ator externo por convite. |
+| Auditoria de ações | Implementado | `AuditLog` com hash chain, `verify_audit_chain`, `SessionAudit` | Append-only; CSV/JSON; chaves de sessão não são gravadas em claro. |
+| Dashboard por perfil | Implementado | telas iniciais do frontend + `GET /reports/overview` | Indicadores reais do backend. |
+| CRUD de alunos, cursos, professores/coordenação | Implementado | `accounts/`, `academic/`, endpoints admin | Usuários e cursos soft-delete/validações próprias. |
+| Submissão e acompanhamento de monografia | Implementado | `/theses/me`, `/theses/me/files`, `/theses/me/submit`, `/theses/<id>` | Status, versões, pareceres e linha do tempo. |
+| Upload PDF: formato, tamanho e SHA-256 | Atendido | `theses/services.py::_validate_pdf_upload` | Valida assinatura `%PDF-`, marcador final `%%EOF`, tamanho (padrão 50 MB) e hash; não há sandbox para extração de PDFs maliciosos. |
+| Aprovação do orientador antes da banca | Implementado | `SCHEDULABLE_STATUSES` em `theses/models.py`, `defense_scheduling.py` | Nenhuma rota produz `READY_FOR_DEFENSE` sem parecer de aprovação. |
+| Agendamento: disponibilidade e conflito | Parcial | `theses/defense_committee.py`, `start_defense`, `sync_defense_status` | Conflito de horário é bloqueado; confirmação é exigida para **iniciar** a banca, não para agendá-la (o enunciado pede validação no agendamento). |
+| Membro externo por token temporário | Implementado | `ExternalInvitation`, evento `defense.external_member_invited`, consumidor de convites | Token apenas no e-mail; hash no banco; uso único; escopo à própria banca. |
+| Notificação automática da banca | Implementado | planejadores em `notifications/consumer.py` | E-mail para autores, orientador e avaliadores; coordenação não é destinatária. |
+| Avaliação individual e resultado final | Implementado | `theses/defense_evaluation.py`, `adjudication/consumer.py`, `_finalize_defense` | Resultado calculado após todas as avaliações não suplentes; suplentes não avaliam. |
+| Publicação automática condicionada | Implementado | `publish_if_ready`, `publication_requirements` | Exige aprovação, versão corrigida se houver ressalvas e autorização validada com integridade conferida. |
+| Repositório público somente publicadas | Implementado | `theses/repository.py`, `repository_readmodel/` | `PUBLISHED` + `is_public` + não excluída; sem e-mail nos payloads. |
+| Busca por título/autor/orientador/curso/ano/palavras-chave | Implementado | `GET /api/v1/public/theses` | Ano = ano de defesa (`defense_year`); filtros e paginação validados. |
+| API REST JSON, endpoints públicos e restritos | Implementado | `/api/v1`, serializers DRF | Respostas consistentes; paginação `count/page/pageSize/totalPages/lastPageCount`. |
+| Arquitetura de serviços com APIs próprias | Parcial | seis URLconfs, perfil `microservices`, bancos por serviço, gateway nginx | Serviços separados por processo/banco/API, mas mesmos código e imagem; não são deploys independentes. |
+| Escalabilidade para milhares de visitantes | Não verificável | cache, índice, paginação e agregações implementados | Sem teste de carga com métricas; não afirmar capacidade comprovada. |
+| Dashboard/relatórios | Implementado | `reports/services.py`, `reports/pdf.py`, `reports/csv_export.py`, read model | `overview`, PDF e CSV; agregação no banco, cache de 60 s. |
+| Histórico: quem, o quê, quando | Implementado | `AuditLog`, `AuditEvent`, `audit_log` export | Append-only com hash encadeado e filtros por ator/entidade/período. |
 
-## 13. Prioridades sugeridas (próximos passos)
+## 2. Detalhamento por área
 
-1. **Fila assíncrona**: levar extração/indexação para a fila (ver "Eventos assíncronos: melhorias futuras").
-2. **Concluir integração do repositório público no frontend** (backend completo: busca, filtros dinâmicos, cursos, cache e publicação automática) e criar as telas de acervo, edição e despublicação.
-3. **Relatórios**: exportação CSV e histórico em `report_execution`, se forem necessários; os indicadores já são calculados em `GET /api/v1/reports/overview` e exportados em PDF por `GET /api/v1/reports/overview/pdf`.
-4. **Consolidar rate limiting/Redis** para uploads, busca e rastreamento de upload em andamento.
-5. **Ampliar cobertura de testes** de regras, transições, permissões e contratos API.
-6. **Decisões pendentes (banca)**: orientador agenda diretamente vs. solicita (Filipe); coordenador segue comportamento de admin para leitura de avaliações.
+### Autenticação, usuários e administração
 
----
+- Usuário customizado `accounts.User` (UUID, e-mail único, `name`, `is_staff`, `is_active`); papéis com histórico em `UserProfileRole` e papel efetivo derivado do banco.
+- Login institutional Google com validação de domínio, `email_verified` e `hd`; `/api/v1/session`, `/api/v1/auth/google/start`, `DELETE /api/v1/session`.
+- Sessão externa por convite (`ExternalInvitationSessionAuthentication`), com expiração, uso único e CSRF nas requisições não seguras.
+- `/api/v1/auth/dev-login` e `/api/v1/auth/dev-users` existem **somente** com `DEBUG=True` (padrão do Compose agora é `False`).
+- CRUD admin de usuários, cursos e departamentos; diretórios `/api/v1/users`, `/api/v1/users/suggest` e `/api/v1/public/advisors` com escopo e cache próprios.
+- Restrição de rede administrativa por `ADMIN_ALLOWED_CIDRS` com proxy confiável configurável.
 
-### Repositório público: fora do escopo de `feature/repositorio-publico`
+### Monografias e arquivos
 
-- **Notificações** de despublicação, edição de publicada e cadastro de acervo: não há eventos no catálogo para essas ações (a regra do projeto pede decisão explícita antes de ampliar destinatários); só a publicação (manual ou automática) emite `thesis.published`.
-- **Republicação** de monografia despublicada (`ARCHIVED`) não existe.
-- **Relatórios**: monografias de acervo não têm `Defense`, então não entram em `byDefenseYear` nem na taxa de aprovação.
+- `theses/models.py`: `Thesis`, `ThesisAuthor`, `StoredFile`, `ThesisFile`, `ThesisReview`, `ThesisStatusHistory`, `Keyword`, `ThesisDocument`.
+- Upload somente PDF com assinatura `%PDF-` e marcador final `%%EOF`, limite configurável, nome gerado por UUID, SHA-256 e deduplicação; marcação `upload_em_andamento:<sha256>` no Redis e constraint única de SHA-256 no banco para uploads concorrentes.
+- Integridade recalculada antes de submissão, parecer, publicação e download público.
+- Histórico de versões, upload da versão corrigida, documentos complementares com validação e checagem de hash do termo de autorização.
+- Exclusão lógica protegida para monografias nunca publicadas; publicadas são bloqueadas no modelo, queryset, cascata e admin. Despublicação `PUBLISHED → ARCHIVED` exige motivo; não há republicação.
 
-### Eventos assíncronos: melhorias futuras (fora do escopo de `feat/async-events`)
+### Bancas, avaliação e defesa
 
-- **Novos eventos**: `defense.member_invited`, `defense.cancelled`, `defense.rescheduled`, `thesis.review_recorded` e `defense.external_member_invited` implementados; ainda não há eventos para edição de publicada, despublicação e cadastro de acervo.
-- **Retenção**: `manage.py cleanup_events --days 30 [--dry-run --batch-size N]` remove eventos publicados e marcadores antigos em lotes.
-- **Reenvio automático de notificações**: hoje só manual (`--retry-pending`), por decisão do grupo.
+- Agendamento exige `ADVISOR_APPROVED`/`READY_FOR_DEFENSE`; admin, coordenador do curso ou orientador da própria tese podem agendar.
+- Local obrigatório e URL válida quando `modality=REMOTE`; conflito de horário verificado ao adicionar membro e ao reagendar.
+- Disponibilidade (`PENDING`/`CONFIRMED`/`DECLINED`) com endpoints do próprio membro; `start_defense` e abertura automática exigem confirmação dos não suplentes.
+- Avaliação individual com nota 0–10, parecer e recomendação; edição permitida somente antes do encerramento e apenas pelo próprio avaliador.
+- Encerramento manual e automático usam `_finalize_defense`; histórico de status e evento `defense.completed` com `result`/`automatic`. Resultado exposto em `ThesisStatusHistory.metadata` (`defenseId`, `defenseResult`).
+- Reversão administrativa de status (`IN_PROGRESS → SCHEDULED`, `CANCELLED → anterior`), com `reason` obrigatório; estados publicados/arquivados não podem ser revertidos nem encerrados.
+- Resultado manual em nível de tese (`POST /theses/<id>/defense-result`) permanece apenas para casos sem banca: é recusado quando existe banca ativa ou a monografia já foi publicada/arquivada.
 
-## 14. Pendências identificadas na auditoria (2026-11-16, não implementadas)
+### Repositório e cache
 
-A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes por serem tarefas delegadas a outros desenvolvedores e não parte da refatoração de auditoria. Os pontos exatos e o contrato proposto estão anotados no código com `TODO(auditoria)` (backend: `theses/views.py`, `theses/urls.py`, `theses/services.py`, `theses/defense_committee.py`).
+- Busca com `q`, `title`, `author`, `advisor`, `course`, `keyword`, `courseId`, `advisorId`, `year`, `ordering`, paginação e throttle por IP.
+- Cache `busca:<sha256>` com versão rotacionada no commit da origem **e** após o commit da projeção, evitando página antiga entre os dois momentos.
+- Filtros/cursos/detalhe em cache; download com nova verificação SHA-256; erros sempre em JSON.
+- Cadastro de acervo (`/theses/legacy`), edição e troca de PDF de publicadas limitadas a admin/coordenação do curso; gestão centralizada em `theses/repository_management.py`.
 
-- ~~**Repositório público incompleto para anônimos**~~ e ~~**sem endpoint de filtros públicos**~~: resolvidos em 2026-11-22 (`feature/repositorio-publico`; ver seção 9).
-- **N+1 na listagem de monografias** (revisado em 2026-11-21): autores, palavras-chave e arquivo atual já vêm por prefetch, e a listagem de bancas (`GET /api/v1/defenses`) tem número de consultas constante. Em `GET /api/v1/theses`, porém, `thesis_permissions` consulta os papéis do leitor (`user_roles`, `user_is_admin`, `user_can_access_thesis`) a cada monografia: medido com 2 e 6 itens, +3 consultas por monografia para admin e +4 para orientador. Correção esperada: resolver os papéis do leitor uma vez por página, como a listagem de bancas faz.
+### Relatórios e auditoria
 
-## Observações finais
-- Itens marcados como **Implementado** referem-se ao estado observado no código; recomenda-se validar em ambiente integrado (Docker + frontend + Postgres/Redis reais) antes de considerar produção.
-- Após alterações de backend, reiniciar o serviço (`docker compose restart backend`) quando o autoreload não aplicar.
-- Restrições administrativas (`/api/v1/admin/*`) dependem de `ADMIN_ALLOWED_CIDRS`/configuração de rede confiável.
-## Testes End-to-End (Playwright)
+- `GET /api/v1/reports/overview`: resumo, `byCourse`, `byAdvisor`, `byDefenseYear`, `options`; filtros `courseId`, `advisorId`, `year`, `scope=coordinated`.
+- Admin/superuser vê todos os cursos; coordenador vê apenas seus cursos; staff sem papel de relatório, orientador, aluno e sessão externa recebem 403.
+- Taxa de aprovação = (aprovadas + com ressalvas) / bancas com resultado; tempo médio = última submissão antes da banca até `scheduled_datetime`, em dias com uma casa decimal.
+- PDF A4 em português e CSV com os mesmos números do payload em cache; cada exportação gera `AuditLog.DOWNLOAD` com identificadores dos filtros.
+- `AuditLog` append-only com hash SHA-256 encadeado; `verify_audit_chain` verifica a cadeia; exportações CSV/JSON neutralizam fórmulas de planilha.
 
-- **Implementado (suíte no repositório frontend)**: 20 testes em `../thesis-manager-ufvjm-frontend/e2e/`, executados com `npm run test:e2e`. Cobrem autenticação por usuário de teste, navegação por perfil, CRUD de cursos e usuários, auditoria (filtros, detalhes, exportação CSV), submissão de monografia pelo aluno, parecer do orientador, agendamento de banca e relatórios com exportação PDF.
-- **Configuração isolada**: `thesismanagerbackend/settings_e2e.py` permite executar o backend com SQLite, cache em memória e e-mail em memória, sem PostgreSQL/Redis/RabbitMQ. O login de teste exige `DEBUG=True`.
+## 3. Correções realizadas na auditoria final (2026-11-23)
 
-## Auditoria de concorrência (2026-11-22)
+| Correção | Local | Validação |
+|---|---|---|
+| Gateway nginx apontava para portas 8000, mas as APIs de serviço escutam em 8011–8016 | `docker/nginx.conf` | teste de configuração `test_microservices_config` |
+| Gateway e backend publicavam a mesma porta 8000 no perfil `microservices` | `docker-compose.yml`, `.env.example` | teste de configuração |
+| Eventos de catálogo sem planejador (`text_extraction_requested`, `text_extracted`, `repository_updated`) caíam na DLQ do consumidor de notificações | `notifications/consumer.py` | `notifications.tests.test_consumer` |
+| Lock de convite externo aberto no alias errado em bancas reenviadas/regeneradas | `theses/defense_committee.py` | `thesismanagerbackend.tests.test_transaction_aliases` |
+| Corrida na deduplicação de PDFs entre uploads simultâneos | `theses/services.py` (savepoint + `IntegrityError` reutiliza o arquivo canônico); marcação Redis mantida como antes | `theses.tests.test_upload_tracking` |
+| Limite diário de upload não era atômico | `thesismanagerbackend/throttling.py` | teste concorrente em `test_upload_throttle` |
+| Cache público podia ficar obsoleto até o TTL após a projeção assíncrona | `theses/repository_cache.py`, `repository_readmodel/projections.py` | `repository_readmodel.tests.test_projections` |
+| Resultado manual podia ser lançado com banca ativa ou sobrescrever monografia publicada | `theses/services.py`, `theses/defense_scheduling.py` | `theses.tests.test_coordinator_scope_publication` |
+| Coordenador de outro curso podia publicar/validar documento/resultado manual de tese que orientava | `theses/services.py` | teste acima |
+| Token de serviço e chave secreta com valores padrão publicamente conhecidos | `settings.py`, `docker-compose.yml`, `.env.example`, `accounts/views.py` | `accounts.tests.test_service_introspection` |
+| Staff sem papel de relatório recebia 200 vazio em vez de 403 | `reports/views.py` | `reports.tests.test_overview_api` |
+| Chaves de sessão em claro no log de auditoria | `accounts/signals.py` | `accounts.tests.test_audit_quality` |
+| Fórmulas de planilha em CSV exportados | `thesismanagerbackend/csv_utils.py`, `reports/csv_export.py`, `accounts/views.py` | `thesismanagerbackend.tests.test_csv_utils` |
+| Projetores de read model aceitavam eventos de versão futura | `repository_readmodel/projections.py`, `reports_readmodel/projections.py` | testes de projeção |
+| Chaves de cache de diretório com valores não normalizados | `accounts/directory.py` | `accounts.tests.test_directory` |
+| Limpeza de eventos misturava transações de bancos diferentes | `events/management/commands/cleanup_events.py` | `events.tests.test_cleanup_events` |
+| Logs de apps fora do runserver sem formato/nível | `settings.py` | `thesismanagerbackend.tests.test_logging` |
+| `GET /api/v1/public/courses` retornava 500 no serviço de repositório (chamada sem argumento obrigatório) | `repository_readmodel/views.py` | `repository_readmodel.tests.test_projections` + smoke no gateway/serviço |
+| PDF com apenas `%PDF-` no início era aceito (polyglot/arquivo truncado) | `theses/services.py` | `theses.tests.test_pdf_validation` — TDD: 2 testes falharam antes da implementação; um terceiro caso (comentário após `%%EOF`, usado no E2E) falhou e levou à checagem do marcador no trecho final |
+| Documentação desatualizada, referência a arquivo inexistente e endpoint de depuração sem relação com o domínio | `README.md`, este arquivo, `AGENTS.md`, `thesismanagerbackend/urls.py` | revisão final |
 
-- **Corrigido:** cadeia de hash da auditoria serializada com `pg_advisory_xact_lock` em `record_audit` (`accounts/concurrency.py`), evitando bifurcação sob escritas simultâneas.
-- **Corrigido:** proteção do último administrador e atribuição de curso passaram a usar locks transacionais; avaliações de banca são revalidadas sob lock antes da escrita ( impedindo alteração após o encerramento).
-- **Corrigido:** convites expirados agora persistem `EXPIRED`; mutações de sessão externa ocorrem após o commit; exclusão física de PDFs usa `transaction.on_commit`; membros institucionais duplicados são bloqueados por constraint; extração de texto usa `SKIP LOCKED`.
-- **Novos testes:** `accounts/tests/test_concurrency.py` e `theses/tests/test_concurrency_integrity.py`.
+## 4. Limitações e riscos remanescentes
 
-## Refatoração de qualidade (2026-11-22)
+- **Requisitos de negócio:** confirmação de disponibilidade não bloqueia o agendamento, apenas o início da banca (mudança exigiria alterar o fluxo de convites após o agendamento).
+- **Arquitetura:** serviços compartilham código e imagem; não há deploy independente nem descoberta de serviços.
+- **Mensageria:** não há retry automático para notificações `FAILED`; a adjudicação descarta o evento quando `_finalize_defense` falha transitoriamente (o fechamento manual continua disponível). A emissão de token de convite e a gravação da notificação ocorrem em bancos diferentes, sem transação distribuída.
+- **Concorrência:** duas entregas simultâneas do mesmo evento de convite podem emitir tokens em sequência; a invalidação do token anterior e o evento na outbox pertencem a bancos diferentes.
+- **Desempenho:** sonda controlada no stack local (200 requisições, 20 concorrentes, busca em cache): 0 erros, p50 ≈ 50 ms, p95 ≈ 89 ms. Isso **não** comprova suporte a milhares de visitantes; não houve teste de carga com dados e concorrência representativos.
+- **Infraestrutura:** containers rodam como root; `ADMIN_ALLOWED_CIDRS` no Compose inclui a sub-rede Docker para permitir o gateway, o que é mais amplo que o menor privilégio.
+- **Frontend:** o repositório frontend ainda contém observações antigas no próprio README sobre o repositório público e E2E; as especificações estão ativas e não usam `fixme`.
 
-- `AuditPayload` (dataclass) substitui os 15 parâmetros do cálculo do hash, sem alterar o conteúdo hashed.
-- Rótulos de status/resultado da auditoria passaram a ser derivados dos `TextChoices` dos models (remove duplicação; "OTHER" agora usa o rótulo do model, "Outro").
-- Helpers extraídos: `actor_from_request`, `audit_defense`, `visible_thesis_or_404`, `parse_year_filter` e constantes de query params.
-- Exportação CSV usa os campos do serializer, mantendo os dois formatos alinhados.
+## 5. Testes e validação
 
-## Contrato estruturado de auditoria (2026-11-22)
-
-- A resposta de `/api/v1/admin/audit-logs` inclui `event`, objeto estruturado com `action`, `category`, `entity` (tipo/id/nome/referência), `actor` (id/nome/e-mail/perfis), `origin` e `metadata`/`changes` tipados. Os campos antigos (`summary`, `details`, rótulos) permanecem apenas como compatibilidade transitória.
-- `accounts/audit_data.py` resolve relacionamentos em lote e expõe dados sem frases; `accounts/audit_export.py` formata CSV/JSON sem depender de `AuditPresenter`.
-- Marcadores enum (`accounts/audit_identifiers.py`) são a fonte única de identificadores e rótulos no backend.
-
-## Auditoria geral (2026-11-22)
-
-- `TRUSTED_PROXY_CIDRS`: `X-Forwarded-For` só é aceito quando `REMOTE_ADDR` é um proxy configurado; sem isso, a restrição administrativa poderia ser burlada.
-- Monografias com `deleted_at` não aparecem mais em listagens nem em consultas de escopo.
-- Respostas de convite externo (inclusão, reenvio e novo convite) usam `Cache-Control: no-store` e não trazem o token, que só existe no e-mail; e-mails de login falho não vão para logs de aplicação.
-- N+1 reduzido em `GET /api/v1/theses/<id>/defenses` (prefetches completos) e filtros de ano usam intervalos indexáveis.
-- Removidos `try/except Exception: pass` silenciosos no carregamento de usuários administrativos.
-
-
-## Atualização de conformidade — segunda rodada (2026-11-23)
-
-| Item | Situação |
+| Suíte | Situação |
 |---|---|
-| Contagem de publicadas no cadastro de curso | **Implementado** — `published_theses_counts()` no app `academic`, sem JOIN cross-DB. |
-| Política global de upload por usuário | **Implementado** — `DailyUploadThrottle` aplicado aos 4 endpoints de upload; `UPLOAD_GLOBAL_DAILY_LIMIT` (padrão 50/dia). |
-| CSV de relatórios e histórico | **Implementado** — `GET /api/v1/reports/overview/csv`, `reports/csv_export.py`, modelo `ReportExecution` registrando JSON/PDF/CSV. |
-| E2E de acervo/edição/despublicação | **Implementado** — `e2e/repository-management.spec.ts`. |
-| Eventos de cancelamento/remarcação/parecer | **Implementado** — `defense.cancelled`, `defense.rescheduled`, `thesis.review_recorded`, com planners e templates. |
-| Retenção de eventos | **Implementado** — `manage.py cleanup_events --days N [--dry-run --batch-size N]`. |
-| Correções de separação de bancos | **Implementado** — migrações iniciais sem FK cross-service, transações no alias correto, snapshots locais em payloads/filtros/agregações. Escritas trocaram atribuição de objetos de outros serviços por `*_id` (`course_id`, `advisor_id`, `author_id`, `uploaded_by_id`, `created_by_id`, `changed_by_id`, `validated_by_id`, `reviewer_id`, `submitted_by_id`, `institutional_member_id`, `external_invitation_id`), com teste de regressão (`theses/tests/test_cross_service_assignments.py`) que usa um roteador estrito. |
-| Limpeza de uploads no Docker Compose | **Implementado** — PDFs e documentos ficam no volume nomeado `media_data` (`/app/media`); `docker compose down -v` remove banco, cache, fila **e arquivos enviados**. |
-| Auditoria sistemática da separação de bancos | **Implementado** — corrigidos JOIN/subquery cross-DB em `reports/services.py` e nos dois projectors de read model; `select_for_update()` com `atomic()` no alias dono em `academic`/`accounts`/`notifications`; consumers gravam linhas do serviço antes do marcador de idempotência. Guardas em `thesismanagerbackend/tests/test_cross_database_queries.py`, `test_transaction_aliases.py`, `test_consumer_alias_order.py` e `test_migration_invariants.py`. |
-| Suítes rápida e completa | **Implementado** — `manage.py test_fast` (~1 min, 179 testes em 35 módulos curados, roda a cada mudança) e `manage.py test` (~8 min, 669 testes, após mudanças grandes). Estado de teste isolado por PID; CORS/CSRF do E2E acompanham a porta do frontend. Duas suítes E2E simultâneas via `scripts/run-e2e-isolated.sh` (portas, banco, mídia e outputs únicos) validadas: 25/25 em cada uma. |
+| `python manage.py test_fast` | 210 testes, OK (41 módulos curados), após a auditoria. |
+| `python manage.py test` | 704 testes, 6 falhas conhecidas do SQLite (detalhes no README). |
+| `./scripts/test-postgres.sh` | 704 testes, **OK** nos 6 bancos PostgreSQL separados (`SERVICE_DATABASES_SHARED=False`). |
+| E2E Playwright | 25 especificações ativas no repositório frontend; `npm run test:e2e`. |
 
-## Integração com `origin/main` (merge 2026-11-23)
+## 6. Endpoints principais
 
-Camila entregou na `main` o envio do token do membro externo por e-mail. A branch incorporou essa evolução mantendo a separação de bancos:
+| Método | Rota | Acesso |
+|---|---|---|
+| `GET` | `/health`, `/api/v1/session` | anônimo / anônimo |
+| `GET` | `/api/v1/public/theses`, `/filters`, `/<id>`, `/<id>/download` | anônimo |
+| `GET` | `/api/v1/public/courses`, `/public/advisors` | anônimo |
+| `PUT`, `POST` | `/api/v1/theses/me`, `/files`, `/submit`, `/withdraw` | aluno autenticado |
+| `GET` | `/api/v1/theses`, `/theses/<id>` | conforme escopo |
+| `POST` | `/theses/<id>/reviews`, `/documents`, `/documents/<id>/validate`, `/publish`, `/unpublish`, `/defense-result` | orientador/coordenação/admin |
+| `POST` | `/theses/<id>/defenses`, `/theses/legacy`, `/theses/<id>/published`, `/published/files` | coordenação/admin |
+| `GET`, `POST`, `PATCH` | `/api/v1/defenses`, `/defenses/<id>`, `/theses/<id>/defenses` | institucional, conforme escopo |
+| `POST` | `/defenses/<id>/start`, `/close`, `/cancel`, `/revert-status` | gestão da banca / admin |
+| `POST`, `PUT`, `DELETE` | `/defenses/<id>/members[...]`, `/members/<id>/evaluation` | membro da banca / gestão |
+| `GET`, `POST`, `PATCH`, `DELETE` | `/api/v1/admin/users`, `/courses`, `/departments`, `/audit-logs`, `/external-invitations` | admin restrito por rede |
+| `GET` | `/api/v1/reports/overview`, `/overview/pdf`, `/overview/csv` | coordenação/admin |
 
-- **Conflitos resolvidos**: `AGENTS.md`, `FUNCIONALIDADES.md`, `accounts/views.py` (removido o permissivo `CanInviteExternalCommitteeMember`, mantido `IsInstitutionalUser`), `docker-compose.yml` (Mailpit + `media_data` + `SERVICE_DATABASES_SHARED=False`), `notifications/consumer.py` (planner event-aware da main com a ordem "linhas → marcador" da branch), `notifications/delivery.py`, `theses/defense_committee.py` (nova API sem token na resposta, escrita via `*_id`) e testes.
-- **Migrações**: a main trouxe `accounts/0002_external_invitation_token_delivery`, `0004_merge_token_delivery_audit_category`, `notifications/0003_seed_external_member_invited_template`, `0004_notification_status_cancelled`; a branch trouxe `accounts/0004_user_department...` e `notifications/0004_alter_notification_event_and_more`, `0005_seed_workflow_templates`. Criados os merges `accounts/0005_merge_invitation_and_profile_fields` e `notifications/0006_merge_invitation_and_workflow_templates`. `makemigrations --check` limpo e `migrate` validado nos 6 aliases em modo dividido.
-- **Correção adicional de arquitetura**: `notifications/invitations.py` fazia `select_related("event")` (JOIN com `outbox_event` de outro banco) e `select_for_update()` fora do alias dono. Agora `issue_token_locked()` abre `atomic(using=auth)` para travar o convite e emitir o token; `prepare_invitation_retry()` trava a notificação no alias `notifications` e carrega o evento em consulta separada no alias `default`. Guarda em `thesismanagerbackend/tests/test_invitation_cross_database.py`.
-- **Validação pós-merge**: backend 669 testes (`0 errors`, mesmas 6 falhas SQLite conhecidas), E2E 25/25, frontend 220 testes unitários, `tsc` limpo.
-
-## Validação em PostgreSQL real (modo dividido) — 2026-11-23
-
-Executada a suíte contra os 6 bancos separados do Compose (porta 5433), com `DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings` e `SERVICE_DATABASES_SHARED=False`: **674 testes, OK**. As 6 falhas do SQLite desapareceram (`nulls_distinct` e `JSONField`), confirmando que eram artefatos do banco de teste.
-
-O modo dividido revelou problemas que o modo compartilhado escondia, todos corrigidos com teste que falha antes/sucesso depois:
-
-- `TEST_RUNNER` `ServiceAwareTestRunner`: os testes declaravam apenas `default` e o Django bloqueava escritas nos outros aliases (`DatabaseOperationForbidden`). Agora todos os aliases são declarados quando `SERVICE_DATABASES_SHARED=False`.
-- Helpers e fixtures de teste passaram a gravar FKs cross-service via `*_id` (`course_id`, `advisor_id`, `author_id`, `uploaded_by_id`, `external_invitation_id`).
-- `select_related("external_invitation")` em fixtures/testes substituído por consulta separada no alias `auth`.
-- `cleanup_events`: o `SET_NULL` de `Notification.event` e o `DELETE` de `outbox_event` agora rodam nos aliases donos (collector do Django usava o alias do evento).
-- `resend_external_member_invitation`: corrigida atribuição cross-service que restava (`member.external_invitation_id = invitation.pk`).
-- `accounts/tests/test_audit_integrity`: cursor resolvido via `database_for_model(AuditLog)`.
-- Espelhamento SQLite (E2E) preservado: `test_fast` 185 testes OK, E2E 25/25, health do stack real 200.
+A lista completa de rotas está em `theses/urls.py`, `accounts/urls.py`, `academic/urls.py` e `reports/urls.py`.

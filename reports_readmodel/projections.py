@@ -10,7 +10,7 @@ from __future__ import annotations
 from django.db import IntegrityError, transaction
 from django.utils.dateparse import parse_datetime
 
-from events.catalog import EventType
+from events.catalog import EventType, is_known_event
 from events.envelope import EventEnvelope
 from accounts.concurrency import database_for_model
 from events.models import ProcessedEvent
@@ -53,6 +53,8 @@ def handle_event(envelope: EventEnvelope) -> str:
     """Apply one reporting event at most once."""
     if envelope.event_type not in SUPPORTED_EVENTS:
         return "SKIPPED"
+    if not is_known_event(envelope.event_type, envelope.event_version):
+        return "REJECTED"
     if set(envelope.payload) != EXPECTED_KEYS[envelope.event_type]:
         return "REJECTED"
     marker_db = database_for_model(ProcessedEvent)

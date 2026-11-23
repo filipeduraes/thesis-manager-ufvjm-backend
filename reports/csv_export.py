@@ -10,6 +10,8 @@ import csv
 import io
 from typing import Any
 
+from thesismanagerbackend.csv_utils import escape_formula_cell
+
 
 def render_overview_csv(payload: dict[str, Any]) -> bytes:
     """
@@ -49,7 +51,7 @@ def render_overview_csv(payload: dict[str, Any]) -> bytes:
         for row in payload.get(section, []):
             name = row.get("name") or row.get("courseName") or row.get("advisorName") or ""
             writer.writerow([
-                name,
+                escape_formula_cell(name),
                 row.get("thesisCount", ""),
                 row.get("defensesCompletedCount", ""),
                 row.get("approvalRate", ""),

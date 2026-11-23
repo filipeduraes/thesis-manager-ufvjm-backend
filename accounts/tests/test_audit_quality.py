@@ -25,7 +25,7 @@ from accounts.audit_presentation import (
     AuditPresenter,
     choices_labels,
 )
-from accounts.models import AuditAction, InvitationStatus, ProfileRole, User, UserProfileRole
+from accounts.models import AuditAction, AuditLog, InvitationStatus, ProfileRole, User, UserProfileRole
 from accounts.serializers import AuditLogSerializer
 from accounts.services import record_audit
 from django.test import TestCase, override_settings
@@ -149,6 +149,13 @@ class AuditExportContractTests(TestCase):
         self.assertEqual(event["entity"]["type"], "Course")
         self.assertEqual(event["entity"]["name"], "Engenharia")
         self.assertEqual(event["category"], AuditCategory.MANAGEMENT.value)
+
+    def test_login_audit_never_stores_the_raw_session_key(self) -> None:
+        user = User.objects.create_user(email="login@ufvjm.edu.br", name="Login", password="senha123")
+        self.client.force_login(user)
+        log = AuditLog.objects.filter(action=AuditAction.LOGIN).latest("occurred_at")
+        self.assertNotIn("session_key", log.metadata)
+        self.assertIn("sessionKeyHash", log.metadata)
 
     def test_csv_export_uses_structured_layer(self) -> None:
         from accounts.audit_export import build_export_row

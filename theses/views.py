@@ -98,7 +98,7 @@ logger = logging.getLogger(__name__)
 
 class BinaryFileRenderer(BaseRenderer):
     """
-    Permite respostas binárias/arquivo em views DRF sem negociação JSON.
+    Allow binary file responses from DRF views without JSON negotiation.
     """
 
     media_type = "*/*"
@@ -108,15 +108,15 @@ class BinaryFileRenderer(BaseRenderer):
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
         """
-        Retorna o conteúdo sem serialização.
+        Return the content without serialization.
 
         Args:
-            data: Conteúdo da resposta.
-            accepted_media_type: Tipo aceito pela negociação.
-            renderer_context: Contexto do renderer.
+            data: Response content.
+            accepted_media_type: Media type accepted by content negotiation.
+            renderer_context: Renderer context.
 
         Returns:
-            object: Conteúdo original.
+            object: Original content.
         """
         return data
 
@@ -749,7 +749,7 @@ class ThesisDefenseResultView(APIView):
 
 class StudentThesisWithdrawView(APIView):
     """
-    Descarta o envio atual da monografia antes da avaliação do orientador.
+    Discard the current thesis submission before the advisor reviews it.
     """
 
     permission_classes = [IsInstitutionalUser, IsStudentUser]
@@ -757,13 +757,13 @@ class StudentThesisWithdrawView(APIView):
 
     def post(self, request) -> Response:
         """
-        Reverte um envio ainda não avaliado para estado editável.
+        Move an unreviewed submission back to the editable state.
 
         Args:
-            request: Requisição HTTP.
+            request: HTTP request.
 
         Returns:
-            Response: Monografia atualizada.
+            Response: Updated thesis payload.
         """
         thesis = _student_thesis(request.user)
         if thesis is None:

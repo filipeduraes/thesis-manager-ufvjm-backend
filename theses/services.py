@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files.storage import default_storage
 from django.db import IntegrityError, models, transaction
 from django.db.models import Max, Q, QuerySet
@@ -35,6 +35,7 @@ from theses.repository_cache import invalidate_public_repository_cache
 from theses.search_index import refresh_search_text
 from theses.uploads import clear_upload_in_progress, mark_upload_in_progress, upload_in_progress
 from theses.models import (
+    ACTIVE_DEFENSE_STATUSES,
     APPROVED_DEFENSE_STATUSES,
     CORRECTION_UPLOAD_STATUSES,
     DEFENSE_RESULT_STATUSES,
@@ -67,6 +68,8 @@ from theses.models import (
 logger = logging.getLogger(__name__)
 
 PDF_MAGIC_BYTES = b"%PDF-"
+PDF_EOF_MARKER = b"%%EOF"
+PDF_EOF_TAIL_BYTES = 1024
 REPOSITORY_TIME_ZONE = ZoneInfo("America/Sao_Paulo")
 STATUS_DESCRIPTIONS: dict[str, str] = {
     ThesisStatus.DRAFT: "Preencha os dados da monografia e envie o PDF para submeter.",
@@ -268,6 +271,28 @@ def theses_visible_to(user: User, base_queryset: QuerySet[Thesis] | None = None)
     if ProfileRole.COORDINATOR in roles:
         visibility |= coordinated_courses_filter(user, prefix="course__")
     return queryset.filter(visibility).distinct()
+
+
+def ensure_coordinator_manages_thesis_course(user: User, thesis: Thesis) -> None:
+    """
+    Require that a coordinator manages the course of a thesis.
+
+    Administrators pass regardless of the course. The check complements the
+    role-only checks of manual result, publication and document validation so
+    a coordinator who also advises a thesis in another course cannot manage it.
+
+    Args:
+        user: Institutional user.
+        thesis: Thesis whose course is being managed.
+
+    Raises:
+        PermissionDenied: When the user is not an administrator nor a
+            coordinator linked to the thesis course.
+    """
+    if user_is_admin(user):
+        return
+    if not user_is_coordinator(user) or not Course.objects.filter(pk=thesis.course_id).filter(coordinated_courses_filter(user)).exists():
+        raise PermissionDenied("Apenas a coordenação do curso desta monografia pode realizá-la.")
 
 
 def coordinated_courses_filter(user: User, prefix: str = "") -> Q:
@@ -745,15 +770,21 @@ def _validate_pdf_upload(uploaded_file: Any, setting_name: str, default_mb: int)
         raise ValidationError("Envie um arquivo PDF válido.")
     digest = hashlib.sha256()
     size = 0
+    tail = b""
     for chunk in uploaded_file.chunks():
         size += len(chunk)
         if size > maximum_bytes:
             limit_mb = maximum_bytes // (1024 * 1024)
             raise ValidationError(f"O arquivo excede o limite de {limit_mb} MB.")
         digest.update(chunk)
+        tail = (tail + chunk)[-PDF_EOF_TAIL_BYTES:]
     uploaded_file.seek(0)
     if size == 0:
         raise ValidationError("O arquivo enviado está vazio.")
+    # A assinatura inicial sozinha aceita polyglots e arquivos truncados; o marcador
+    # final é verificado sem carregar o documento inteiro em memória.
+    if PDF_EOF_MARKER not in tail:
+        raise ValidationError("Envie um arquivo PDF válido e completo.")
     return digest.digest(), size
 
 
@@ -788,17 +819,26 @@ def _store_pdf(uploaded_file: Any, thesis: Thesis, user: User, setting_name: str
     safe_name = f"{prefix}/{thesis.pk}/{uuid4().hex}.pdf"
     stored_name = default_storage.save(safe_name, uploaded_file)
     original_name = Path(getattr(uploaded_file, "name", "monografia.pdf")).name[:255]
-    stored_file = StoredFile.objects.create(
-        original_filename=original_name or "monografia.pdf",
-        stored_filename=Path(stored_name).name,
-        mime_type="application/pdf",
-        extension=".pdf",
-        size_bytes=size,
-        sha256=digest,
-        storage_path=stored_name,
-        uploaded_by_id=user.pk,
-        processing_status=ProcessingStatus.PENDING,
-    )
+    try:
+        # Savepoint: após um IntegrityError o PostgreSQL exige rollback até ele
+        # antes de qualquer outra consulta na transação externa.
+        with transaction.atomic():
+            stored_file = StoredFile.objects.create(
+                original_filename=original_name or "monografia.pdf",
+                stored_filename=Path(stored_name).name,
+                mime_type="application/pdf",
+                extension=".pdf",
+                size_bytes=size,
+                sha256=digest,
+                storage_path=stored_name,
+                uploaded_by_id=user.pk,
+                processing_status=ProcessingStatus.PENDING,
+            )
+    except IntegrityError:
+        # Duas requisições podem passar pela busca de deduplicação ao mesmo tempo;
+        # a constraint única de sha256 escolhe uma delas como arquivo canônico.
+        default_storage.delete(stored_name)
+        stored_file = StoredFile.objects.get(sha256=digest)
     transaction.on_commit(lambda: mark_upload_in_progress(digest_hex))
     logger.info("Stored PDF file %s for thesis %s", stored_file.pk, thesis.pk)
     return stored_file
@@ -1008,18 +1048,18 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
 @transaction.atomic
 def withdraw_submission(user: User, thesis: Thesis, request: HttpRequest | None = None) -> Thesis:
     """
-    Descarta o envio atual da monografia enquanto não houver parecer do orientador.
+    Discard the current thesis submission while the advisor has not reviewed it.
 
     Args:
-        user: Aluno autor principal.
-        thesis: Monografia enviada.
-        request: Requisição HTTP usada no contexto de auditoria.
+        user: Main student author.
+        thesis: Submitted thesis.
+        request: HTTP request used for audit context.
 
     Returns:
-        Thesis: Monografia atualizada em estado editável.
+        Thesis: Thesis moved back to an editable state.
 
     Raises:
-        ValidationError: Quando o usuário não pode descartar ou o envio já foi avaliado.
+        ValidationError: When the user cannot withdraw the submission or it was already reviewed.
     """
     thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     _ensure_student_owner(user, thesis)
@@ -1221,6 +1261,11 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem registrar o resultado da banca.")
     thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
+    ensure_coordinator_manages_thesis_course(user, thesis)
+    if thesis.status in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}:
+        raise ValidationError("Monografia publicada ou arquivada não aceita resultado manual.")
+    if Defense.objects.filter(thesis_id=thesis.pk, status__in=ACTIVE_DEFENSE_STATUSES).exists():
+        raise ValidationError("Esta monografia possui banca ativa; o resultado deve ser calculado pela banca.")
     if thesis.status not in DEFENSE_RESULT_STATUSES:
         raise ValidationError("Esta monografia não está em etapa de resultado da banca.")
     if result not in DefenseResult.values:
@@ -1476,6 +1521,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem publicar monografias.")
     thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
+    ensure_coordinator_manages_thesis_course(user, thesis)
     if thesis.status == ThesisStatus.PUBLISHED and thesis.is_public:
         return thesis
     requirements = publication_requirements(thesis)
@@ -1560,6 +1606,8 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
     """
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem validar documentos.")
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
+    ensure_coordinator_manages_thesis_course(user, thesis)
     document = ThesisDocument.objects.select_for_update().get(pk=document.pk)
     if document.thesis_id != thesis.pk:
         raise ValidationError("Documento não pertence a esta monografia.")

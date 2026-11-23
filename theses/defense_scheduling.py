@@ -539,6 +539,8 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
         new_thesis_status = ThesisStatus.APPROVED_WITH_REMARKS
 
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
+    if thesis.status in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}:
+        raise ValidationError("Não é possível encerrar a banca de uma monografia já publicada ou arquivada.")
     previous_thesis_status = thesis.status
     thesis.status = new_thesis_status
     thesis.save(update_fields=["status", "updated_at"])
@@ -627,6 +629,8 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
         raise ValidationError("Já existe outra banca ativa para esta monografia.")
 
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
+    if thesis.status in {ThesisStatus.PUBLISHED, ThesisStatus.ARCHIVED}:
+        raise ValidationError("Não é possível reverter a banca de uma monografia já publicada ou arquivada.")
     previous_thesis_status = thesis.status
     thesis.status = ThesisStatus.DEFENSE_SCHEDULED
     thesis.save(update_fields=["status", "updated_at"])

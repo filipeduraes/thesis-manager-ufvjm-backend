@@ -9,13 +9,18 @@ return minimal user payloads (no academic profile data beyond identity).
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from django.core.cache import cache
-from django.db.models import Q, QuerySet
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+if TYPE_CHECKING:
+    from django.db.models import QuerySet
+    from rest_framework.request import Request
 
 from accounts.models import ProfileRole, User
 from accounts.permissions import IsCoordinatorOrAdmin
@@ -108,7 +113,7 @@ def _user_directory_payload(user: User) -> dict[str, object]:
     }
 
 
-def _paginate(request, queryset) -> tuple[list[User], int, int, int, int]:
+def _paginate(request: Request, queryset: QuerySet[User]) -> tuple[list[User], int, int, int, int]:
     """
     Slice a directory queryset for the requested page.
 
@@ -135,6 +140,27 @@ def _paginate(request, queryset) -> tuple[list[User], int, int, int, int]:
     offset = (page - 1) * page_size
     items = list(queryset[offset:offset + page_size])
     return items, page, page_size, total, total_pages
+
+
+def _pagination_cache_keys(request: Request) -> tuple[int, int]:
+    """
+    Normalize the pagination parameters used in directory cache keys.
+
+    Args:
+        request: HTTP request carrying ``page``/``pageSize``.
+
+    Returns:
+        tuple[int, int]: Effective page and page size, matching ``_paginate``.
+    """
+    try:
+        page = max(1, int(request.query_params.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(DIRECTORY_MAX_PAGE_SIZE, max(1, int(request.query_params.get("pageSize") or DIRECTORY_DEFAULT_PAGE_SIZE)))
+    except (TypeError, ValueError):
+        page_size = DIRECTORY_DEFAULT_PAGE_SIZE
+    return page, page_size
 
 
 def _paginated_body(items: list[dict[str, object]], page: int, page_size: int, total: int, total_pages: int) -> dict[str, object]:
@@ -165,16 +191,15 @@ class PublicAdvisorsListView(APIView):
     """
     Public, searchable list of the institution's advisors.
 
-    Exposed without authentication per the assignment (PARTE 2 — endpoints
-    públicos). Only display identity is exposed; e-mail addresses are kept
-    off the public surface.
+    The assignment requires this endpoint to be anonymous. Only display identity
+    is exposed; e-mail addresses never appear on the public surface.
     """
 
     permission_classes = [AllowAny]
     authentication_classes: list = []
     throttle_scope = "session"
 
-    def get(self, request) -> Response:
+    def get(self, request: Request) -> Response:
         """
         Return a paginated, searchable list of active advisors.
 
@@ -185,8 +210,7 @@ class PublicAdvisorsListView(APIView):
             Response: Pagination envelope with the advisors in view.
         """
         query = (request.query_params.get("q") or "").strip().lower()
-        page_key = request.query_params.get("page") or 1
-        size_key = request.query_params.get("pageSize") or DIRECTORY_DEFAULT_PAGE_SIZE
+        page_key, size_key = _pagination_cache_keys(request)
         cache_key = f"api:public_advisors:{query}:{page_key}:{size_key}"
         cached = cache.get(cache_key)
         if cached is not None:
@@ -211,7 +235,7 @@ class UserDirectoryListView(APIView):
     permission_classes = [IsCoordinatorOrAdmin]
     throttle_scope = "session"
 
-    def get(self, request) -> Response:
+    def get(self, request: Request) -> Response:
         """
         Return a paginated, searchable, role-filtered user list.
 
@@ -227,8 +251,7 @@ class UserDirectoryListView(APIView):
         if role and role not in ROLE_FILTERS:
             return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
         roles = ROLE_FILTERS.get(role) if role else None
-        page_key = request.query_params.get("page") or 1
-        size_key = request.query_params.get("pageSize") or DIRECTORY_DEFAULT_PAGE_SIZE
+        page_key, size_key = _pagination_cache_keys(request)
         cache_key = f"api:user_directory:{roles}:{query}:{page_key}:{size_key}"
         cached = cache.get(cache_key)
         if cached is not None:

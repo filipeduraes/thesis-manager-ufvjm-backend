@@ -17,15 +17,15 @@ from django.http import HttpRequest
 from django.utils import timezone
 
 from accounts.audit_events import event_payload
+from accounts.concurrency import database_for_model
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, ExternalInvitation, InvitationStatus, User
 from accounts.services import create_external_invitation, revoke_external_invitation, user_avatar_url
 from events.catalog import ExternalInvitationTrigger
 from theses.audit import audit_defense
-from theses.events import record_defense_member_invited
+from theses.events import record_defense_member_invited, record_external_member_invited
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
-from theses.events import record_external_member_invited
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
 
 
@@ -878,11 +878,14 @@ def resend_external_member_invitation(defense: Defense, member: DefenseMember, *
     member = DefenseMember.objects.select_for_update().get(pk=member.pk)
     if member.external_invitation_id is None:
         raise ValidationError("Somente membros externos recebem convite por e-mail.")
-    invitation = ExternalInvitation.objects.select_for_update().get(pk=member.external_invitation_id)
-    refusal = _resend_refusal_message(invitation)
-    if refusal is not None:
-        raise ValidationError(refusal)
-    member.external_invitation_id = invitation.pk
+    # O convite pertence ao banco de autenticação: a transação de lock precisa abrir
+    # nesse alias, senão o select_for_update falha no PostgreSQL com bancos divididos.
+    invitation_db = database_for_model(ExternalInvitation)
+    with transaction.atomic(using=invitation_db):
+        invitation = ExternalInvitation.objects.using(invitation_db).select_for_update().get(pk=member.external_invitation_id)
+        refusal = _resend_refusal_message(invitation)
+        if refusal is not None:
+            raise ValidationError(refusal)
     event = record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.RESENT)
     audit_defense(
         action=AuditAction.INVITE,
@@ -926,12 +929,15 @@ def regenerate_external_member_invitation(defense: Defense, member: DefenseMembe
         raise ValidationError("Só é possível gerar novo convite para bancas agendadas ou em andamento.")
     # FOR UPDATE não pode ser combinado com o LEFT JOIN do convite (nulo para institucionais).
     member = DefenseMember.objects.select_for_update().get(pk=member.pk)
-    previous_invitation = member.external_invitation
-    if previous_invitation is None:
+    invitation_id = member.external_invitation_id
+    if invitation_id is None:
         raise ValidationError("Somente membros externos recebem convite por e-mail.")
 
-    revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
-    new_invitation = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
+    invitation_db = database_for_model(ExternalInvitation)
+    with transaction.atomic(using=invitation_db):
+        previous_invitation = ExternalInvitation.objects.using(invitation_db).select_for_update().get(pk=invitation_id)
+        revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
+        new_invitation = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
     member.external_invitation_id = new_invitation.pk
     member.save(update_fields=["external_invitation"])
     audit_defense(

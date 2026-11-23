@@ -30,7 +30,7 @@ def upload_cache_key(sha256_hex: str) -> str:
 
 def mark_upload_in_progress(sha256_hex: str) -> None:
     """
-    Mark a document as being processed.
+    Mark a document as being processed after its upload was committed.
 
     Args:
         sha256_hex: Hexadecimal SHA-256 of the uploaded PDF.
@@ -56,7 +56,7 @@ def upload_in_progress(sha256_hex: str) -> bool:
 
 def clear_upload_in_progress(sha256_hex: str) -> None:
     """
-    Release the in-progress marker after extraction succeeds or fails.
+    Release the marker after extraction succeeds or fails.
 
     Args:
         sha256_hex: Hexadecimal SHA-256 of the uploaded PDF.

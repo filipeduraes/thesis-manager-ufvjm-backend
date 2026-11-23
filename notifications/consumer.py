@@ -269,15 +269,20 @@ EVENT_AWARE_PLANNERS: dict[str, Callable[[UUID, EventPayload], NotificationPlan]
 }
 
 
-def _plan_event(envelope: EventEnvelope) -> NotificationPlan:
+def _plan_event(envelope: EventEnvelope) -> NotificationPlan | None:
     """
-    Run the planner registered for the event type.
+    Run the planner registered for the event type, if any.
+
+    Events such as text extraction and repository updates belong to the catalog
+    and are delivered to this queue by the ``thesis.*`` binding, but intentionally
+    have no e-mail. They are acknowledged without creating notifications instead
+    of raising ``KeyError`` and being dead-lettered.
 
     Args:
         envelope: Event being handled.
 
     Returns:
-        NotificationPlan: What to send.
+        NotificationPlan | None: What to send, or None for events without e-mail.
 
     Raises:
         EntityNotFoundError: When a referenced record no longer exists.
@@ -285,7 +290,10 @@ def _plan_event(envelope: EventEnvelope) -> NotificationPlan:
     event_aware_planner = EVENT_AWARE_PLANNERS.get(envelope.event_type)
     if event_aware_planner is not None:
         return event_aware_planner(envelope.event_id, envelope.payload)
-    planner = PLANNERS[envelope.event_type]
+    planner = PLANNERS.get(envelope.event_type)
+    if planner is None:
+        logger.debug("Event %s (%s) has no notification planner", envelope.event_id, envelope.event_type)
+        return None
     return planner(envelope.payload)
 
 
@@ -393,7 +401,7 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
                 logger.warning("Event %s (%s) refers to a record that no longer exists; no notification created", envelope.event_id, envelope.event_type)
                 deliveries: list[PlannedDelivery] = []
             else:
-                deliveries = _create_notifications(envelope, plan)
+                deliveries = _create_notifications(envelope, plan) if plan is not None else []
     except IntegrityError:
         return HandleOutcome.DUPLICATE
     try:
@@ -401,8 +409,6 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
             marker = ProcessedEvent.objects.using(marker_db).create(consumer_group=CONSUMER_GROUP, event_id=envelope.event_id)
     except IntegrityError:
         return HandleOutcome.DUPLICATE
-    marker.processing_time_ms = int((time.monotonic() - started) * 1000)
-    marker.save(update_fields=["processing_time_ms"])
     sent = 0
     for delivery in deliveries:
         if not send_notification(delivery.notification, content=delivery.content):
@@ -410,5 +416,7 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
         sent += 1
         if delivery.after_send is not None:
             delivery.after_send(delivery.notification)
+    marker.processing_time_ms = int((time.monotonic() - started) * 1000)
+    marker.save(update_fields=["processing_time_ms"])
     logger.info("Processed event %s (%s): %s notification(s), %s sent", envelope.event_id, envelope.event_type, len(deliveries), sent)
     return HandleOutcome.PROCESSED

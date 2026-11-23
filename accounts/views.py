@@ -4,6 +4,7 @@ API views for authentication, session management and administration.
 from __future__ import annotations
 
 import logging
+from secrets import compare_digest
 from urllib.parse import urlsplit
 
 from allauth.socialaccount.adapter import get_adapter as get_social_adapter
@@ -66,12 +67,13 @@ from accounts.services import (
     set_user_roles,
     suggest_users,
 )
+from thesismanagerbackend.csv_utils import escape_formula_cell
 
 logger = logging.getLogger(__name__)
 
 
 class AdminPagination(PageNumberPagination):
-    """Paginação administrativa com metadados explícitos."""
+    """Admin pagination with explicit metadata in the response."""
 
     page_size = 10
     page_size_query_param = "page_size"
@@ -186,7 +188,8 @@ class ServiceIntrospectionView(APIView):
         """
         from django.conf import settings
 
-        if request.headers.get("X-Service-Token") != settings.SERVICE_TOKEN:
+        configured_token = getattr(settings, "SERVICE_TOKEN", "")
+        if not configured_token or not compare_digest(request.headers.get("X-Service-Token", ""), configured_token):
             return Response({"detail": "Serviço não autenticado."}, status=401)
         user_id = request.query_params.get("user_id")
         if not user_id:
@@ -795,7 +798,7 @@ class AdminAuditLogsExportView(APIView):
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         for row in data:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
+            writer.writerow({key: escape_formula_cell(row.get(key, "")) for key in fieldnames})
         response = HttpResponse(
             "\ufeff" + output.getvalue(),
             content_type="text/csv; charset=utf-8",
@@ -806,13 +809,13 @@ class AdminAuditLogsExportView(APIView):
 
 def _dev_login_roles(payload: dict) -> list[str]:
     """
-    Resolve os perfis solicitados no login de teste (somente desenvolvimento).
+    Resolve the roles requested by the development login form.
 
     Args:
-        payload: Dados enviados pelo frontend.
+        payload: Data submitted by the frontend.
 
     Returns:
-        list[str]: Códigos de perfil válidos.
+        list[str]: Valid role codes.
     """
     raw_roles = payload.get("roles")
     candidates = []
@@ -845,16 +848,16 @@ def _dev_login_roles(payload: dict) -> list[str]:
 
 def _dev_login_user(email: str, name: str, roles: list[str], request) -> User:
     """
-    Cria ou atualiza um usuário de teste e garante os perfis, sem validações extras.
+    Create or update a development user and assign the requested roles.
 
     Args:
-        email: E-mail informado.
-        name: Nome informado.
-        roles: Códigos de perfil a garantir.
-        request: Requisição HTTP.
+        email: Submitted e-mail address.
+        name: Submitted display name.
+        roles: Role codes to grant.
+        request: HTTP request used for audit context.
 
     Returns:
-        User: Usuário autenticável para desenvolvimento.
+        User: User ready for local authentication.
     """
     from django.utils import timezone
 
@@ -907,7 +910,7 @@ def _dev_login_user(email: str, name: str, roles: list[str], request) -> User:
 
 class DevLoginView(APIView):
     """
-    Autentica como usuário de teste em ambiente de desenvolvimento.
+    Authenticate a development test user.
     """
 
     permission_classes = [AllowAny]
@@ -915,13 +918,13 @@ class DevLoginView(APIView):
 
     def post(self, request) -> Response:
         """
-        Cria/atualiza e autentica um usuário de teste.
+        Create or update a test user and start an authenticated session.
 
         Args:
-            request: Requisição com ``name``, ``email`` e ``roles``.
+            request: Request carrying ``name``, ``email`` and ``roles``.
 
         Returns:
-            Response: Sessão autenticada.
+            Response: Authenticated session payload.
         """
         if not settings.DEBUG:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -957,7 +960,7 @@ class DevLoginView(APIView):
 
 class DevUsersView(APIView):
     """
-    Lista usuários disponíveis para login de teste em desenvolvimento.
+    List users available for development login.
     """
 
     permission_classes = [AllowAny]
@@ -965,13 +968,13 @@ class DevUsersView(APIView):
 
     def get(self, request) -> Response:
         """
-        Retorna usuários ativos com seus perfis.
+        Return active users with their roles for the development login form.
 
         Args:
-            request: Requisição HTTP.
+            request: HTTP request.
 
         Returns:
-            Response: Lista de usuários de teste.
+            Response: List of test users.
         """
         if not settings.DEBUG:
             return Response(status=status.HTTP_404_NOT_FOUND)

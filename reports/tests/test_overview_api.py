@@ -16,7 +16,7 @@ from django.test.utils import CaptureQueriesContext
 
 from academic.models import Course
 from accounts.authentication import ExternalInvitationPrincipal
-from accounts.models import ProfileRole, UserProfileRole
+from accounts.models import ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
 from reports.services import DEFENSE_ID_METADATA_KEY, DEFENSE_RESULT_METADATA_KEY
 from reports.tests.report_fixtures import TEST_CACHES, ReportScenarioMixin
@@ -65,6 +65,10 @@ class ReportsOverviewTests(ReportScenarioMixin, TestCase):
         self.assertEqual(summary["approvalRate"], 0.6667)
         # (31 + 40 + 30) / 3: a banca reprovada usa o envio anterior a ela, não o reenvio.
         self.assertEqual(summary["averageSubmissionToDefenseDays"], 33.7)
+
+    def test_staff_without_report_role_is_denied(self) -> None:
+        staff = User.objects.create_user(email="staff@ufvjm.edu.br", name="Staff", password="senha123", is_staff=True)
+        self.assertEqual(self.overview(staff).status_code, 403)
 
     def test_groups_by_course_advisor_and_defense_year(self) -> None:
         data = self.overview(self.admin).data

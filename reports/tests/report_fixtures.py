@@ -71,7 +71,7 @@ class ReportScenarioMixin:
 
     @staticmethod
     def snapshot(course, advisor) -> dict:
-        """Valores locais de identidade usados nas agregações do relatório."""
+        """Local identity fields used by report aggregations."""
         return {
             "advisor_name": advisor.name or advisor.email,
             "course_name": course.name,
