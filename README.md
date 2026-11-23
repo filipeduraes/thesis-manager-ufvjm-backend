@@ -271,6 +271,39 @@ cd ../thesis-manager-ufvjm-frontend && ./scripts/run-e2e-isolated.sh
 As variáveis `E2E_RUN_ID`, `E2E_DB_NAME`, `E2E_MEDIA_ROOT`, `E2E_BACKEND_PORT`,
 `E2E_FRONTEND_PORT` e `E2E_WORKER_PORT` permitem controlar manualmente o isolamento.
 
+### Suíte completa em PostgreSQL real (modo dividido)
+
+A suíte SQLite acima é rápida, mas **não detecta problemas cross-DB** (JOINs
+entre bancos de serviços diferentes). Para validar a separação real, use o
+script — ele exporta as 6 URLs, garante os bancos/migrações e roda a suíte:
+
+```bash
+./scripts/test-postgres.sh                          # completa (~8 min, 674 testes)
+./scripts/test-postgres.sh theses.tests             # só um app/módulo
+./scripts/test-postgres.sh --keepdb reports.tests   # opções repassadas ao Django
+```
+
+Os defaults apontam para o Postgres do Compose (`127.0.0.1:5433`, usuário
+`thesis_manager_user`). Sobrescreva `POSTGRES_HOST`, `POSTGRES_HOST_PORT`,
+`POSTGRES_USER` e `POSTGRES_PASSWORD` se o ambiente for diferente.
+
+As falhas conhecidas do SQLite (`nulls_distinct`, `JSONField`) **não ocorrem** no
+Postgres. O `ServiceAwareTestRunner` declara automaticamente todos os aliases
+quando `SERVICE_DATABASES_SHARED=False`.
+
+### Smoke no stack real (isolado)
+
+No frontend: `./scripts/smoke-stack.sh` sobe um stack Compose descartável
+(`COMPOSE_PROJECT_NAME=thesis-smoke`, portas 9000/9001/9025/5434), roda o smoke
+e destrói tudo com `down -v`. Se o Docker pedir senha, conceda acesso sem senha
+**apenas ao binário do Docker** (nunca compartilhe sua senha de sudo):
+
+```bash
+echo 'fhdd ALL=(root) NOPASSWD: /usr/bin/docker' | sudo tee /etc/sudoers.d/docker-nopass
+sudo chmod 440 /etc/sudoers.d/docker-nopass
+sudo visudo -c
+```
+
 Operação dos eventos assíncronos (no Docker, prefixe com `docker compose exec -T backend`):
 
 ```bash
