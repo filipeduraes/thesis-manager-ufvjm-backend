@@ -24,7 +24,7 @@ from theses.audit import audit_defense
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.events import record_defense_completed, record_defense_scheduled
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
-from theses.services import purge_thesis_versions, thesis_summary_payload, user_is_admin
+from theses.services import PublicationTrigger, publish_if_ready, purge_thesis_versions, thesis_summary_payload, user_is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -555,6 +555,8 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
     )
     # Dentro do mesmo savepoint do encerramento: se o auto-close falhar, o evento é desfeito junto.
     record_defense_completed(defense, result, new_thesis_status, automatic)
+    if new_thesis_status in APPROVED_DEFENSE_STATUSES:
+        publish_if_ready(thesis, trigger=PublicationTrigger.DEFENSE_CLOSED, request=request)
     return defense
 
 

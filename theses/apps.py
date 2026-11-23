@@ -9,3 +9,9 @@ class ThesesConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "theses"
     verbose_name = "Monografias"
+
+    def ready(self) -> None:
+        """
+        Register the signal receivers that protect published theses.
+        """
+        from theses import signals  # noqa: F401

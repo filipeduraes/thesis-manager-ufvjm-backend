@@ -64,6 +64,22 @@ class ThesisLifecyclePayload(EventPayload):
     keptVersion: int | None = None
     result: str | None = None
     referenceCode: str | None = None
+    automatic: bool | None = None
+    trigger: str | None = None
+
+
+@dataclass(frozen=True)
+class RepositoryPayload(EventPayload):
+    result: str | None = None
+    defenseYear: int | None = None
+    sha256: str | None = None
+    sizeBytes: int | None = None
+    versionNumber: int | None = None
+    previousVersionNumber: int | None = None
+    previousSha256: str | None = None
+    changedFields: list[str] | None = None
+    reason: str | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,12 @@ PAYLOAD_TYPES: dict[AuditEvent, type[EventPayload]] = {
     AuditEvent.DEFENSE_RESULT: ThesisLifecyclePayload,
     AuditEvent.PUBLISHED: ThesisLifecyclePayload,
     AuditEvent.DOCUMENT_VALIDATED: UploadPayload,
+    AuditEvent.CORRECTED_VERSION_UPLOADED: UploadPayload,
+    AuditEvent.LEGACY_IMPORT: RepositoryPayload,
+    AuditEvent.PUBLISHED_METADATA_UPDATED: RepositoryPayload,
+    AuditEvent.PUBLISHED_FILE_REPLACED: RepositoryPayload,
+    AuditEvent.UNPUBLISHED: RepositoryPayload,
+    AuditEvent.THESIS_SOFT_DELETED: RepositoryPayload,
     AuditEvent.DEFENSE_SCHEDULED: DefenseLifecyclePayload,
     AuditEvent.AUTO_STARTED_BY_SCHEDULE: DefenseLifecyclePayload,
     AuditEvent.DEFENSE_UPDATED: DefenseLifecyclePayload,

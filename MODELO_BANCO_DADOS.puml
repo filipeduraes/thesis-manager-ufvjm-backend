@@ -381,24 +381,30 @@ package "Thesis Service" #FFF4E8 {
     * reference_code : varchar(50) <<UK>>
     * status : thesis_status = DRAFT
     * is_public : boolean = false
+    * origin : varchar(20) = WORKFLOW
     * created_at : timestamptz = now()
     * updated_at : timestamptz = now()
     submitted_at : timestamptz
     advisor_approved_at : timestamptz
     published_at : timestamptz
     deleted_at : timestamptz
+    defense_date : date
+    defense_year : smallint
     ' Sem campo "student_id" direto - use thesis_author
+    ' origin: WORKFLOW | LEGACY_IMPORT; defense_date/defense_year gravados na publicação (filtro de ano do repositório)
   }
 
   entity thesis_author {
     * id : uuid <<PK>>
     --
     * thesis_id : uuid <<FK>>
-    * author_id : uuid <<FK>>
+    author_id : uuid <<FK>>
+    * name : varchar(200)
     * position : smallint
     * is_main_author : boolean = false
     * created_at : timestamptz = now()
     ' Permite até 5 autores. position 1 = autor principal
+    ' author_id nulo só em acervo cadastrado manualmente (origin LEGACY_IMPORT); então name é obrigatório
   }
 
   entity thesis_keyword {
@@ -413,6 +419,7 @@ package "Thesis Service" #FFF4E8 {
     * stored_file_id : uuid <<FK>>
     * version_number : smallint
     * is_current : boolean = false
+    * is_correction : boolean = false
     * change_description : text
     * uploaded_by_id : uuid <<FK>>
     * uploaded_at : timestamptz = now()

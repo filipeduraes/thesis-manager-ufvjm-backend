@@ -40,6 +40,7 @@ urlpatterns = [
         name="api_student_thesis_withdraw",
     ),
     path("api/v1/theses", views.ThesisListView.as_view(), name="api_theses"),
+    path("api/v1/theses/legacy", views.LegacyThesisCreateView.as_view(), name="api_thesis_legacy_create"),
     path(
         "api/v1/theses/<uuid:thesis_id>",
         views.ThesisDetailView.as_view(),
@@ -60,6 +61,9 @@ urlpatterns = [
         views.ThesisPublishView.as_view(),
         name="api_thesis_publish",
     ),
+    path("api/v1/theses/<uuid:thesis_id>/unpublish", views.ThesisUnpublishView.as_view(), name="api_thesis_unpublish"),
+    path("api/v1/theses/<uuid:thesis_id>/published", views.PublishedThesisUpdateView.as_view(), name="api_published_thesis_update"),
+    path("api/v1/theses/<uuid:thesis_id>/published/files", views.PublishedThesisFileView.as_view(), name="api_published_thesis_file"),
     path(
         "api/v1/theses/<uuid:thesis_id>/files/<uuid:file_id>/download",
         views.ThesisFileDownloadView.as_view(),
@@ -80,15 +84,13 @@ urlpatterns = [
         views.ThesisDocumentDownloadView.as_view(),
         name="api_thesis_document_download",
     ),
-    # TODO(auditoria): repositório público ainda sem `GET /api/v1/public/theses/filters`
-    # (opções de curso/orientador/ano/palavra-chave presentes em publicados, cacheadas),
-    # e sem cache para a busca anônima. Ver FUNCIONALIDADES.md
-    # "Pendências identificadas na auditoria".
     path(
         "api/v1/public/theses",
         views.PublicThesisListView.as_view(),
         name="api_public_theses",
     ),
+    path("api/v1/public/theses/filters", views.PublicThesisFiltersView.as_view(), name="api_public_thesis_filters"),
+    path("api/v1/public/courses", views.PublicCourseListView.as_view(), name="api_public_courses"),
     path(
         "api/v1/public/theses/<uuid:thesis_id>",
         views.PublicThesisDetailView.as_view(),
