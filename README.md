@@ -42,6 +42,13 @@ No Google OAuth, cadastre este endereço de retorno:
 http://localhost:8000/accounts/google/login/callback/
 ```
 
+O `redirect_uri` é derivado do `Host` da requisição ao backend (o allauth usa
+`build_absolute_uri`). Portanto o frontend **deve** chamar a API por
+`http://localhost:8000` — usar `http://127.0.0.1:8000` gera
+`http://127.0.0.1:8000/accounts/google/login/callback/` e o Google responde
+`Erro 400: redirect_uri_mismatch`. Se precisar trocar o host, cadastre também a
+URL correspondente no Google Cloud Console.
+
 ### Decisão de autenticação: Google Workspace institucional
 
 O sistema **não mantém login e senha locais** para usuários institucionais. A
