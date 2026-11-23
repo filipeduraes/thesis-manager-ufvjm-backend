@@ -15,9 +15,12 @@ from django.db.models import Prefetch, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
+from accounts.audit_events import event_payload
+from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
 from accounts.services import record_audit
+from theses.audit import audit_defense
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.events import record_defense_completed, record_defense_scheduled
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
@@ -161,14 +164,12 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         metadata={"defenseId": str(defense.pk)},
     )
     record_defense_scheduled(defense)
-    record_audit(
+    audit_defense(
         action=AuditAction.SCHEDULE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "DEFENSE_SCHEDULED", "scheduledDatetime": scheduled_datetime.isoformat()},
+        metadata=event_payload(AuditEvent.DEFENSE_SCHEDULED, scheduledDatetime=scheduled_datetime.isoformat()),
     )
     return defense
 
@@ -238,14 +239,12 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
         return defense
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
     _transition_defense_to_in_progress(defense, thesis, changed_by=None, reason="Banca iniciada automaticamente pelo horário agendado.")
-    record_audit(
+    audit_defense(
         action=AuditAction.UPDATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=None,
-        metadata={"event": "AUTO_STARTED_BY_SCHEDULE"},
+        metadata=event_payload(AuditEvent.AUTO_STARTED_BY_SCHEDULE),
     )
     return defense
 
@@ -316,14 +315,12 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
     if availability_reset:
         reset_committee_availability(defense)
 
-    record_audit(
+    audit_defense(
         action=AuditAction.UPDATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "DEFENSE_UPDATED", "availabilityReset": availability_reset},
+        metadata=event_payload(AuditEvent.DEFENSE_UPDATED, availabilityReset=availability_reset),
     )
     return defense
 
@@ -379,14 +376,12 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
     defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
     record_defense_status_change(defense, defense.previous_status, actor, cancel_reason)
 
-    record_audit(
+    audit_defense(
         action=AuditAction.SCHEDULE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "DEFENSE_CANCELLED", "reason": reason},
+        metadata=event_payload(AuditEvent.DEFENSE_CANCELLED, reason=reason),
     )
     return defense
 
@@ -426,14 +421,12 @@ def start_defense(defense: Defense, *, actor: User, request: HttpRequest | None 
     thesis = Thesis.objects.select_for_update().get(pk=defense.thesis_id)
     _transition_defense_to_in_progress(defense, thesis, changed_by=actor, reason="Banca iniciada.")
 
-    record_audit(
+    audit_defense(
         action=AuditAction.SCHEDULE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "DEFENSE_STARTED"},
+        metadata=event_payload(AuditEvent.DEFENSE_STARTED),
     )
     return defense
 
@@ -553,14 +546,12 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
     if new_thesis_status in APPROVED_DEFENSE_STATUSES:
         purge_thesis_versions(thesis, actor=closed_by, request=request)
 
-    record_audit(
+    audit_defense(
         action=AuditAction.EVALUATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=closed_by,
-        metadata={"event": "DEFENSE_CLOSED", "result": result, "thesisNewStatus": new_thesis_status, "trigger": "AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"},
+        metadata=event_payload(AuditEvent.DEFENSE_CLOSED, result=result, thesisNewStatus=new_thesis_status, trigger="AUTO_AFTER_LAST_EVALUATION" if automatic else "MANUAL"),
     )
     # Dentro do mesmo savepoint do encerramento: se o auto-close falhar, o evento é desfeito junto.
     record_defense_completed(defense, result, new_thesis_status, automatic)
@@ -594,13 +585,11 @@ def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | No
     except ValidationError as exc:
         error_message = exc.messages[0] if exc.messages else "Não foi possível encerrar a banca automaticamente."
         logger.warning("Automatic close failed for defense %s after last evaluation: %s", defense.pk, error_message)
-        record_audit(
+        audit_defense(
             action=AuditAction.EVALUATE,
-            entity_type="Defense",
-            entity_id=str(defense.pk),
-            entity_app_label="theses",
+            defense=defense,
             request=request,
-            metadata={"event": "AUTO_CLOSE_FAILED", "reason": error_message},
+            metadata=event_payload(AuditEvent.AUTO_CLOSE_FAILED, reason=error_message),
         )
         return error_message
     logger.info("Defense %s closed automatically after last evaluation", defense.pk)
@@ -678,14 +667,12 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
     defense.save(update_fields=["status", "previous_status", "auto_start_suspended", "updated_at"])
     record_defense_status_change(defense, from_status, actor, f"Status revertido pelo administrador. {reason.strip()}")
 
-    record_audit(
+    audit_defense(
         action=AuditAction.UPDATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "STATUS_REVERTED_BY_ADMIN", "from": from_status, "to": to_status, "reason": reason},
+        metadata=event_payload(AuditEvent.STATUS_REVERTED_BY_ADMIN, fromStatus=from_status, toStatus=to_status, reason=reason),
     )
     return defense
 

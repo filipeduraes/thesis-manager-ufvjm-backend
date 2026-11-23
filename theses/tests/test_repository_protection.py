@@ -8,6 +8,8 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models.deletion import Collector
 
+from accounts.audit_events import SCHEMA_VERSION, event_payload
+from accounts.audit_identifiers import AuditEvent
 from accounts.models import AuditAction, AuditLog, ProfileRole
 from theses.models import Thesis, ThesisStatus
 from theses.services import PublicationTrigger, publish_if_ready
@@ -112,6 +114,8 @@ class UnpublishTests(ProtectionTestCase):
         audit = AuditLog.objects.filter(entity_id=str(self.published.pk), metadata__event="UNPUBLISHED").get()
         self.assertEqual(audit.actor_user, self.coordinator)
         self.assertEqual(audit.changes["isPublic"], {"from": True, "to": False})
+        self.assertEqual(audit.metadata["schemaVersion"], SCHEMA_VERSION)
+        self.assertEqual(audit.metadata["reason"], "Termo de autorização revogado pelo autor.")
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get("/api/v1/public/theses").data["count"], 0)
         self.assertEqual(self.client.get(f"/api/v1/public/theses/{self.published.pk}").status_code, 404)
@@ -144,3 +148,19 @@ class UnpublishTests(ProtectionTestCase):
         self.assertFalse(publish_if_ready(self.published, trigger=PublicationTrigger.AUTHORIZATION_VALIDATED))
         self.published.refresh_from_db()
         self.assertEqual(self.published.status, ThesisStatus.ARCHIVED)
+
+
+class RepositoryAuditContractTests(RepositoryTestCase):
+    """Repository events follow the typed audit contract from ``accounts.audit_events``."""
+
+    def test_repository_events_reject_fields_outside_the_contract(self) -> None:
+        repository_events = [AuditEvent.LEGACY_IMPORT, AuditEvent.PUBLISHED_METADATA_UPDATED, AuditEvent.PUBLISHED_FILE_REPLACED, AuditEvent.UNPUBLISHED, AuditEvent.THESIS_SOFT_DELETED, AuditEvent.CORRECTED_VERSION_UPLOADED]
+        for event in repository_events:
+            with self.subTest(event=event), self.assertRaises(ValueError):
+                event_payload(event, authorEmail="aluno@ufvjm.edu.br")
+
+    def test_published_event_records_trigger_and_automatic_flag(self) -> None:
+        metadata = event_payload(AuditEvent.PUBLISHED, referenceCode="TCC-1", automatic=False, trigger=PublicationTrigger.MANUAL)
+        self.assertEqual(metadata["event"], "PUBLISHED")
+        self.assertIs(metadata["automatic"], False)
+        self.assertEqual(metadata["trigger"], PublicationTrigger.MANUAL)

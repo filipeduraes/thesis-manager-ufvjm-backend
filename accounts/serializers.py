@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from rest_framework import serializers
 
-from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS, derive_audit_category
+from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS
 from accounts.models import (
     AuditLog,
     ProfileRole,
@@ -347,6 +347,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
     roles = serializers.SerializerMethodField()
     roleCodes = serializers.SerializerMethodField()
     action = serializers.SerializerMethodField()
+    event = serializers.SerializerMethodField()
     actionCode = serializers.SerializerMethodField()
     actionLabel = serializers.SerializerMethodField()
     summary = serializers.SerializerMethodField()
@@ -381,6 +382,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "roles",
             "roleCodes",
             "action",
+            "event",
             "actionCode",
             "actionLabel",
             "summary",
@@ -423,6 +425,9 @@ class AuditLogSerializer(serializers.ModelSerializer):
 
     def get_roleCodes(self, log: AuditLog) -> list[str]:
         return _audit_presenter(self.context).role_codes(log)
+
+    def get_event(self, log: AuditLog) -> dict[str, object]:
+        return _audit_presenter(self.context).structured(log).as_dict()
 
     def get_actionCode(self, log: AuditLog) -> str:
         return log.action

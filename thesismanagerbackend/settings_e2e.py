@@ -36,5 +36,8 @@ CACHES = {
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 RABBITMQ_URL = ""
+CORS_ALLOWED_ORIGINS = ["http://localhost:3001", "http://127.0.0.1:3001"]
+CSRF_TRUSTED_ORIGINS = ["http://localhost:3001", "http://127.0.0.1:3001"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
 MEDIA_ROOT = Path("/tmp/opencode/e2e-media")
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)

@@ -22,13 +22,18 @@ def get_client_ip(request: HttpRequest) -> str | None:
     trusted_proxy_count = getattr(settings, "TRUSTED_PROXY_COUNT", 0)
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
 
-    if trusted_proxy_count > 0 and forwarded_for:
+    peer = request.META.get("REMOTE_ADDR")
+    trusted_proxies = getattr(settings, "TRUSTED_PROXY_CIDRS", [])
+    peer_is_trusted = is_ip_allowed(peer, trusted_proxies)
+    if trusted_proxy_count > 0 and forwarded_for and peer_is_trusted:
         addresses = [part.strip() for part in forwarded_for.split(",") if part.strip()]
         if len(addresses) < trusted_proxy_count:
             return None
         raw_ip = addresses[-trusted_proxy_count]
     else:
-        raw_ip = request.META.get("REMOTE_ADDR")
+        # Sem uma lista de proxies confiáveis, cabeçalhos encaminhados nunca são
+        # aceitos: um cliente pode forjá-los para burlar a restrição administrativa.
+        raw_ip = peer
 
     if not raw_ip:
         return None

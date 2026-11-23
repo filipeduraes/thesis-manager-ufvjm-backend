@@ -13,6 +13,8 @@ from django.contrib.auth.signals import (
 from django.dispatch import receiver
 from django.utils import timezone
 
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.models import AuditAction, SessionAudit
 from accounts.network import classify_ip, get_client_ip
 from accounts.services import record_audit
@@ -47,15 +49,14 @@ def handle_user_logged_in(sender, request, user, **kwargs) -> None:
         },
     )
     request.session["session_audit_id"] = str(audit.pk)
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.LOGIN,
-        entity_type="User",
+        entity_type=EntityType.USER,
         entity_id=str(user.pk),
-        entity_app_label="accounts",
         request=request,
         actor_user=user,
         metadata={"session_key": session_key},
-    )
+    ))
 
 
 @receiver(user_logged_out)
@@ -75,15 +76,14 @@ def handle_user_logged_out(sender, request, user, **kwargs) -> None:
         logout_at__isnull=True,
     ).update(logout_at=timezone.now())
 
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.LOGOUT,
-        entity_type="User",
+        entity_type=EntityType.USER,
         entity_id=str(user.pk),
-        entity_app_label="accounts",
         request=request,
         actor_user=user,
         metadata={"session_key": session_key},
-    )
+    ))
 
 
 @receiver(user_login_failed)
@@ -96,12 +96,11 @@ def handle_user_login_failed(sender, credentials, request, **kwargs) -> None:
     attempted_email = str(
         credentials.get("email") or credentials.get("username") or ""
     ).strip().lower()
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.LOGIN_FAILED,
-        entity_type="User",
+        entity_type=EntityType.USER,
         entity_id=attempted_email or "anonymous",
-        entity_app_label="accounts",
         request=request,
         metadata={"provider": "credentials"},
-    )
-    logger.warning("Authentication failure recorded for identifier=%s", attempted_email)
+    ))
+    logger.warning("Authentication failure recorded for a login attempt.")

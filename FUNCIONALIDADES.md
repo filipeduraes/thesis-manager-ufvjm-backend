@@ -85,7 +85,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Endpoints de auditoria admin | **Implementado** | `GET /api/v1/admin/audit-logs` (filtros por data, cargo, texto, `verbosity=all|trace|relevant`) e `GET /api/v1/admin/audit-logs?export=csv|json` / `/api/v1/admin/audit-logs/export`. Resposta inclui `verbosity`, `verbosityLabel`, `roles`, `roleCodes`, `entityTypeLabel`, `entityName`, `entityNameShort`, `entityReference`, `details`. |
 | Resumos descritivos e antes/depois | **Implementado** | Serializer gera resumos legíveis; atualizações de usuário podem registrar transições (ex.: perfil de X para Y, curso/status); UI mostra detalhes, canal e origem da rede/IP. |
 | Restrição IP/VPN para áreas admin | **Implementado** | Middleware/CIDRs confiáveis para `/admin/` e `/api/v1/admin/`; nega sem vazar detalhes. |
-| Rate limiting | **Parcial** | Throttles DRF por escopo (`ScopedRateThrottle`, contadores no cache Redis): sessão, token externo, TCC, uploads (`thesis_upload` 30/h), relatórios, autocomplete e repositório público (`public_repository` 120/min, `public_download` 30/min). `NUM_PROXIES` segue `TRUSTED_PROXY_COUNT`, então `X-Forwarded-For` forjado não muda a identificação do cliente anônimo. Falta uma política global de uploads por usuário. |
+| Rate limiting | **Parcial** | Throttles DRF por escopo (`ClientIpScopedRateThrottle`, subclasse de `ScopedRateThrottle` em `thesismanagerbackend/throttling.py`, contadores no cache Redis): sessão, token externo, TCC, uploads (`thesis_upload` 30/h), relatórios, autocomplete e repositório público (`public_repository` 120/min, `public_download` 30/min). O cliente anônimo é identificado por `accounts.network.get_client_ip` (mesma regra da área administrativa): `X-Forwarded-For` só vale com `TRUSTED_PROXY_COUNT>0` e `REMOTE_ADDR` em `TRUSTED_PROXY_CIDRS`, então um cabeçalho forjado não abre novos contadores. Falta uma política global de uploads por usuário. |
 | Proteção de segredos e privacidade em logs | **Implementado (diretriz)** | Tokens/senhas não devem ser logados; auditoria evita payloads sensíveis. Revisão contínua recomendada ao adicionar novos fluxos. |
 
 ## 7. Domínio de TCC (núcleo do produto)
@@ -265,3 +265,24 @@ A auditoria de 2026-11-16 encontrou os pontos abaixo, que permanecem pendentes p
 - **Corrigido:** proteção do último administrador e atribuição de curso passaram a usar locks transacionais; avaliações de banca são revalidadas sob lock antes da escrita ( impedindo alteração após o encerramento).
 - **Corrigido:** convites expirados agora persistem `EXPIRED`; mutações de sessão externa ocorrem após o commit; exclusão física de PDFs usa `transaction.on_commit`; membros institucionais duplicados são bloqueados por constraint; extração de texto usa `SKIP LOCKED`.
 - **Novos testes:** `accounts/tests/test_concurrency.py` e `theses/tests/test_concurrency_integrity.py`.
+
+## Refatoração de qualidade (2026-11-22)
+
+- `AuditPayload` (dataclass) substitui os 15 parâmetros do cálculo do hash, sem alterar o conteúdo hashed.
+- Rótulos de status/resultado da auditoria passaram a ser derivados dos `TextChoices` dos models (remove duplicação; "OTHER" agora usa o rótulo do model, "Outro").
+- Helpers extraídos: `actor_from_request`, `audit_defense`, `visible_thesis_or_404`, `parse_year_filter` e constantes de query params.
+- Exportação CSV usa os campos do serializer, mantendo os dois formatos alinhados.
+
+## Contrato estruturado de auditoria (2026-11-22)
+
+- A resposta de `/api/v1/admin/audit-logs` inclui `event`, objeto estruturado com `action`, `category`, `entity` (tipo/id/nome/referência), `actor` (id/nome/e-mail/perfis), `origin` e `metadata`/`changes` tipados. Os campos antigos (`summary`, `details`, rótulos) permanecem apenas como compatibilidade transitória.
+- `accounts/audit_data.py` resolve relacionamentos em lote e expõe dados sem frases; `accounts/audit_export.py` formata CSV/JSON sem depender de `AuditPresenter`.
+- Marcadores enum (`accounts/audit_identifiers.py`) são a fonte única de identificadores e rótulos no backend.
+
+## Auditoria geral (2026-11-22)
+
+- `TRUSTED_PROXY_CIDRS`: `X-Forwarded-For` só é aceito quando `REMOTE_ADDR` é um proxy configurado; sem isso, a restrição administrativa poderia ser burlada.
+- Monografias com `deleted_at` não aparecem mais em listagens nem em consultas de escopo.
+- Token de convite externo retornado com `Cache-Control: no-store`; e-mails de login falho não vão para logs de aplicação.
+- N+1 reduzido em `GET /api/v1/theses/<id>/defenses` (prefetches completos) e filtros de ano usam intervalos indexáveis.
+- Removidos `try/except Exception: pass` silenciosos no carregamento de usuários administrativos.

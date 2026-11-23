@@ -23,8 +23,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.audit_identifiers import AuditCategory, EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.authentication import ExternalInvitationPrincipal
-from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS, TRACE_ACTIONS
+from accounts.audit_data import resolve_audit_events
+from accounts.audit_export import build_export_row
+from accounts.audit_presentation import AuditPresenter
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -53,6 +57,7 @@ from accounts.services import (
     deactivate_user,
     exchange_external_token,
     external_invitation_assignments,
+    actor_from_request,
     get_active_role,
     normalize_role,
     record_audit,
@@ -135,14 +140,13 @@ class SessionView(APIView):
             invitation = getattr(request, "external_invitation", None)
             request.session.flush()
             try:
-                record_audit(
+                record_audit(AuditEntry(
                     action=AuditAction.LOGOUT,
-                    entity_type="ExternalInvitation",
+                    entity_type=EntityType.EXTERNAL_INVITATION,
                     entity_id=str(invitation.pk) if invitation else "unknown",
-                    entity_app_label="accounts",
                     request=request,
                     actor_external_invitation=invitation,
-                )
+                ))
             except Exception:
                 logger.exception(
                     "Failed to record external logout audit: invitation_id=%s",
@@ -260,32 +264,25 @@ class AdminUsersView(APIView):
                 to_attr="active_role_records",
             ),
         ]
-        try:
-            from academic.models import UserCourseAssignment
+        from academic.models import UserCourseAssignment
+        from allauth.socialaccount.models import SocialAccount
 
-            prefetches.append(
-                Prefetch(
-                    "course_assignments",
-                    queryset=UserCourseAssignment.objects.filter(
-                        is_active=True, revoked_at__isnull=True
-                    ).select_related("course"),
-                    to_attr="active_course_assignment_records",
-                )
+        prefetches.append(
+            Prefetch(
+                "course_assignments",
+                queryset=UserCourseAssignment.objects.filter(
+                    is_active=True, revoked_at__isnull=True
+                ).select_related("course"),
+                to_attr="active_course_assignment_records",
             )
-        except Exception:
-            pass
-        try:
-            from allauth.socialaccount.models import SocialAccount
-
-            prefetches.append(
-                Prefetch(
-                    "socialaccount_set",
-                    queryset=SocialAccount.objects.filter(provider="google"),
-                    to_attr="google_social_accounts",
-                )
+        )
+        prefetches.append(
+            Prefetch(
+                "socialaccount_set",
+                queryset=SocialAccount.objects.filter(provider="google"),
+                to_attr="google_social_accounts",
             )
-        except Exception:
-            pass
+        )
         return User.objects.prefetch_related(*prefetches).order_by("email")
 
     def get(self, request) -> Response:
@@ -339,7 +336,7 @@ class AdminUsersView(APIView):
                     email=serializer.validated_data["email"],
                     name=serializer.validated_data["name"],
                     roles=serializer.validated_data["roles"],
-                    assigned_by=request.user if request.user.is_authenticated else None,
+                    assigned_by=actor_from_request(request),
                     request=request,
                 )
                 course_id = serializer.validated_data.get("courseId")
@@ -352,7 +349,7 @@ class AdminUsersView(APIView):
                         set_user_course_assignment(
                             user,
                             course,
-                            assigned_by=request.user if request.user.is_authenticated else None,
+                            assigned_by=actor_from_request(request),
                             request=request,
                         )
         except UserAlreadyExistsError as exc:
@@ -384,32 +381,25 @@ class AdminUserDetailView(APIView):
                 to_attr="active_role_records",
             ),
         ]
-        try:
-            from academic.models import UserCourseAssignment
+        from academic.models import UserCourseAssignment
+        from allauth.socialaccount.models import SocialAccount
 
-            prefetches.append(
-                Prefetch(
-                    "course_assignments",
-                    queryset=UserCourseAssignment.objects.filter(
-                        is_active=True, revoked_at__isnull=True
-                    ).select_related("course"),
-                    to_attr="active_course_assignment_records",
-                )
+        prefetches.append(
+            Prefetch(
+                "course_assignments",
+                queryset=UserCourseAssignment.objects.filter(
+                    is_active=True, revoked_at__isnull=True
+                ).select_related("course"),
+                to_attr="active_course_assignment_records",
             )
-        except Exception:
-            pass
-        try:
-            from allauth.socialaccount.models import SocialAccount
-
-            prefetches.append(
-                Prefetch(
-                    "socialaccount_set",
-                    queryset=SocialAccount.objects.filter(provider="google"),
-                    to_attr="google_social_accounts",
-                )
+        )
+        prefetches.append(
+            Prefetch(
+                "socialaccount_set",
+                queryset=SocialAccount.objects.filter(provider="google"),
+                to_attr="google_social_accounts",
             )
-        except Exception:
-            pass
+        )
         return get_object_or_404(
             User.objects.prefetch_related(*prefetches),
             pk=user_id,
@@ -435,7 +425,7 @@ class AdminUserDetailView(APIView):
                     set_user_roles(
                         user,
                         validated["roles"],
-                        assigned_by=request.user if request.user.is_authenticated else None,
+                        assigned_by=actor_from_request(request),
                     )
                     audit_changes["roles"] = {
                         "from": previous_roles,
@@ -457,7 +447,7 @@ class AdminUserDetailView(APIView):
                     set_user_course_assignment(
                         user,
                         course,
-                        assigned_by=request.user if request.user.is_authenticated else None,
+                        assigned_by=actor_from_request(request),
                         request=request,
                     )
                     audit_changes["course"] = {
@@ -475,22 +465,21 @@ class AdminUserDetailView(APIView):
                     elif not validated["is_active"] and user.is_active:
                         deactivate_user(
                             user,
-                            actor=request.user if request.user.is_authenticated else None,
+                            actor=actor_from_request(request),
                             request=request,
                         )
                         # deactivate_user já registra a exclusão lógica.
                         audit_changes = {}
                 if audit_changes:
-                    record_audit(
+                    record_audit(AuditEntry(
                         action=AuditAction.UPDATE,
-                        entity_type="User",
+                        entity_type=EntityType.USER,
                         entity_id=str(user.pk),
-                        entity_app_label="accounts",
                         request=request,
-                        actor_user=request.user if request.user.is_authenticated else None,
+                        actor_user=actor_from_request(request),
                         changes=audit_changes,
                         metadata={"name": user.name, "email": user.email},
-                    )
+                    ))
         except (LastAdminError, ValidationError) as exc:
             detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": str(exc)}
             return Response(
@@ -507,7 +496,7 @@ class AdminUserDetailView(APIView):
         try:
             deactivate_user(
                 user,
-                actor=request.user if request.user.is_authenticated else None,
+                actor=actor_from_request(request),
                 request=request,
             )
         except (LastAdminError, ValidationError) as exc:
@@ -554,7 +543,7 @@ class AdminExternalInvitationsView(APIView):
             invited_by=request.user,
             request=request,
         )
-        return Response(
+        response = Response(
             {
                 "id": str(invitation.pk),
                 "name": invitation.name,
@@ -565,6 +554,8 @@ class AdminExternalInvitationsView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class AdminExternalInvitationDetailView(APIView):
@@ -596,36 +587,41 @@ def _filtered_audit_logs(request):
         or request.query_params.get("verbosity")
         or "all"
     ).strip().lower()
-    valid_categories = {c.lower() for c in CATEGORY_LABELS}
-    valid_categories |= {"trace", "relevant", "all", "none"}
+    valid_categories = {category.value.lower() for category in AuditCategory}
     if raw_filter not in {"all", "none"}:
-        tokens = {token.strip() for token in raw_filter.split(",") if token.strip()}
-        normalized: set[str] = set()
-        for token in tokens:
+        requested = {token.strip() for token in raw_filter.split(",") if token.strip()}
+        if not requested or not requested.issubset(valid_categories | {"trace", "relevant", "auth", "admin", "defense", "repository", "report"}):
+            return None, Response(
+                {"category": "Use all, none ou códigos de categoria separados por vírgula."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        normalized: set[AuditCategory] = set()
+        for token in requested:
             if token == "trace":
-                normalized.add("access")
+                normalized.add(AuditCategory.ACCESS)
             elif token == "relevant":
-                normalized.update({"management", "thesis", "publication"})
+                normalized.update(
+                    {AuditCategory.MANAGEMENT, AuditCategory.THESIS, AuditCategory.PUBLICATION}
+                )
             elif token in {"auth", "access"}:
-                normalized.add("access")
+                normalized.add(AuditCategory.ACCESS)
             elif token in {"admin", "management"}:
-                normalized.add("management")
+                normalized.add(AuditCategory.MANAGEMENT)
             elif token in {"thesis", "defense"}:
-                normalized.add("thesis")
+                normalized.add(AuditCategory.THESIS)
             elif token in {"repository", "report", "publication"}:
-                normalized.add("publication")
+                normalized.add(AuditCategory.PUBLICATION)
             elif token == "error":
-                normalized.add("error")
-            else:
-                normalized.add(token)
-        tokens = normalized
-        if not tokens or not tokens.issubset(valid_categories - {"all", "none", "trace", "relevant"}):
+                normalized.add(AuditCategory.ERROR)
+        if not normalized:
             return None, Response(
                 {"category": "Use all, none ou códigos de categoria separados por vírgula."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from django.db.models import Q as _Q
-        queryset = queryset.filter(_Q(category="") | _Q(category__in=[t.upper() for t in tokens]))
+        queryset = queryset.filter(
+            _Q(category="") | _Q(category__in=[category.value for category in normalized])
+        )
     elif raw_filter == "none":
         queryset = queryset.none()
 
@@ -729,14 +725,15 @@ class AdminAuditLogsExportView(APIView):
         if error_response:
             return error_response
         logs = list(queryset[:10000])
-        presenter = AuditPresenter()
-        presenter.prime(logs)
+        events = resolve_audit_events(logs)
         data = [
-            AuditLogSerializer(
-                log,
-                context={"audit_presenter": presenter, "request": request},
-            ).data
-            for log in logs
+            build_export_row(
+                event,
+                event.actor.name,
+                event.actor.roles,
+                hash_hex=bytes(log.row_hash).hex()[:8] if log.row_hash else "",
+            )
+            for event, log in zip(events, logs)
         ]
         export_format = (
             request.query_params.get("export")
@@ -753,49 +750,12 @@ class AdminAuditLogsExportView(APIView):
             return response
 
         output = io.StringIO()
-        fieldnames = [
-            "timestamp",
-            "actor",
-            "actorEmail",
-            "role",
-            "roles",
-            "roleCodes",
-            "action",
-            "actionCode",
-            "actionLabel",
-            "category",
-            "categoryLabel",
-            "verbosity",
-            "verbosityLabel",
-            "summary",
-            "entityType",
-            "entityTypeLabel",
-            "entityAppLabel",
-            "entityId",
-            "entityName",
-            "entityReference",
-            "origin",
-            "hash",
-            "details",
-            "changes",
-            "metadata",
-        ]
+        # Mantém o CSV alinhado ao contrato do serializer (incluindo novos campos).
+        fieldnames = list(AuditLogSerializer.Meta.fields)
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         for row in data:
-            writer.writerow(
-                {
-                    **{key: row.get(key, "") for key in fieldnames},
-                    "roles": "; ".join(
-                        item.get("label", "")
-                        for item in (row.get("roles") or [])
-                    ),
-                    "roleCodes": "; ".join(row.get("roleCodes") or []),
-                    "details": json.dumps(row.get("details") or [], ensure_ascii=False),
-                    "changes": json.dumps(row.get("changes") or {}, ensure_ascii=False),
-                    "metadata": json.dumps(row.get("metadata") or {}, ensure_ascii=False),
-                }
-            )
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
         response = HttpResponse(
             "\ufeff" + output.getvalue(),
             content_type="text/csv; charset=utf-8",

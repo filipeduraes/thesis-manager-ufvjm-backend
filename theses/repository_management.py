@@ -21,6 +21,8 @@ from django.http import HttpRequest
 from django.utils import timezone
 
 from academic.models import Course
+from accounts.audit_events import event_payload
+from accounts.audit_identifiers import AuditEvent
 from accounts.models import AuditAction, ProfileRole, User
 from theses.models import ACTIVE_DEFENSE_STATUSES, PUBLISHED_DELETE_ERROR, DefenseResult, Thesis, ThesisAuthor, ThesisFile, ThesisOrigin, ThesisStatus, ThesisType, thesis_was_published
 from theses.repository_cache import invalidate_public_repository_cache
@@ -310,9 +312,9 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     _sync_keywords(thesis, clean.keywords)
     stored_file = _store_pdf(uploaded_file, thesis, user, "THESIS_MAX_PDF_SIZE_MB", 50)
     ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, change_description="Versão publicada (cadastro de acervo).", uploaded_by=user, hash_verified_at=now)
-    history_metadata = {"event": "LEGACY_IMPORT", "origin": ThesisOrigin.LEGACY_IMPORT, "result": result, "versionNumber": 1, "sha256": stored_file.sha256_hex}
+    history_metadata = {"event": AuditEvent.LEGACY_IMPORT.value, "origin": ThesisOrigin.LEGACY_IMPORT, "result": result, "versionNumber": 1, "sha256": stored_file.sha256_hex}
     _add_status_history(thesis, "", ThesisStatus.PUBLISHED, user, "Monografia cadastrada manualmente a partir do acervo anterior ao sistema.", metadata=history_metadata)
-    audit_metadata = {"event": "LEGACY_IMPORT", "result": result, "defenseYear": clean.defense_year, "sha256": stored_file.sha256_hex, "sizeBytes": stored_file.size_bytes}
+    audit_metadata = event_payload(AuditEvent.LEGACY_IMPORT, result=result, defenseYear=clean.defense_year, sha256=stored_file.sha256_hex, sizeBytes=stored_file.size_bytes)
     _audit_thesis(AuditAction.CREATE, thesis, request, user, metadata=audit_metadata)
     invalidate_public_repository_cache()
     logger.info("Legacy thesis %s imported by %s", thesis.pk, user.pk)
@@ -434,8 +436,9 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
         _sync_keywords(thesis, clean.keywords)
     changed_fields = sorted(changes)
     clean_reason = " ".join((reason or "").split()) or "Metadados da monografia publicada atualizados."
-    _add_status_history(thesis, thesis.status, thesis.status, user, clean_reason, metadata={"event": "PUBLISHED_METADATA_UPDATED", "changedFields": changed_fields})
-    _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata={"event": "PUBLISHED_METADATA_UPDATED", "changedFields": changed_fields}, changes=changes)
+    _add_status_history(thesis, thesis.status, thesis.status, user, clean_reason, metadata={"event": AuditEvent.PUBLISHED_METADATA_UPDATED.value, "changedFields": changed_fields})
+    audit_metadata = event_payload(AuditEvent.PUBLISHED_METADATA_UPDATED, changedFields=changed_fields)
+    _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata=audit_metadata, changes=changes)
     invalidate_public_repository_cache()
     logger.info("Published thesis %s updated by %s (fields=%s)", thesis.pk, user.pk, ",".join(changed_fields))
     return thesis
@@ -478,14 +481,15 @@ def replace_published_file(user: User, thesis: Thesis, uploaded_file: Any, chang
     thesis_file.save(update_fields=["hash_verified_at"])
     thesis.save(update_fields=["updated_at"])
     file_metadata = {
-        "event": "PUBLISHED_FILE_REPLACED",
         "versionNumber": thesis_file.version_number,
         "sha256": stored_file.sha256_hex,
         "previousVersionNumber": previous.version_number if previous else None,
         "previousSha256": previous.stored_file.sha256_hex if previous else None,
     }
-    _add_status_history(thesis, thesis.status, thesis.status, user, description, metadata=file_metadata)
-    _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata={**file_metadata, "sizeBytes": stored_file.size_bytes})
+    history_metadata = {"event": AuditEvent.PUBLISHED_FILE_REPLACED.value, **file_metadata}
+    _add_status_history(thesis, thesis.status, thesis.status, user, description, metadata=history_metadata)
+    audit_metadata = event_payload(AuditEvent.PUBLISHED_FILE_REPLACED, sizeBytes=stored_file.size_bytes, **file_metadata)
+    _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata=audit_metadata)
     invalidate_public_repository_cache()
     logger.info("Published thesis %s received version %s", thesis.pk, thesis_file.version_number)
     return thesis_file
@@ -526,8 +530,9 @@ def unpublish_thesis(user: User, thesis: Thesis, reason: str, request: HttpReque
     thesis.status = ThesisStatus.ARCHIVED
     thesis.is_public = False
     thesis.save(update_fields=["status", "is_public", "updated_at"])
-    _add_status_history(thesis, previous_status, ThesisStatus.ARCHIVED, user, clean_reason, metadata={"event": "UNPUBLISHED"})
-    _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata={"event": "UNPUBLISHED", "reason": clean_reason}, changes={"status": {"from": previous_status, "to": ThesisStatus.ARCHIVED}, "isPublic": {"from": True, "to": False}})
+    _add_status_history(thesis, previous_status, ThesisStatus.ARCHIVED, user, clean_reason, metadata={"event": AuditEvent.UNPUBLISHED.value})
+    audit_metadata = event_payload(AuditEvent.UNPUBLISHED, reason=clean_reason)
+    _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata=audit_metadata, changes={"status": {"from": previous_status, "to": ThesisStatus.ARCHIVED}, "isPublic": {"from": True, "to": False}})
     invalidate_public_repository_cache()
     logger.info("Thesis %s unpublished by %s", thesis.pk, user.pk)
     return thesis
@@ -562,5 +567,6 @@ def delete_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
     if thesis.deleted_at is None:
         thesis.deleted_at = timezone.now()
         thesis.save(update_fields=["deleted_at", "updated_at"])
-        _audit_thesis(AuditAction.DELETE, thesis, request, user, metadata={"event": "THESIS_SOFT_DELETED", "status": thesis.status})
+        audit_metadata = event_payload(AuditEvent.THESIS_SOFT_DELETED, status=thesis.status)
+        _audit_thesis(AuditAction.DELETE, thesis, request, user, metadata=audit_metadata)
     return thesis

@@ -1,8 +1,8 @@
 """
-Testes de integridade sob operações sobrepostas.
+Integrity tests for overlapping operations.
 
-Executados com o banco de teste padrão. Os cenários dependem de invariantes da
-aplicação e de constraints do banco, não de timing de locks do PostgreSQL.
+These scenarios rely on application invariants and database constraints rather
+than on PostgreSQL lock timing, so they also run on the default test database.
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ def create_user(email: str, name: str, role: str) -> User:
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
 class CommitteeIntegrityTests(TestCase):
-    """Invariantes da comissão que não podem ser violados por requisições sobrepostas."""
+    """
+    Committee invariants that overlapping requests must not violate.
+    """
 
     def setUp(self) -> None:
         self.department = Department.objects.create(name="Computação")
@@ -76,7 +78,9 @@ class CommitteeIntegrityTests(TestCase):
 
 @override_settings(CACHES=TEST_CACHES, SESSION_ENGINE="django.contrib.sessions.backends.db")
 class ExternalInvitationIntegrityTests(TestCase):
-    """O status EXPIRED precisa ser persistido mesmo quando a troca falha."""
+    """
+    Verify that EXPIRED is persisted even when token exchange fails.
+    """
 
     def setUp(self) -> None:
         self.inviter = create_user("inviter@ufvjm.edu.br", "Convidante", ProfileRole.ADMIN)

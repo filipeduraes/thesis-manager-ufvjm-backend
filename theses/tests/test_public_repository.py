@@ -236,6 +236,22 @@ class PublicThrottleTests(RepositoryTestCase):
         self.assertEqual(blocked.status_code, 429)
         self.assertEqual(blocked["Content-Type"], "application/json")
 
+    def test_forwarded_header_from_untrusted_peer_does_not_open_new_buckets(self) -> None:
+        with self.settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_CIDRS=["10.9.0.0/16"]):
+            with patch.object(ScopedRateThrottle, "THROTTLE_RATES", self._rates(public_repository="1/min")):
+                self.assertEqual(self.client.get("/api/v1/public/theses", HTTP_X_FORWARDED_FOR="203.0.113.1").status_code, 200)
+                blocked = self.client.get("/api/v1/public/theses", HTTP_X_FORWARDED_FOR="203.0.113.2")
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_forwarded_header_from_trusted_proxy_identifies_the_client(self) -> None:
+        with self.settings(TRUSTED_PROXY_COUNT=1, TRUSTED_PROXY_CIDRS=["127.0.0.0/8"]):
+            with patch.object(ScopedRateThrottle, "THROTTLE_RATES", self._rates(public_repository="1/min")):
+                self.assertEqual(self.client.get("/api/v1/public/theses", HTTP_X_FORWARDED_FOR="203.0.113.1").status_code, 200)
+                other_client = self.client.get("/api/v1/public/theses", HTTP_X_FORWARDED_FOR="203.0.113.2")
+                same_client = self.client.get("/api/v1/public/theses", HTTP_X_FORWARDED_FOR="203.0.113.1")
+        self.assertEqual(other_client.status_code, 200)
+        self.assertEqual(same_client.status_code, 429)
+
     def test_download_has_its_own_scope(self) -> None:
         thesis = create_thesis(ThesisSpec(title="Download limitado", course=self.course, advisor=self.advisor, authors=[self.student]))
         with patch.object(ScopedRateThrottle, "THROTTLE_RATES", self._rates(public_download="1/min")):

@@ -23,6 +23,9 @@ from django.utils import timezone
 
 from academic.models import Course, UserCourseAssignment
 from academic.services import active_course_assignment
+from accounts.audit_events import event_payload
+from accounts.audit_identifiers import AuditEvent, EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
@@ -304,7 +307,7 @@ def thesis_list_queryset() -> QuerySet[Thesis]:
     Returns:
         QuerySet[Thesis]: Query with list dependencies prefetched.
     """
-    return Thesis.objects.select_related(
+    return Thesis.objects.filter(deleted_at__isnull=True).select_related(
         "course",
         "course__department",
         "advisor",
@@ -535,16 +538,15 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
     if author_names:
         enriched_metadata["thesisAuthorNames"] = author_names
     enriched_metadata.update(metadata or {})
-    record_audit(
+    record_audit(AuditEntry(
         action=action,
-        entity_type="Thesis",
+        entity_type=EntityType.THESIS,
         entity_id=str(thesis.pk),
-        entity_app_label="theses",
         request=request,
         actor_user=actor,
         metadata=enriched_metadata,
         changes=changes or {},
-    )
+    ))
 
 
 @transaction.atomic
@@ -573,6 +575,11 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     # lock, dois PUT concorrentes criam dois rascunhos para o mesmo autor.
     acquire_transaction_lock(THESIS_DRAFT_LOCK_KEY + (user.pk.int % 100000))
     _validate_course(course)
+    # A UI limita o curso ao vínculo ativo do aluno; a mesma regra precisa ser
+    # aplicada na escrita, senão um cliente pode escolher qualquer curso.
+    assignment = active_course_assignment(user)
+    if assignment is not None and assignment.course_id != course.pk:
+        raise ValidationError("Selecione o curso da sua matrícula.")
     _validate_advisor(advisor)
     clean_title = " ".join((title or "").split())
     if not clean_title:
@@ -837,8 +844,8 @@ def upload_thesis_file(user: User, thesis: Thesis, uploaded_file: Any, change_de
         "sizeBytes": stored_file.size_bytes,
     }
     if is_correction:
-        metadata["event"] = "CORRECTED_VERSION_UPLOADED"
-        history_metadata = {"event": "CORRECTED_VERSION_UPLOADED", "versionNumber": thesis_file.version_number}
+        metadata = event_payload(AuditEvent.CORRECTED_VERSION_UPLOADED, **metadata)
+        history_metadata = {"event": AuditEvent.CORRECTED_VERSION_UPLOADED.value, "versionNumber": thesis_file.version_number}
         _add_status_history(thesis, thesis.status, thesis.status, user, "Versão corrigida enviada após a aprovação com ressalvas.", metadata=history_metadata)
     _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata=metadata)
     if is_correction:
@@ -886,7 +893,7 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
         thesis,
         request,
         user,
-        metadata={"event": "SUBMITTED", "versionNumber": current.version_number},
+        metadata=event_payload(AuditEvent.SUBMITTED, versionNumber=current.version_number),
     )
     return thesis
 
@@ -929,14 +936,14 @@ def withdraw_submission(user: User, thesis: Thesis, request: HttpRequest | None 
         target_status,
         user,
         "Envio descartado pelo aluno antes da avaliação do orientador.",
-        metadata={"event": "SUBMISSION_WITHDRAWN"},
+        metadata=event_payload(AuditEvent.SUBMISSION_WITHDRAWN),
     )
     _audit_thesis(
         AuditAction.UPDATE,
         thesis,
         request,
         user,
-        metadata={"event": "SUBMISSION_WITHDRAWN", "targetStatus": target_status},
+        metadata=event_payload(AuditEvent.SUBMISSION_WITHDRAWN, targetStatus=target_status),
     )
     return thesis
 
@@ -1017,7 +1024,12 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
 
 
 def _delete_stored_paths(paths: Iterable[str]) -> None:
-    """Remove arquivos físicos órfãos após o commit da transação."""
+    """
+    Remove orphaned physical files after the database transaction commits.
+
+    Args:
+        paths: Storage paths whose database rows have already been deleted.
+    """
     for path in paths:
         try:
             if default_storage.exists(path):
@@ -1075,7 +1087,7 @@ def purge_thesis_versions(thesis: Thesis, actor: User | None = None, request: Ht
             thesis,
             request,
             actor,
-            metadata={"event": "VERSION_HISTORY_PURGED", "removedVersions": removed, "keptVersion": current.version_number},
+            metadata=event_payload(AuditEvent.VERSION_HISTORY_PURGED, removedVersions=removed, keptVersion=current.version_number),
         )
     return removed
 
@@ -1126,7 +1138,7 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
         thesis,
         request,
         user,
-        metadata={"event": "DEFENSE_RESULT", "result": result},
+        metadata=event_payload(AuditEvent.DEFENSE_RESULT, result=result),
     )
     if new_status in APPROVED_DEFENSE_STATUSES:
         publish_if_ready(thesis, trigger=PublicationTrigger.DEFENSE_RESULT, request=request)
@@ -1284,12 +1296,12 @@ def _perform_publication(thesis: Thesis, current: ThesisFile, actor: User | None
     thesis.defense_year = defense_date.year
     thesis.save(update_fields=["status", "is_public", "published_at", "defense_date", "defense_year", "updated_at"])
     reason = "Monografia publicada automaticamente no repositório institucional." if automatic else "Monografia publicada no repositório institucional."
-    history_metadata = {"event": "PUBLISHED", "automatic": automatic, "trigger": trigger, "versionNumber": current.version_number, "sha256": current.stored_file.sha256_hex}
+    history_metadata = {"event": AuditEvent.PUBLISHED.value, "automatic": automatic, "trigger": trigger, "versionNumber": current.version_number, "sha256": current.stored_file.sha256_hex}
     _add_status_history(thesis, previous_status, ThesisStatus.PUBLISHED, actor, reason, metadata=history_metadata)
     record_thesis_published(thesis)
     invalidate_public_repository_cache()
     purge_thesis_versions(thesis, actor=actor, request=request)
-    audit_metadata = {"event": "PUBLISHED", "referenceCode": thesis.reference_code, "automatic": automatic, "trigger": trigger}
+    audit_metadata = event_payload(AuditEvent.PUBLISHED, referenceCode=thesis.reference_code, automatic=automatic, trigger=str(trigger))
     _audit_thesis(AuditAction.PUBLISH, thesis, request, actor, metadata=audit_metadata)
     return thesis
 
@@ -1447,7 +1459,7 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
         thesis,
         request,
         user,
-        metadata={"documentType": document.type, "documentId": str(document.pk), "event": "DOCUMENT_VALIDATED"},
+        metadata=event_payload(AuditEvent.DOCUMENT_VALIDATED, documentType=document.type, documentId=str(document.pk)),
     )
     if document.type == DocumentType.PUBLICATION_AUTHORIZATION:
         publish_if_ready(thesis, trigger=PublicationTrigger.AUTHORIZATION_VALIDATED, request=request)

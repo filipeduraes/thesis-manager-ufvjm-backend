@@ -15,9 +15,11 @@ from django.http import HttpRequest
 from django.utils import timezone
 
 from academic.models import Course, Department, UserCourseAssignment
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User, UserProfileRole
-from accounts.services import record_audit
+from accounts.services import actor_from_request, record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -119,18 +121,13 @@ def resolve_pending_coordinators_for_user(
             if changed_fields:
                 course.save(update_fields=[*changed_fields, "updated_at"])
                 updated_ids.append(str(course.pk))
-                record_audit(
+                record_audit(AuditEntry(
                     action=AuditAction.UPDATE,
-                    entity_type="Course",
+                    entity_type=EntityType.COURSE,
                     entity_id=str(course.pk),
-                    entity_app_label="academic",
                     request=request,
                     actor_user=(
-                        request.user
-                        if request
-                        and getattr(request.user, "is_authenticated", False)
-                        and isinstance(request.user, User)
-                        else None
+                        actor_from_request(request)
                     ),
                     changes={
                         "coordinatorResolved": True,
@@ -138,7 +135,7 @@ def resolve_pending_coordinators_for_user(
                         "coordinatorEmail": email,
                     },
                     metadata={"trigger": "coordinator_resolution"},
-                )
+                ))
 
         if updated_ids:
             role_created = ensure_coordinator_role(user)
@@ -366,18 +363,13 @@ def create_course(
         ensure_coordinator_role(user)
         resolve_pending_coordinators_for_user(user, request=request)
 
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.CREATE,
-        entity_type="Course",
+        entity_type=EntityType.COURSE,
         entity_id=str(course.pk),
-        entity_app_label="academic",
         request=request,
         actor_user=(
-            request.user
-            if request
-            and getattr(request.user, "is_authenticated", False)
-            and isinstance(request.user, User)
-            else None
+            actor_from_request(request)
         ),
         changes={
             "name": course.name,
@@ -385,7 +377,7 @@ def create_course(
             "departmentId": str(course.department_id),
             "coordinatorEmail": course.coordinator_email,
         },
-    )
+    ))
     return course
 
 
@@ -468,21 +460,16 @@ def update_course(
         prune_orphan_departments()
 
     if changes:
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="Course",
+            entity_type=EntityType.COURSE,
             entity_id=str(course.pk),
-            entity_app_label="academic",
             request=request,
             actor_user=(
-                request.user
-                if request
-                and getattr(request.user, "is_authenticated", False)
-                and isinstance(request.user, User)
-                else None
+                actor_from_request(request)
             ),
             changes=changes,
-        )
+        ))
     return course
 
 
@@ -506,21 +493,16 @@ def delete_course(course: Course, request: HttpRequest | None = None) -> None:
     course.delete()
     if old_department_id:
         prune_orphan_departments()
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.DELETE,
-        entity_type="Course",
+        entity_type=EntityType.COURSE,
         entity_id=course_id,
-        entity_app_label="academic",
         request=request,
         actor_user=(
-            request.user
-            if request
-            and getattr(request.user, "is_authenticated", False)
-            and isinstance(request.user, User)
-            else None
+            actor_from_request(request)
         ),
         changes=snapshot,
-    )
+    ))
 
 
 def set_user_course_assignment(
@@ -553,11 +535,10 @@ def set_user_course_assignment(
             changed = active.exists()
             active.update(is_active=False, revoked_at=now)
             if changed:
-                record_audit(
+                record_audit(AuditEntry(
                     action=AuditAction.UPDATE,
-                    entity_type="UserCourseAssignment",
+                    entity_type=EntityType.USER_COURSE_ASSIGNMENT,
                     entity_id=str(user.pk),
-                    entity_app_label="academic",
                     request=request,
                     actor_user=assigned_by,
                     changes={"course": None},
@@ -565,7 +546,7 @@ def set_user_course_assignment(
                         "userName": user.name,
                         "userEmail": user.email,
                     },
-                )
+                ))
             return
 
         current = active.filter(course=course).first()
@@ -587,11 +568,10 @@ def set_user_course_assignment(
                 ).first()
                 if current is None:
                     raise
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="UserCourseAssignment",
+            entity_type=EntityType.USER_COURSE_ASSIGNMENT,
             entity_id=str(user.pk),
-            entity_app_label="academic",
             request=request,
             actor_user=assigned_by,
             changes={
@@ -602,7 +582,7 @@ def set_user_course_assignment(
                 "userName": user.name,
                 "userEmail": user.email,
             },
-        )
+        ))
 
 
 def active_course_assignment(user: User) -> UserCourseAssignment | None:

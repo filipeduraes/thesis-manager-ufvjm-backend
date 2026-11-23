@@ -204,11 +204,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.ScopedRateThrottle",
+        # Mesma regra de IP de accounts.network: X-Forwarded-For só vale quando o
+        # par é um proxy confiável (TRUSTED_PROXY_CIDRS), ao contrário de NUM_PROXIES.
+        "thesismanagerbackend.throttling.ClientIpScopedRateThrottle",
     ],
-    # Identifica o cliente anônimo pelo REMOTE_ADDR; X-Forwarded-For só vale com
-    # proxies confiáveis configurados (mesma regra de accounts.network).
-    "NUM_PROXIES": env.int("TRUSTED_PROXY_COUNT", default=0),
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
         "public_download": "30/min",
@@ -269,6 +268,7 @@ CSRF_COOKIE_SECURE = env.bool("CSRF_COOKIE_SECURE", default=not DEBUG)
 # Só considere cabeçalhos de encaminhamento quando a quantidade de proxies for configurada.
 
 TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
+TRUSTED_PROXY_CIDRS = env.list("TRUSTED_PROXY_CIDRS", default=[])
 INSTITUTIONAL_NETWORK_CIDRS = env.list("INSTITUTIONAL_NETWORK_CIDRS", default=[])
 VPN_NETWORK_CIDRS = env.list("VPN_NETWORK_CIDRS", default=[])
 ADMIN_ALLOWED_CIDRS = env.list(
