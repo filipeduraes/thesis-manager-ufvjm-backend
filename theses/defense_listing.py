@@ -24,7 +24,7 @@ from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_
 
 logger = logging.getLogger(__name__)
 
-DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__institutional_member", "members__external_invitation", "members__evaluation", "thesis__authors__author", "thesis__keyword_links__keyword", "thesis__files__stored_file")
+DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__evaluation", "thesis__authors", "thesis__keyword_links__keyword", "thesis__files__stored_file")
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ def defenses_visible_to(principal: User | ExternalInvitationPrincipal) -> QueryS
     Returns:
         QuerySet[Defense]: Scoped queryset with thesis and members preloaded.
     """
-    base: QuerySet[Defense] = Defense.objects.select_related("thesis", "thesis__advisor", "thesis__course", "thesis__course__department").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch(), google_social_accounts_prefetch("members__institutional_member__socialaccount_set"))
+    base: QuerySet[Defense] = Defense.objects.select_related("thesis").prefetch_related(*DEFENSE_LIST_PREFETCH, defense_close_entries_prefetch())
     if isinstance(principal, ExternalInvitationPrincipal):
         return base.filter(members__external_invitation=principal.invitation).distinct()
     if user_is_admin(principal):
@@ -154,12 +154,12 @@ def _search_defenses(queryset: QuerySet[Defense], query: str) -> QuerySet[Defens
     Returns:
         QuerySet[Defense]: Filtered queryset (may contain duplicates; caller applies distinct).
     """
-    main_author_match = Q(thesis__authors__is_main_author=True, thesis__authors__author__name__icontains=query)
+    main_author_match = Q(thesis__authors__is_main_author=True, thesis__authors__name__icontains=query)
     return queryset.filter(
         Q(thesis__title__icontains=query)
         | Q(thesis__reference_code__icontains=query)
         | main_author_match
-        | Q(thesis__advisor__name__icontains=query)
+        | Q(thesis__advisor_name__icontains=query)
         | Q(location__icontains=query)
     )
 
@@ -238,7 +238,7 @@ def schedulable_theses_for(principal: User) -> QuerySet[Thesis]:
         if user_is_advisor(principal):
             allowed |= Q(advisor_id=principal.pk)
         queryset = queryset.filter(allowed)
-    queryset = queryset.select_related("course", "advisor").prefetch_related("authors__author", "keyword_links__keyword", "files__stored_file")
+    queryset = queryset.prefetch_related("authors", "keyword_links__keyword", "files__stored_file")
     return queryset.distinct().order_by("advisor_approved_at", "updated_at")
 
 
@@ -304,19 +304,19 @@ def _member_has_evaluated(member: DefenseMember) -> bool:
     return True
 
 
-def _thesis_main_author(thesis: Thesis) -> User | None:
+def _thesis_main_author(thesis: Thesis):
     """
-    Return the main author using the prefetched ``authors`` relation.
+    Return the local main-author link without loading the auth database.
 
     Args:
-        thesis: Thesis with ``authors__author`` prefetched.
+        thesis: Thesis with ``authors`` prefetched.
 
     Returns:
-        User | None: Main author, if any.
+        ThesisAuthor | None: Main author link, if any.
     """
     for author_link in thesis.authors.all():
         if author_link.is_main_author:
-            return author_link.author
+            return author_link
     return None
 
 
@@ -335,7 +335,7 @@ def defense_viewer_context_for(defenses: list[Defense], viewer: User | ExternalI
     return build_defense_viewer_context(viewer, thesis_ids)
 
 
-def defense_list_payload(defense: Defense, viewer: User, viewer_context: DefenseViewerContext) -> dict[str, Any]:
+def defense_list_payload(defense: Defense, viewer: User, viewer_context: DefenseViewerContext, avatar_urls: dict | None = None) -> dict[str, Any]:
     """
     Serialize a defense for the committee listing screen.
 
@@ -354,13 +354,13 @@ def defense_list_payload(defense: Defense, viewer: User, viewer_context: Defense
         dict[str, Any]: Defense payload plus ``thesisTitle``, ``thesisReferenceCode``,
         ``student``, ``advisor``, ``viewerMembership`` and ``viewerPermissions``.
     """
-    payload = defense_payload(defense, viewer=viewer, viewer_context=viewer_context)
+    payload = defense_payload(defense, viewer=viewer, viewer_context=viewer_context, avatar_urls=avatar_urls)
     thesis = defense.thesis
     main_author = _thesis_main_author(thesis)
     payload["thesisTitle"] = thesis.title
     payload["thesisReferenceCode"] = thesis.reference_code
-    payload["student"] = user_brief(main_author)
-    payload["advisor"] = user_brief(thesis.advisor)
+    payload["student"] = {"id": str(main_author.author_id), "name": main_author.name or thesis.main_author_name, "email": ""} if main_author else None
+    payload["advisor"] = {"id": str(thesis.advisor_id), "name": thesis.advisor_name} if thesis.advisor_id else None
     payload["viewerMembership"] = viewer_membership_payload(defense, viewer)
     viewer_permissions = viewer_context.permissions_for(defense)
     payload["viewerPermissions"] = viewer_permissions.to_payload()

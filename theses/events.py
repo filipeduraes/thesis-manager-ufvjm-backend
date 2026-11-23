@@ -13,7 +13,7 @@ from accounts.services import invalidate_external_token
 from events.catalog import EventType, ExternalInvitationTrigger
 from events.models import OutboxEvent
 from events.outbox import AggregateRef, record_event
-from theses.models import Defense, DefenseMember, Thesis
+from theses.models import Defense, DefenseMember, StoredFile, Thesis
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -70,6 +70,52 @@ def record_thesis_submitted(thesis: Thesis, version_number: int) -> OutboxEvent:
     return record_event(EventType.THESIS_SUBMITTED, _thesis_aggregate(thesis), payload)
 
 
+def record_thesis_text_extraction_requested(thesis: Thesis, stored_file: StoredFile, trigger: str) -> OutboxEvent:
+    """
+    Record ``thesis.text_extraction_requested`` for asynchronous PDF indexing.
+
+    Args:
+        thesis: Thesis that owns the file.
+        stored_file: Stored PDF awaiting text extraction.
+        trigger: Code of the workflow step that requested it.
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {"thesisId": str(thesis.pk), "storedFileId": str(stored_file.pk), "trigger": trigger}
+    return record_event(EventType.THESIS_TEXT_EXTRACTION_REQUESTED, _thesis_aggregate(thesis), payload)
+
+
+def record_thesis_text_extracted(thesis: Thesis, stored_file: StoredFile) -> OutboxEvent:
+    """
+    Record ``thesis.text_extracted`` after a PDF has been indexed.
+
+    Args:
+        thesis: Thesis that owns the file.
+        stored_file: Processed stored PDF.
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {"thesisId": str(thesis.pk), "storedFileId": str(stored_file.pk)}
+    return record_event(EventType.THESIS_TEXT_EXTRACTED, _thesis_aggregate(thesis), payload)
+
+
+def record_thesis_repository_updated(thesis: Thesis, reason: str) -> OutboxEvent:
+    """
+    Record ``thesis.repository_updated`` when published data changes.
+
+    Args:
+        thesis: Published thesis whose projection must be refreshed.
+        reason: Code of the change (identifier only).
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {"thesisId": str(thesis.pk), "trigger": reason}
+    return record_event(EventType.THESIS_REPOSITORY_UPDATED, _thesis_aggregate(thesis), payload)
+
+
 def record_defense_scheduled(defense: Defense) -> OutboxEvent:
     """
     Record ``defense.scheduled`` after a defense is created for a thesis.
@@ -90,6 +136,26 @@ def record_defense_scheduled(defense: Defense) -> OutboxEvent:
         "modality": defense.modality,
     }
     return record_event(EventType.DEFENSE_SCHEDULED, _defense_aggregate(defense), payload)
+
+
+def record_defense_member_invited(defense: Defense, member: DefenseMember) -> OutboxEvent:
+    """
+    Record ``defense.member_invited`` when a member joins a scheduled defense.
+
+    Args:
+        defense: Defense the member joined.
+        member: Created committee membership.
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {
+        "defenseId": str(defense.pk),
+        "thesisId": str(defense.thesis_id),
+        "memberId": str(member.pk),
+        "invitationId": str(member.external_invitation_id) if member.external_invitation_id else None,
+    }
+    return record_event(EventType.DEFENSE_MEMBER_INVITED, _defense_aggregate(defense), payload)
 
 
 def record_defense_evaluation_recorded(defense: Defense, member: DefenseMember, is_update: bool) -> OutboxEvent:
@@ -126,6 +192,28 @@ def record_defense_completed(defense: Defense, result: str, thesis_new_status: s
     """
     payload = {"defenseId": str(defense.pk), "thesisId": str(defense.thesis_id), "result": result, "thesisNewStatus": thesis_new_status, "automatic": automatic}
     return record_event(EventType.DEFENSE_COMPLETED, _defense_aggregate(defense), payload)
+
+
+def record_defense_cancelled(defense: Defense, previous_status: str) -> OutboxEvent:
+    """Record ``defense.cancelled`` with the previous defense status code."""
+    payload = {"defenseId": str(defense.pk), "thesisId": str(defense.thesis_id), "previousStatus": previous_status}
+    return record_event(EventType.DEFENSE_CANCELLED, _defense_aggregate(defense), payload)
+
+
+def record_defense_rescheduled(defense: Defense) -> OutboxEvent:
+    """Record ``defense.rescheduled`` after a date or duration change."""
+    payload = {
+        "defenseId": str(defense.pk),
+        "thesisId": str(defense.thesis_id),
+        "scheduledDatetime": _isoformat(defense.scheduled_datetime),
+        "durationMinutes": defense.duration_minutes,
+    }
+    return record_event(EventType.DEFENSE_RESCHEDULED, _defense_aggregate(defense), payload)
+
+
+def record_thesis_review_recorded(thesis: Thesis, decision: str) -> OutboxEvent:
+    """Record ``thesis.review_recorded`` after an advisor review."""
+    return record_event(EventType.THESIS_REVIEW_RECORDED, _thesis_aggregate(thesis), {"thesisId": str(thesis.pk), "reviewDecision": decision})
 
 
 def record_thesis_defense_result_recorded(thesis: Thesis, result: str, thesis_new_status: str) -> OutboxEvent:

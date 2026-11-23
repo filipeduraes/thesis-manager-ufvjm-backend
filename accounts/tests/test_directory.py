@@ -3,6 +3,7 @@ Tests for the public advisors list and the role-restricted directory.
 """
 from __future__ import annotations
 
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -22,6 +23,7 @@ class UserDirectoryApiTests(TestCase):
     """Public advisors list and restricted directory behavior."""
 
     def setUp(self) -> None:
+        cache.clear()
         self.client = APIClient()
         self.advisor = self._create_user("a@ufvjm.edu.br", "Orientadora Silva", ProfileRole.ADVISOR)
         self.advisor_b = self._create_user("b@ufvjm.edu.br", "Orientador Mendes", ProfileRole.ADVISOR)

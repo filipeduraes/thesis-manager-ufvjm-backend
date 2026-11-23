@@ -73,12 +73,12 @@ class ReportScope:
 
     Attributes:
         code: ``ALL`` for administrators, ``COORDINATED_COURSES`` otherwise.
-        course_ids: Courses in scope, or ``None`` when every course is visible.
+        course_ids: IDs of courses in scope, or ``None`` when every course is visible.
         cache_owner: Cache namespace shared by callers who see the same data.
     """
 
     code: str
-    course_ids: QuerySet[Course] | None
+    course_ids: frozenset[UUID] | None
     cache_owner: str
 
 
@@ -114,10 +114,10 @@ def resolve_report_scope(user: User, filters: ReportFilters) -> ReportScope:
     if user_is_admin(user) and not filters.coordinated_only:
         return ReportScope(code=SCOPE_ALL, course_ids=None, cache_owner="all")
     if not user_is_coordinator(user):
-        empty_courses: QuerySet[Course] = Course.objects.none()
-        return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=empty_courses, cache_owner=f"user:{user.pk}")
+        return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=frozenset(), cache_owner=f"user:{user.pk}")
     course_filter = coordinated_courses_filter(user)
-    coordinated_ids: QuerySet[Course] = Course.objects.filter(course_filter).values("pk").distinct()
+    # O banco de cursos é outro; materializar os IDs evita subquery cross-DB.
+    coordinated_ids = frozenset(Course.objects.filter(course_filter).values_list("pk", flat=True))
     return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=coordinated_ids, cache_owner=f"user:{user.pk}")
 
 
@@ -318,7 +318,7 @@ def _by_course(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[di
     Returns:
         list[dict[str, Any]]: One row per course with data, ordered by name.
     """
-    thesis_rows = theses.values("course_id", "course__code", "course__name").annotate(**_thesis_aggregates()).order_by("course__name")
+    thesis_rows = theses.values("course_id", "course_code", "course_name").annotate(**_thesis_aggregates()).order_by("course_name")
     defense_rows = defenses.values("thesis__course_id").annotate(**_defense_aggregates()).order_by()
     defenses_by_course = {row["thesis__course_id"]: row for row in defense_rows}
     rows: list[dict[str, Any]] = []
@@ -327,8 +327,8 @@ def _by_course(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[di
         rows.append(
             {
                 "courseId": str(course_id),
-                "courseCode": thesis_row["course__code"],
-                "courseName": thesis_row["course__name"],
+                "courseCode": thesis_row["course_code"],
+                "courseName": thesis_row["course_name"],
                 **_thesis_counters(thesis_row),
                 **_defense_counters(defenses_by_course.get(course_id)),
             }
@@ -347,7 +347,7 @@ def _by_advisor(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[d
     Returns:
         list[dict[str, Any]]: One row per advisor, most theses first, then by name.
     """
-    thesis_rows = theses.values("advisor_id", "advisor__name").annotate(**_thesis_aggregates()).order_by("-thesis_count", "advisor__name")
+    thesis_rows = theses.values("advisor_id", "advisor_name").annotate(**_thesis_aggregates()).order_by("-thesis_count", "advisor_name")
     defense_rows = defenses.values("thesis__advisor_id").annotate(**_defense_aggregates()).order_by()
     defenses_by_advisor = {row["thesis__advisor_id"]: row for row in defense_rows}
     rows: list[dict[str, Any]] = []
@@ -356,7 +356,7 @@ def _by_advisor(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[d
         rows.append(
             {
                 "advisorId": str(advisor_id),
-                "advisorName": thesis_row["advisor__name"],
+                "advisorName": thesis_row["advisor_name"],
                 **_thesis_counters(thesis_row),
                 **_defense_counters(defenses_by_advisor.get(advisor_id)),
             }
@@ -393,11 +393,11 @@ def _options(scope: ReportScope) -> dict[str, list[Any]]:
         courses = courses.filter(pk__in=scope.course_ids)
     course_rows = courses.order_by("name").values("id", "code", "name")
     scoped_theses = _scoped_theses(scope, ReportFilters())
-    advisor_rows = scoped_theses.order_by("advisor__name").values("advisor_id", "advisor__name").distinct()
+    advisor_rows = scoped_theses.order_by("advisor_name").values("advisor_id", "advisor_name").distinct()
     year_rows = _completed_defenses(scoped_theses, ReportFilters()).values_list("defense_year", flat=True).distinct().order_by("defense_year")
     return {
         "courses": [{"id": str(row["id"]), "code": row["code"], "name": row["name"]} for row in course_rows],
-        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor__name"]} for row in advisor_rows],
+        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor_name"]} for row in advisor_rows],
         "years": list(year_rows),
     }
 

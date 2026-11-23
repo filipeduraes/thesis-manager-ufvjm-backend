@@ -49,17 +49,25 @@ class UserSuggestEndpointTests(TestCase):
         self.admin = create_user("admin@ufvjm.edu.br", "Admin Souza", ProfileRole.ADMIN)
         self.student = create_user("aluno@ufvjm.edu.br", "Aluno Teste", ProfileRole.STUDENT)
         self.matched = create_user("lidia.silva@ufvjm.edu.br", "Lídia Silva", ProfileRole.ADVISOR)
+        self.matched_student = create_user("lidia.colega@ufvjm.edu.br", "Lídia Colega", ProfileRole.STUDENT)
         create_user("lidia.oliveira@ufvjm.edu.br", "Lídia Oliveira", ProfileRole.ADMIN)
         create_user("lidia.ferreira@ufvjm.edu.br", "Lídia Ferreira", ProfileRole.ADVISOR)
         create_user("lidia.retired@ufvjm.edu.br", "Lídia Retired", None, is_active=False)
         self.client = APIClient()
 
-    def test_advisors_get_suggestions_students_do_not(self) -> None:
+    def test_advisors_see_advisors_and_students_see_students(self) -> None:
         self.client.force_authenticate(user=self.advisor)
         response = self.client.get(SUGGEST_URL, {"q": "lid"})
         self.assertEqual(response.status_code, 200)
+        advisor_names = {item["name"] for item in response.json()["results"]}
+        self.assertIn("Lídia Silva", advisor_names)
+        self.assertNotIn("Lídia Colega", advisor_names)
+        self.assertNotIn("Lídia Oliveira", advisor_names)
         self.client.force_authenticate(user=self.student)
-        denied = self.client.get(SUGGEST_URL, {"q": "lid"})
+        students = self.client.get(SUGGEST_URL, {"q": "lid"})
+        self.assertEqual(students.status_code, 200)
+        self.assertEqual([item["name"] for item in students.json()["results"]], ["Lídia Colega"])
+        denied = self.client.get(SUGGEST_URL, {"q": "lid", "role": "ADVISOR"})
         self.assertEqual(denied.status_code, 403)
 
     def test_suggestion_matches_on_name_and_respects_limit(self) -> None:

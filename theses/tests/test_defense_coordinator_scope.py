@@ -38,8 +38,8 @@ class CoordinatorDefenseScopeTests(TestCase):
         self.course_b = Course.objects.create(department=self.department, coordinator=self.coordinator_b, name="SI", code="SI001")
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
-        self.thesis_a = Thesis.objects.create(course=self.course_a, advisor=self.advisor, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
-        self.schedulable_a = Thesis.objects.create(course=self.course_a, advisor=self.advisor, title="Tese A2", status=ThesisStatus.READY_FOR_DEFENSE)
+        self.thesis_a = Thesis.objects.create(course_id=self.course_a.pk, advisor_id=self.advisor.pk, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
+        self.schedulable_a = Thesis.objects.create(course_id=self.course_a.pk, advisor_id=self.advisor.pk, title="Tese A2", status=ThesisStatus.READY_FOR_DEFENSE)
         self.defense_a = schedule_defense(self.thesis_a, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.client = APIClient()
 
@@ -108,14 +108,14 @@ class CoordinatorDefenseScopeTests(TestCase):
         self.assertEqual(client.patch(f"/api/v1/defenses/{self.defense_a.pk}", {"notes": "x"}, format="json").status_code, 403)
 
     def test_coordinator_cannot_manage_own_authored_thesis(self) -> None:
-        ThesisAuthor.objects.create(thesis=self.schedulable_a, author=self.coordinator_a, is_main_author=True)
+        ThesisAuthor.objects.create(thesis=self.schedulable_a, author_id=self.coordinator_a.pk, is_main_author=True)
         self.assertFalse(_can_manage_defense(self.coordinator_a, self.schedulable_a.pk))
         self.assertTrue(_can_manage_defense(self.coordinator_a, self.thesis_a.pk))
 
     # --- admin e orientador ---
 
     def test_admin_still_sees_everything(self) -> None:
-        thesis_b = Thesis.objects.create(course=self.course_b, advisor=self.advisor, title="Tese B", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis_b = Thesis.objects.create(course_id=self.course_b.pk, advisor_id=self.advisor.pk, title="Tese B", status=ThesisStatus.ADVISOR_APPROVED)
         schedule_defense(thesis_b, scheduled_datetime=timezone.now() + timedelta(days=8), actor=self.admin)
         client = self._as(self.admin)
         self.assertEqual(client.get("/api/v1/defenses").data["count"], 2)

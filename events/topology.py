@@ -17,6 +17,10 @@ from pika.adapters.blocking_connection import BlockingChannel
 EVENTS_EXCHANGE_TYPE = "topic"
 DEAD_LETTER_EXCHANGE_TYPE = "direct"
 NOTIFICATION_ROUTING_KEYS: tuple[str, ...] = ("thesis.*", "defense.*")
+INDEXING_ROUTING_KEYS: tuple[str, ...] = ("thesis.text_extraction_requested",)
+ADJUDICATION_ROUTING_KEYS: tuple[str, ...] = ("defense.evaluation_recorded",)
+REPOSITORY_ROUTING_KEYS: tuple[str, ...] = ("thesis.published", "thesis.repository_updated", "thesis.text_extracted")
+REPORTS_ROUTING_KEYS: tuple[str, ...] = ("thesis.submitted", "defense.completed", "thesis.defense_result_recorded", "thesis.published")
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,45 @@ def notifications_queue_spec() -> ConsumerQueueSpec:
     return ConsumerQueueSpec(queue=queue, routing_keys=NOTIFICATION_ROUTING_KEYS, dead_letter_queue=f"{queue}.dlq")
 
 
+def indexing_queue_spec() -> ConsumerQueueSpec:
+    """
+    Return the queue specification of the text indexing consumer.
+
+    Returns:
+        ConsumerQueueSpec: Queue, binding and DLQ from settings.
+    """
+    queue = settings.INDEXING_QUEUE
+    return ConsumerQueueSpec(queue=queue, routing_keys=INDEXING_ROUTING_KEYS, dead_letter_queue=f"{queue}.dlq")
+
+
+def adjudication_queue_spec() -> ConsumerQueueSpec:
+    """
+    Return the queue specification of the defense adjudication consumer.
+
+    Returns:
+        ConsumerQueueSpec: Queue, binding and DLQ from settings.
+    """
+    queue = settings.ADJUDICATION_QUEUE
+    return ConsumerQueueSpec(queue=queue, routing_keys=ADJUDICATION_ROUTING_KEYS, dead_letter_queue=f"{queue}.dlq")
+
+
+def repository_queue_spec() -> ConsumerQueueSpec:
+    """
+    Return the queue specification of the repository projection consumer.
+
+    Returns:
+        ConsumerQueueSpec: Queue, bindings and DLQ from settings.
+    """
+    queue = settings.REPOSITORY_QUEUE
+    return ConsumerQueueSpec(queue=queue, routing_keys=REPOSITORY_ROUTING_KEYS, dead_letter_queue=f"{queue}.dlq")
+
+
+def reports_queue_spec() -> ConsumerQueueSpec:
+    """Return the queue specification of the reporting projection consumer."""
+    queue = settings.REPORTS_QUEUE
+    return ConsumerQueueSpec(queue=queue, routing_keys=REPORTS_ROUTING_KEYS, dead_letter_queue=f"{queue}.dlq")
+
+
 def event_topology() -> EventTopology:
     """
     Return the topology of the event bus as configured in settings.
@@ -70,7 +113,7 @@ def event_topology() -> EventTopology:
         EventTopology: Exchanges and every consumer queue.
     """
     exchange = settings.EVENTS_EXCHANGE
-    return EventTopology(exchange=exchange, dead_letter_exchange=f"{exchange}.dlx", consumer_queues=(notifications_queue_spec(),))
+    return EventTopology(exchange=exchange, dead_letter_exchange=f"{exchange}.dlx", consumer_queues=(notifications_queue_spec(), indexing_queue_spec(), adjudication_queue_spec(), repository_queue_spec(), reports_queue_spec()))
 
 
 def declare_topology(channel: BlockingChannel, topology: EventTopology) -> None:

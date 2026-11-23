@@ -140,7 +140,7 @@ class ReportsOverviewTests(ReportScenarioMixin, TestCase):
 
     def test_coordinator_report_ignores_theses_advised_in_other_courses(self) -> None:
         UserProfileRole.objects.create(user=self.coordinator_a, role=ProfileRole.ADVISOR)
-        Thesis.objects.create(course=self.course_b, advisor=self.coordinator_a, title="Orientada fora", status=ThesisStatus.SUBMITTED)
+        Thesis.objects.create(course_id=self.course_b.pk, advisor_id=self.coordinator_a.pk, title="Orientada fora", status=ThesisStatus.SUBMITTED)
         self.assertEqual(self.summary(self.coordinator_a)["thesisCount"], 2)
 
     def test_admin_scope_coordinated_restricts_to_own_courses(self) -> None:
@@ -159,7 +159,7 @@ class ReportsOverviewTests(ReportScenarioMixin, TestCase):
             self.client.get(OVERVIEW_URL)
         extra_course = Course.objects.create(department=self.department, name="Matemática", code="MAT")
         for index in range(5):
-            Thesis.objects.create(course=extra_course, advisor=self.evaluator, title=f"Extra {index}", status=ThesisStatus.SUBMITTED)
+            Thesis.objects.create(course_id=extra_course.pk, advisor_id=self.evaluator.pk, title=f"Extra {index}", status=ThesisStatus.SUBMITTED)
         cache.clear()
         with CaptureQueriesContext(connection) as second_run:
             response = self.client.get(OVERVIEW_URL)
@@ -168,6 +168,6 @@ class ReportsOverviewTests(ReportScenarioMixin, TestCase):
 
     def test_response_is_cached_per_scope_and_filters(self) -> None:
         first = self.summary(self.admin)
-        Thesis.objects.create(course=self.course_a, advisor=self.advisor_1, title="Nova", status=ThesisStatus.SUBMITTED)
+        Thesis.objects.create(course_id=self.course_a.pk, advisor_id=self.advisor_1.pk, title="Nova", status=ThesisStatus.SUBMITTED)
         self.assertEqual(self.summary(self.admin)["thesisCount"], first["thesisCount"])
         self.assertEqual(self.summary(self.admin, courseId=str(self.course_a.pk))["thesisCount"], 3)

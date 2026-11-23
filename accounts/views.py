@@ -13,6 +13,8 @@ from allauth.socialaccount.providers import registry
 from django.conf import settings
 from django.contrib.auth import login as auth_login, logout
 from django.db import transaction
+
+from accounts.concurrency import database_for_model
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
@@ -37,7 +39,7 @@ from accounts.models import (
     User,
     UserProfileRole,
 )
-from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin
+from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalManager, IsCoordinatorOrAdmin, IsInstitutionalUser
 from accounts.directory import ROLE_FILTERS
 from accounts.serializers import (
     AdminUserCreateSerializer,
@@ -161,6 +163,41 @@ class SessionView(APIView):
         return response
 
 
+class ServiceIntrospectionView(APIView):
+    """
+    Resolve the identity and active roles of a user for other services.
+
+    The request is authenticated by a shared service token in ``X-Service-Token``
+    and never trusts client-supplied role data.
+    """
+
+    permission_classes: list = []
+    throttle_scope = "session"
+
+    def get(self, request) -> Response:
+        """
+        Return the caller's identity resolved by the auth service.
+
+        Args:
+            request: HTTP request with ``user_id`` and the service token header.
+
+        Returns:
+            Response: Identity, roles and active flag, or 401/404.
+        """
+        from django.conf import settings
+
+        if request.headers.get("X-Service-Token") != settings.SERVICE_TOKEN:
+            return Response({"detail": "Serviço não autenticado."}, status=401)
+        user_id = request.query_params.get("user_id")
+        if not user_id:
+            return Response({"detail": "user_id é obrigatório."}, status=400)
+        user = User.objects.filter(pk=user_id).first()
+        if user is None:
+            return Response({"detail": "Usuário não encontrado."}, status=404)
+        roles = list(user.active_profile_roles().values_list("role", flat=True))
+        return Response({"id": str(user.pk), "name": user.name, "email": user.email, "isActive": user.is_active, "roles": roles})
+
+
 class GoogleStartView(APIView):
     """
     Initiate Google OAuth using django-allauth's headless/redirect flow.
@@ -281,7 +318,7 @@ class AdminUsersView(APIView):
                 to_attr="google_social_accounts",
             )
         )
-        return User.objects.prefetch_related(*prefetches).order_by("email")
+        return User.objects.select_related("department").prefetch_related(*prefetches).order_by("email")
 
     def get(self, request) -> Response:
         queryset = self._queryset()
@@ -329,12 +366,19 @@ class AdminUsersView(APIView):
         serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            with transaction.atomic():
+            with transaction.atomic(using=database_for_model(User)):
+                from academic.models import Department
+
+                department_id = serializer.validated_data.get("departmentId")
+                department = Department.objects.filter(pk=department_id).first() if department_id else None
                 user = create_institutional_user(
                     email=serializer.validated_data["email"],
                     name=serializer.validated_data["name"],
                     roles=serializer.validated_data["roles"],
                     assigned_by=actor_from_request(request),
+                    registration_number=serializer.validated_data.get("registrationNumber", ""),
+                    research_area=serializer.validated_data.get("researchArea", ""),
+                    department=department,
                     request=request,
                 )
                 course_id = serializer.validated_data.get("courseId")
@@ -399,7 +443,7 @@ class AdminUserDetailView(APIView):
             )
         )
         return get_object_or_404(
-            User.objects.prefetch_related(*prefetches),
+            User.objects.select_related("department").prefetch_related(*prefetches),
             pk=user_id,
         )
 
@@ -416,9 +460,10 @@ class AdminUserDetailView(APIView):
         previous_course_records = getattr(user, "active_course_assignment_records", []) or []
         previous_course = previous_course_records[0].course if previous_course_records else None
         previous_is_active = user.is_active
+        previous_department = user.department.name if user.department_id else None
 
         try:
-            with transaction.atomic():
+            with transaction.atomic(using=database_for_model(User)):
                 if "roles" in validated:
                     set_user_roles(
                         user,
@@ -447,11 +492,29 @@ class AdminUserDetailView(APIView):
                         course,
                         assigned_by=actor_from_request(request),
                         request=request,
+                        audit=False,
                     )
                     audit_changes["course"] = {
                         "from": previous_course.name if previous_course else None,
                         "to": course.name if course else None,
                     }
+                if "departmentId" in validated:
+                    from academic.models import Department
+
+                    raw_department = validated["departmentId"]
+                    department = Department.objects.filter(pk=raw_department).first() if raw_department else None
+                    if raw_department and department is None:
+                        return Response({"detail": "Departamento inválido."}, status=status.HTTP_400_BAD_REQUEST)
+                    user.department = department
+                    audit_changes["department"] = {"from": previous_department, "to": department.name if department else None}
+                if "registrationNumber" in validated:
+                    user.registration_number = validated["registrationNumber"].strip()
+                    audit_changes["registrationNumber"] = user.registration_number
+                if "researchArea" in validated:
+                    user.research_area = validated["researchArea"].strip()
+                    audit_changes["researchArea"] = user.research_area
+                if user.department_id is not None or "departmentId" in validated or "registrationNumber" in validated or "researchArea" in validated:
+                    user.save(update_fields=["department", "registration_number", "research_area"])
                 if "is_active" in validated:
                     if validated["is_active"] and not user.is_active:
                         user.is_active = True
@@ -797,7 +860,7 @@ def _dev_login_user(email: str, name: str, roles: list[str], request) -> User:
 
     normalized_email = (email or "").strip().lower() or f"teste-{timezone.now().timestamp():.0f}@dev.local"
     display_name = (name or "").strip() or normalized_email.split("@", 1)[0]
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(User)):
         user = User.objects.filter(email__iexact=normalized_email).first()
         if user is None:
             user = User(email=normalized_email, name=display_name, is_active=True)
@@ -943,11 +1006,11 @@ class UserSuggestView(APIView):
     Return up to three institutional users matching a search fragment.
 
     Administrators and coordinators search the full directory; advisors see
-    only other advisors (the advisors list is public). Students and external
-    sessions receive 403.
+    only other advisors; students see only other students, so they can pick
+    co-authors for a thesis group. External sessions receive 403.
     """
 
-    permission_classes = [IsInstitutionalManager]
+    permission_classes = [IsInstitutionalUser]
     throttle_scope = "user_suggest"
 
     def get(self, request) -> Response:
@@ -955,8 +1018,9 @@ class UserSuggestView(APIView):
         Return the matching users for an autocomplete field.
 
         Query strings shorter than two characters return an empty result list
-        (never an error). Advisors only see other advisors; coordinators and
-        administrators can optionally narrow the result with ``role``.
+        (never an error). Advisors only see other advisors, students only other
+        students; coordinators and administrators can optionally narrow the
+        result with ``role``.
 
         Args:
             request: HTTP request with the ``q`` query parameter.
@@ -966,11 +1030,18 @@ class UserSuggestView(APIView):
         """
         query = (request.query_params.get("q") or "").strip()
         start_roles = None
-        if not IsCoordinatorOrAdmin().has_permission(request, self):
+        role = (request.query_params.get("role") or "").strip().upper()
+        if role and role not in ROLE_FILTERS:
+            return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        if IsCoordinatorOrAdmin().has_permission(request, self):
+            start_roles = ROLE_FILTERS.get(role) if role else None
+        elif IsInstitutionalManager().has_permission(request, self):
+            if role and role != ProfileRole.ADVISOR.value:
+                return Response({"detail": "Orientadores só podem buscar outros orientadores."}, status=status.HTTP_403_FORBIDDEN)
             start_roles = (ProfileRole.ADVISOR,)
         else:
-            role = (request.query_params.get("role") or "").strip().upper()
-            if role and role not in ROLE_FILTERS:
-                return Response({"detail": "Valor de role inválido."}, status=status.HTTP_400_BAD_REQUEST)
-            start_roles = ROLE_FILTERS.get(role) if role else None
+            # Alunos precisam encontrar colegas para formar o grupo de até cinco autores.
+            if role and role != ProfileRole.STUDENT.value:
+                return Response({"detail": "Alunos só podem buscar outros alunos."}, status=status.HTTP_403_FORBIDDEN)
+            start_roles = (ProfileRole.STUDENT,)
         return Response({"results": suggest_users(query, start_roles)}, status=status.HTTP_200_OK)

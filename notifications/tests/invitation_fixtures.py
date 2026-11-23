@@ -83,16 +83,16 @@ class InvitationFixtureMixin:
         course = Course.objects.create(department=department, name="CC", code="CC001")
         student = create_user("aluno@ufvjm.edu.br", "Ana Aluna", ProfileRole.STUDENT)
         advisor = create_user("orientador@ufvjm.edu.br", "Olga Orientadora", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=course, advisor=advisor, title="Filas & <Eventos>", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=student, position=1, is_main_author=True)
+        self.thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title="Filas & <Eventos>", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=student.pk, position=1, is_main_author=True)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), modality=DefenseModality.REMOTE, location="https://meet.example.com/sala", actor=self.admin)
         invitation = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
-        self.member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Edu Externo", email="externo@example.org", institution="UFMG")
+        self.member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Edu Externo", email="externo@example.org", institution="UFMG")
         mail.outbox.clear()
 
     def _record(self, trigger: ExternalInvitationTrigger = ExternalInvitationTrigger.CREATED) -> OutboxEvent:
         with transaction.atomic():
-            member = DefenseMember.objects.select_related("external_invitation").get(pk=self.member.pk)
+            member = DefenseMember.objects.only("pk", "external_invitation_id").get(pk=self.member.pk)
             return record_external_member_invited(self.defense, member, trigger)
 
     def _invitation(self) -> ExternalInvitation:

@@ -11,6 +11,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from accounts.models import AuditAction, AuditLog, ProfileRole
+from events.catalog import EventType
 from events.models import OutboxEvent
 from theses.models import ProcessingStatus, Thesis, ThesisOrigin, ThesisStatus
 from theses.tasks import extract_pending_thesis_text
@@ -74,7 +75,8 @@ class LegacyImportPermissionTests(LegacyImportTestCase):
         audit = AuditLog.objects.get(action=AuditAction.CREATE, entity_id=str(thesis.pk))
         self.assertEqual(audit.metadata["event"], "LEGACY_IMPORT")
         self.assertEqual(audit.metadata["sha256"], thesis.files.get().stored_file.sha256_hex)
-        self.assertFalse(OutboxEvent.objects.exists())
+        self.assertFalse(OutboxEvent.objects.filter(event_type=EventType.THESIS_PUBLISHED).exists())
+        self.assertTrue(OutboxEvent.objects.filter(event_type=EventType.THESIS_TEXT_EXTRACTION_REQUESTED).exists())
 
     def test_coordinator_of_the_course_imports(self) -> None:
         self.assertEqual(self.post(self.coordinator).status_code, 201)

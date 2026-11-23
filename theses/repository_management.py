@@ -25,7 +25,9 @@ from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.models import AuditAction, ProfileRole, User
 from theses.models import ACTIVE_DEFENSE_STATUSES, PUBLISHED_DELETE_ERROR, DefenseResult, Thesis, ThesisAuthor, ThesisFile, ThesisOrigin, ThesisStatus, ThesisType, thesis_was_published
+from theses.events import record_thesis_repository_updated, record_thesis_text_extraction_requested
 from theses.repository_cache import invalidate_public_repository_cache
+from theses.search_index import refresh_search_text
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     _add_status_history,
@@ -237,7 +239,7 @@ def _replace_authors(thesis: Thesis, authors: list[LegacyAuthor]) -> None:
     """
     thesis.authors.all().delete()
     for position, author in enumerate(authors, start=1):
-        ThesisAuthor.objects.create(thesis=thesis, author=author.user, name=author.name, position=position, is_main_author=position == 1)
+        ThesisAuthor.objects.create(thesis=thesis, author_id=author.user.pk if author.user else None, name=author.name, position=position, is_main_author=position == 1)
 
 
 def _ensure_pdf_not_in_other_thesis(digest: bytes, thesis: Thesis | None = None) -> None:
@@ -295,8 +297,12 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     now = timezone.now()
     defense_date = clean.defense_date
     thesis = Thesis.objects.create(
-        course=clean.course,
-        advisor=clean.advisor,
+        course_id=clean.course.pk,
+        advisor_id=clean.advisor.pk,
+        advisor_name=clean.advisor.name or clean.advisor.email,
+        course_name=clean.course.name,
+        course_code=clean.course.code,
+        main_author_name=clean.authors[0].name if clean.authors else "",
         type=clean.thesis_type,
         title=clean.title,
         abstract=clean.abstract,
@@ -311,11 +317,14 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     _replace_authors(thesis, clean.authors)
     _sync_keywords(thesis, clean.keywords)
     stored_file = _store_pdf(uploaded_file, thesis, user, "THESIS_MAX_PDF_SIZE_MB", 50)
-    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, change_description="Versão publicada (cadastro de acervo).", uploaded_by=user, hash_verified_at=now)
+    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, change_description="Versão publicada (cadastro de acervo).", uploaded_by_id=user.pk, hash_verified_at=now)
     history_metadata = {"event": AuditEvent.LEGACY_IMPORT.value, "origin": ThesisOrigin.LEGACY_IMPORT, "result": result, "versionNumber": 1, "sha256": stored_file.sha256_hex}
     _add_status_history(thesis, "", ThesisStatus.PUBLISHED, user, "Monografia cadastrada manualmente a partir do acervo anterior ao sistema.", metadata=history_metadata)
     audit_metadata = event_payload(AuditEvent.LEGACY_IMPORT, result=result, defenseYear=clean.defense_year, sha256=stored_file.sha256_hex, sizeBytes=stored_file.size_bytes)
     _audit_thesis(AuditAction.CREATE, thesis, request, user, metadata=audit_metadata)
+    record_thesis_text_extraction_requested(thesis, stored_file, trigger="LEGACY_IMPORT")
+    record_thesis_repository_updated(thesis, reason="LEGACY_IMPORT")
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     logger.info("Legacy thesis %s imported by %s", thesis.pk, user.pk)
     return thesis
@@ -331,7 +340,7 @@ def current_metadata(thesis: Thesis) -> ThesisMetadataInput:
     Returns:
         ThesisMetadataInput: Current values, used as the base of a partial edit.
     """
-    authors = [LegacyAuthor(name=link.display_name, user=link.author) for link in thesis.authors.select_related("author").order_by("position")]
+    authors = [LegacyAuthor(name=link.display_name, user=link.author) for link in thesis.authors.order_by("position")]
     keywords = [link.keyword.name for link in thesis.keyword_links.select_related("keyword").order_by("keyword__name")]
     fallback_year = thesis.published_at.astimezone(REPOSITORY_TIME_ZONE).year if thesis.published_at else timezone.localdate().year
     return ThesisMetadataInput(
@@ -410,7 +419,7 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
         PermissionDenied: When the user does not manage the current or the new course.
         ValidationError: When the thesis is not published, nothing changed or data is invalid.
     """
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     ensure_manages_course(user, thesis.course)
     _ensure_published(thesis)
     if metadata.course.pk != thesis.course_id:
@@ -425,8 +434,8 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
     thesis.abstract = clean.abstract
     thesis.type = clean.thesis_type
     thesis.journal = clean.journal
-    thesis.advisor = clean.advisor
-    thesis.course = clean.course
+    thesis.advisor_id = clean.advisor.pk
+    thesis.course_id = clean.course.pk
     thesis.defense_year = clean.defense_year
     thesis.defense_date = clean.defense_date
     thesis.save()
@@ -439,6 +448,8 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
     _add_status_history(thesis, thesis.status, thesis.status, user, clean_reason, metadata={"event": AuditEvent.PUBLISHED_METADATA_UPDATED.value, "changedFields": changed_fields})
     audit_metadata = event_payload(AuditEvent.PUBLISHED_METADATA_UPDATED, changedFields=changed_fields)
     _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata=audit_metadata, changes=changes)
+    refresh_search_text(thesis)
+    record_thesis_repository_updated(thesis, reason="METADATA_UPDATED")
     invalidate_public_repository_cache()
     logger.info("Published thesis %s updated by %s (fields=%s)", thesis.pk, user.pk, ",".join(changed_fields))
     return thesis
@@ -468,7 +479,7 @@ def replace_published_file(user: User, thesis: Thesis, uploaded_file: Any, chang
         ValidationError: When the thesis is not published or the file is invalid,
             identical to the current version or already used by another thesis.
     """
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     ensure_manages_course(user, thesis.course)
     _ensure_published(thesis)
     digest, _ = _validate_pdf_upload(uploaded_file, "THESIS_MAX_PDF_SIZE_MB", 50)
@@ -490,6 +501,9 @@ def replace_published_file(user: User, thesis: Thesis, uploaded_file: Any, chang
     _add_status_history(thesis, thesis.status, thesis.status, user, description, metadata=history_metadata)
     audit_metadata = event_payload(AuditEvent.PUBLISHED_FILE_REPLACED, sizeBytes=stored_file.size_bytes, **file_metadata)
     _audit_thesis(AuditAction.UPLOAD, thesis, request, user, metadata=audit_metadata)
+    record_thesis_text_extraction_requested(thesis, stored_file, trigger="FILE_REPLACEMENT")
+    record_thesis_repository_updated(thesis, reason="FILE_REPLACED")
+    refresh_search_text(thesis)
     invalidate_public_repository_cache()
     logger.info("Published thesis %s received version %s", thesis.pk, thesis_file.version_number)
     return thesis_file
@@ -517,7 +531,7 @@ def unpublish_thesis(user: User, thesis: Thesis, reason: str, request: HttpReque
         PermissionDenied: When the user does not manage the course.
         ValidationError: When the thesis is not published or the reason is missing.
     """
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     ensure_manages_course(user, thesis.course)
     clean_reason = " ".join((reason or "").split())
     if not clean_reason:
@@ -533,6 +547,7 @@ def unpublish_thesis(user: User, thesis: Thesis, reason: str, request: HttpReque
     _add_status_history(thesis, previous_status, ThesisStatus.ARCHIVED, user, clean_reason, metadata={"event": AuditEvent.UNPUBLISHED.value})
     audit_metadata = event_payload(AuditEvent.UNPUBLISHED, reason=clean_reason)
     _audit_thesis(AuditAction.UPDATE, thesis, request, user, metadata=audit_metadata, changes={"status": {"from": previous_status, "to": ThesisStatus.ARCHIVED}, "isPublic": {"from": True, "to": False}})
+    record_thesis_repository_updated(thesis, reason="UNPUBLISHED")
     invalidate_public_repository_cache()
     logger.info("Thesis %s unpublished by %s", thesis.pk, user.pk)
     return thesis
@@ -558,7 +573,7 @@ def delete_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
         PermissionDenied: When the user does not manage the course.
         ValidationError: When the thesis is or was published, or has an active defense.
     """
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     ensure_manages_course(user, thesis.course)
     if thesis_was_published(thesis):
         raise ValidationError(PUBLISHED_DELETE_ERROR)

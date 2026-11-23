@@ -43,9 +43,9 @@ class DefenseListingFixtureMixin:
         self.member_professor = create_user("member@ufvjm.edu.br", "Membro", ProfileRole.ADVISOR)
         self.student = create_user("student@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, is_main_author=True)
-        self.second_thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese B", status=ThesisStatus.READY_FOR_DEFENSE)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=self.student.pk, name=self.student.name, is_main_author=True)
+        self.second_thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese B", status=ThesisStatus.READY_FOR_DEFENSE)
 
         start = timezone.now() + timedelta(days=7)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=start, location="Sala 1", actor=self.admin)
@@ -106,7 +106,7 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertFalse(membership["hasEvaluated"])
 
     def test_committee_member_has_evaluated_flag(self) -> None:
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.")
         self.client.force_authenticate(user=self.member_professor)
         response = self.client.get(DEFENSES_URL)
         self.assertTrue(response.data["results"][0]["viewerMembership"]["hasEvaluated"])
@@ -115,7 +115,7 @@ class DefenseListApiTests(DefenseListingFixtureMixin, TestCase):
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         self.client.force_authenticate(user=ExternalInvitationPrincipal(invitation))
         response = self.client.get(DEFENSES_URL)
         self.assertEqual(response.status_code, 403)
@@ -202,7 +202,7 @@ class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
 
     def test_search_ignores_co_author_name(self) -> None:
         co_author = create_user("coautor@ufvjm.edu.br", "Fulano Coautor", ProfileRole.STUDENT)
-        ThesisAuthor.objects.create(thesis=self.second_thesis, author=co_author, position=2, is_main_author=False)
+        ThesisAuthor.objects.create(thesis=self.second_thesis, author_id=co_author.pk, position=2, is_main_author=False)
         self.client.force_authenticate(user=self.admin)
         response = self.client.get(DEFENSES_URL, {"q": "fulano"})
         self.assertEqual(response.data["count"], 0)
@@ -223,7 +223,7 @@ class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
 
     def test_search_does_not_duplicate_results(self) -> None:
         co_author = create_user("coautor@ufvjm.edu.br", "Aluno Coautor", ProfileRole.STUDENT)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=co_author, position=2, is_main_author=False)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=co_author.pk, position=2, is_main_author=False)
         self.client.force_authenticate(user=self.admin)
         response = self.client.get(DEFENSES_URL, {"q": "tese"})
         self.assertEqual(response.data["count"], 2)
@@ -247,7 +247,7 @@ class DefenseListSearchApiTests(DefenseListingFixtureMixin, TestCase):
         self.assertEqual(self._ids(response), {str(self.defense.pk)})
 
     def test_pending_evaluation_hides_member_who_evaluated(self) -> None:
-        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED)
+        DefenseMemberEvaluation.objects.create(member=self.member, decision=DefenseResult.APPROVED, score="8.00", notes="Parecer de teste.")
         self.client.force_authenticate(user=self.member_professor)
         response = self.client.get(DEFENSES_URL, {"pendingEvaluation": "true"})
         self.assertEqual(response.data["count"], 0)
@@ -289,8 +289,8 @@ class SchedulableThesisListApiTests(DefenseListingFixtureMixin, TestCase):
     def setUp(self) -> None:
         super().setUp()
         # Tese B teve a banca cancelada → volta a ser agendável. Tese A tem banca ativa.
-        self.other_thesis = Thesis.objects.create(course=self.course, advisor=self.other_advisor, title="Tese C", status=ThesisStatus.ADVISOR_APPROVED)
-        Thesis.objects.create(course=self.course, advisor=self.advisor, title="Rascunho", status=ThesisStatus.DRAFT)
+        self.other_thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.other_advisor.pk, advisor_name=self.other_advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese C", status=ThesisStatus.ADVISOR_APPROVED)
+        Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Rascunho", status=ThesisStatus.DRAFT)
 
     def test_unauthenticated_returns_401(self) -> None:
         response = self.client.get(SCHEDULABLE_URL)

@@ -56,7 +56,7 @@ class AuditHardeningTests(TestCase):
         course = Course.objects.create(name="CC", code="CC1", department=department)
         advisor = User.objects.create_user(email="adv@ufvjm.edu.br", name="Adv", password="x")
         UserProfileRole.objects.create(user=advisor, role=ProfileRole.ADVISOR)
-        thesis = Thesis.objects.create(course=course, advisor=advisor, title="Removida")
+        thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title="Removida")
         thesis.deleted_at = timezone.now()
         thesis.save(update_fields=["deleted_at"])
 

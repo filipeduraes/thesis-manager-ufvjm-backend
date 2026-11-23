@@ -42,7 +42,7 @@ class DefenseAuthTests(TestCase):
         self.other_advisor = create_user("other@ufvjm.edu.br", "Outro Orientador", ProfileRole.ADVISOR)
         self.student = create_user("student@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
         self.other_student = create_user("other_student@ufvjm.edu.br", "Outro Aluno", ProfileRole.STUDENT)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.client = APIClient()
 
     def _make_defense(self) -> Defense:
@@ -98,7 +98,7 @@ class DefenseSchedulingApiTests(TestCase):
         self.course = Course.objects.create(department=self.department, coordinator=self.coordinator, name="CC", code="CC001")
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.client = APIClient()
 
     def test_advisor_schedules_own_thesis(self) -> None:
@@ -169,7 +169,7 @@ class DefenseEvaluationApiTests(TestCase):
         self.evaluator2 = create_user("ev2@ufvjm.edu.br", "Avaliador 2", ProfileRole.ADVISOR)
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Suplente", ProfileRole.ADVISOR)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member1 = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator1, actor=self.admin)
         self.member2 = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.evaluator2, actor=self.admin)
@@ -186,24 +186,24 @@ class DefenseEvaluationApiTests(TestCase):
 
     def test_alternate_cannot_evaluate_returns_403(self) -> None:
         self.client.force_authenticate(user=self.alternate_user)
-        response = self.client.put(self._eval_url(self.alternate), {"decision": DefenseResult.APPROVED}, format="json")
+        response = self.client.put(self._eval_url(self.alternate), {"score": "8.00", "decision": DefenseResult.APPROVED, "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 403)
 
     # --- Score validation ---
 
     def test_score_above_10_returns_400(self) -> None:
         self.client.force_authenticate(user=self.evaluator1)
-        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "10.01"}, format="json")
+        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "10.01", "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_score_below_0_returns_400(self) -> None:
         self.client.force_authenticate(user=self.evaluator1)
-        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "-0.01"}, format="json")
+        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "-0.01", "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_valid_score_accepted(self) -> None:
         self.client.force_authenticate(user=self.evaluator1)
-        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "9.5"}, format="json")
+        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "9.5", "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["evaluation"]["score"], "9.50")
 
@@ -234,14 +234,14 @@ class DefenseEvaluationApiTests(TestCase):
         external_member = DefenseMember.objects.create(
             defense=self.defense,
             role=CommitteeRole.MEMBER,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name="Dr. Externo",
             email="ext@example.com",
         )
 
         principal = ExternalInvitationPrincipal(invitation)
         self.client.force_authenticate(user=principal)
-        response = self.client.put(self._eval_url(external_member), {"decision": DefenseResult.APPROVED}, format="json")
+        response = self.client.put(self._eval_url(external_member), {"score": "8.00", "decision": DefenseResult.APPROVED, "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 200)
 
     def test_revoked_external_invitation_cannot_evaluate(self) -> None:
@@ -253,14 +253,14 @@ class DefenseEvaluationApiTests(TestCase):
         external_member = DefenseMember.objects.create(
             defense=self.defense,
             role=CommitteeRole.MEMBER,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name="Dr. Externo",
             email="ext2@example.com",
         )
 
         principal = ExternalInvitationPrincipal(invitation)
         self.client.force_authenticate(user=principal)
-        response = self.client.put(self._eval_url(external_member), {"decision": DefenseResult.APPROVED}, format="json")
+        response = self.client.put(self._eval_url(external_member), {"score": "8.00", "decision": DefenseResult.APPROVED, "notes": "Parecer de teste."}, format="json")
         # IsDefenseCommitteeMember rejeita convite revogado → 403
         self.assertEqual(response.status_code, 403)
 
@@ -271,7 +271,7 @@ class DefenseEvaluationApiTests(TestCase):
         from theses.defense_evaluation import submit_committee_evaluation
         from theses.defense_scheduling import close_defense
 
-        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, actor=self.evaluator1)
+        submit_committee_evaluation(self.defense, self.member1, decision=DefenseResult.REJECTED, score="6.00", notes="Parecer de teste.", actor=self.evaluator1)
         record_evaluation_without_auto_close(self.member2, DefenseResult.REJECTED)
         close_defense(self.defense, actor=self.admin)
         self.defense.refresh_from_db()
@@ -279,7 +279,7 @@ class DefenseEvaluationApiTests(TestCase):
 
         # Tentar avaliar novamente via API
         self.client.force_authenticate(user=self.evaluator1)
-        response = self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED}, format="json")
+        response = self.client.put(self._eval_url(self.member1), {"score": "8.00", "decision": DefenseResult.APPROVED, "notes": "Parecer de teste."}, format="json")
         self.assertEqual(response.status_code, 400)
 
         # Verificar entrada no audit log
@@ -291,7 +291,7 @@ class DefenseEvaluationApiTests(TestCase):
 
     def test_non_member_coordinator_cannot_read_evaluation_returns_403(self) -> None:
         self.client.force_authenticate(user=self.evaluator1)
-        self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "9.0"}, format="json")
+        self.client.put(self._eval_url(self.member1), {"decision": DefenseResult.APPROVED, "score": "9.0", "notes": "Parecer de teste."}, format="json")
 
         self.client.force_authenticate(user=self.coordinator)
         response = self.client.get(self._eval_url(self.member1))

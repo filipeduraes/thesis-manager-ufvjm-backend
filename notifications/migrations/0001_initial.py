@@ -56,9 +56,9 @@ class Migration(migrations.Migration):
                 ('read_at', models.DateTimeField(blank=True, null=True)),
                 ('failed_at', models.DateTimeField(blank=True, null=True)),
                 ('error_message', models.TextField(blank=True, default='')),
-                ('event', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to='events.outboxevent')),
-                ('external_invitation', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to='accounts.externalinvitation')),
-                ('user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to=settings.AUTH_USER_MODEL)),
+                ('event', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to='events.outboxevent', db_constraint=False)),
+                ('external_invitation', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to='accounts.externalinvitation', db_constraint=False)),
+                ('user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='notifications', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('template', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='notifications', to='notifications.notificationtemplate')),
             ],
             options={

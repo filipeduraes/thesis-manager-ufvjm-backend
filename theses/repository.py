@@ -11,12 +11,15 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from django.db.models import Case, Count, Exists, F, IntegerField, OuterRef, Q, QuerySet, Value, When
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
+from django.db import connection
+from django.db.models import Case, Count, ExpressionWrapper, F, FloatField, IntegerField, Q, QuerySet, Value, When
 from django.db.models.functions import Coalesce, ExtractYear, Lower
 
 from academic.models import Course
 from accounts.models import User
-from theses.models import Thesis, ThesisAuthor, ThesisFile, ThesisKeyword, ThesisOrigin, ThesisStatus, ThesisType
+from theses.models import Thesis, ThesisFile, ThesisKeyword, ThesisOrigin, ThesisStatus, ThesisType
+from theses.search_index import field_term, search_term
 from theses.services import (
     REPOSITORY_TIME_ZONE,
     STATUS_DESCRIPTIONS,
@@ -150,68 +153,46 @@ def defense_year_expression() -> Coalesce:
     return Coalesce(F("defense_year"), publication_year, output_field=IntegerField())
 
 
-def _author_name_match(value: str) -> Exists:
+def use_postgres_full_text() -> bool:
     """
-    Build an EXISTS filter matching any author whose name contains ``value``.
-
-    Args:
-        value: Search fragment.
+    Tell whether PostgreSQL full-text search is available in this environment.
 
     Returns:
-        Exists: Correlated subquery over ``thesis_author``.
+        bool: True only for the production PostgreSQL connection.
     """
-    author_links = ThesisAuthor.objects.filter(thesis=OuterRef("pk")).filter(Q(name__icontains=value) | Q(author__name__icontains=value))
-    return Exists(author_links)
+    return connection.vendor == "postgresql"
 
 
-def _keyword_name_match(value: str) -> Exists:
-    """
-    Build an EXISTS filter matching any keyword that contains ``value``.
-
-    Args:
-        value: Search fragment.
-
-    Returns:
-        Exists: Correlated subquery over ``thesis_keyword``.
-    """
-    keyword_links = ThesisKeyword.objects.filter(thesis=OuterRef("pk"), keyword__name__icontains=value)
-    return Exists(keyword_links)
+def _full_text_vector() -> SearchVector:
+    """Return the expression indexed by the repository GIN index."""
+    return SearchVector("search_text", config="portuguese")
 
 
-def _course_match(value: str) -> Q:
-    """
-    Build the filter matching the course name or code.
-
-    Args:
-        value: Search fragment.
-
-    Returns:
-        Q: Course filter.
-    """
-    return Q(course__name__icontains=value) | Q(course__code__iexact=value)
+def _full_text_query(query: str) -> SearchQuery:
+    """Return the tsquery for a normalized user-supplied search string."""
+    return SearchQuery(search_term(query), config="portuguese", search_type="websearch")
 
 
 def _free_text_filter(query: str) -> Q:
     """
-    Build the free-text filter across every searchable field.
+    Build the accent-insensitive free-text filter over the normalized index.
+
+    Every term must appear somewhere in the document so that a multi-word query
+    can match words stored in different fields (for example advisor and title).
 
     Args:
-        query: Search text.
+        query: Raw search text.
 
     Returns:
         Q: Combined filter.
     """
-    return (
-        Q(title__icontains=query)
-        | Q(abstract__icontains=query)
-        | Q(advisor__name__icontains=query)
-        | _course_match(query)
-        | Q(_author_name_match(query))
-        | Q(_keyword_name_match(query))
-    )
+    combined = Q()
+    for term in search_term(query).split():
+        combined &= Q(search_text__icontains=term)
+    return combined
 
 
-def _relevance_expression(query: str) -> Any:
+def _relevance_expression(query: str, vector: SearchVector | None = None, text_query: SearchQuery | None = None) -> Any:
     """
     Build the relevance score for a free-text query.
 
@@ -222,16 +203,19 @@ def _relevance_expression(query: str) -> Any:
         Any: Integer expression summing the weights of the matched fields.
     """
     conditions = [
-        (Q(title__icontains=query), RELEVANCE_WEIGHTS["title"]),
-        (Q(_keyword_name_match(query)), RELEVANCE_WEIGHTS["keyword"]),
-        (Q(_author_name_match(query)), RELEVANCE_WEIGHTS["author"]),
-        (Q(advisor__name__icontains=query), RELEVANCE_WEIGHTS["advisor"]),
-        (_course_match(query), RELEVANCE_WEIGHTS["course"]),
-        (Q(abstract__icontains=query), RELEVANCE_WEIGHTS["abstract"]),
+        (Q(search_text__icontains=field_term("title", query)), RELEVANCE_WEIGHTS["title"]),
+        (Q(search_text__icontains=field_term("keyword", query)), RELEVANCE_WEIGHTS["keyword"]),
+        (Q(search_text__icontains=field_term("author", query)), RELEVANCE_WEIGHTS["author"]),
+        (Q(search_text__icontains=field_term("advisor", query)), RELEVANCE_WEIGHTS["advisor"]),
+        (Q(search_text__icontains=field_term("course", query)), RELEVANCE_WEIGHTS["course"]),
+        (Q(search_text__icontains=field_term("abstract", query)), RELEVANCE_WEIGHTS["abstract"]),
     ]
     score: Any = Value(0)
     for condition, weight in conditions:
         score = score + Case(When(condition, then=Value(weight)), default=Value(0), output_field=IntegerField())
+    if vector is not None and text_query is not None:
+        rank = SearchRank(vector, text_query)
+        score = ExpressionWrapper(score + rank * 10, output_field=FloatField())
     return score
 
 
@@ -249,19 +233,24 @@ def search_public_theses(filters: PublicSearchFilters) -> QuerySet[Thesis]:
         QuerySet[Thesis]: Ordered public queryset with list relations prefetched.
     """
     queryset = public_theses_queryset().annotate(repository_year=defense_year_expression())
-    if filters.query:
+    search_vector = None
+    text_query = None
+    if filters.query and use_postgres_full_text():
+        search_vector = _full_text_vector()
+        text_query = _full_text_query(filters.query)
+        queryset = queryset.annotate(repository_search=search_vector).filter(repository_search=text_query)
+    elif filters.query:
         queryset = queryset.filter(_free_text_filter(filters.query))
     if filters.title:
-        queryset = queryset.filter(title__icontains=filters.title)
+        queryset = queryset.filter(search_text__icontains=field_term("title", filters.title))
     if filters.author:
-        queryset = queryset.filter(_author_name_match(filters.author))
+        queryset = queryset.filter(search_text__icontains=field_term("author", filters.author))
     if filters.advisor:
-        queryset = queryset.filter(advisor__name__icontains=filters.advisor)
+        queryset = queryset.filter(search_text__icontains=field_term("advisor", filters.advisor))
     if filters.course:
-        queryset = queryset.filter(_course_match(filters.course))
+        queryset = queryset.filter(search_text__icontains=field_term("course", filters.course))
     for keyword in filters.keywords:
-        keyword_links = ThesisKeyword.objects.filter(thesis=OuterRef("pk"), keyword__normalized_name=keyword)
-        queryset = queryset.filter(Exists(keyword_links))
+        queryset = queryset.filter(search_text__icontains=field_term("keyword", keyword))
     if filters.course_id:
         queryset = queryset.filter(course_id=filters.course_id)
     if filters.advisor_id:
@@ -272,7 +261,7 @@ def search_public_theses(filters: PublicSearchFilters) -> QuerySet[Thesis]:
     if ordering == ORDERING_TITLE:
         return queryset.order_by(Lower("title"), "-published_at", "pk")
     if ordering == ORDERING_RELEVANCE:
-        queryset = queryset.annotate(relevance=_relevance_expression(filters.query))
+        queryset = queryset.annotate(relevance=_relevance_expression(filters.query, search_vector, text_query))
         return queryset.order_by("-relevance", F("defense_date").desc(nulls_last=True), "-published_at", "pk")
     return queryset.order_by(F("defense_date").desc(nulls_last=True), "-published_at", "pk")
 
@@ -304,7 +293,8 @@ def _public_authors(thesis: Thesis) -> list[dict[str, Any]]:
     """
     authors: list[dict[str, Any]] = []
     for link in thesis.authors.all():
-        person = public_person_payload(link.author)
+        # Identidade local: `name` e `author_id` vivem no banco de monografias.
+        person = {"id": str(link.author_id), "name": link.name} if link.author_id else None
         authors.append(
             {
                 "id": str(link.pk),
@@ -390,8 +380,8 @@ def _public_common_payload(thesis: Thesis) -> dict[str, Any]:
         "isPublic": thesis.is_public,
         "origin": thesis.origin,
         "originLabel": ThesisOrigin(thesis.origin).label,
-        "course": course_brief(thesis.course),
-        "advisor": public_person_payload(thesis.advisor),
+        "course": {"id": str(thesis.course_id), "name": thesis.course_name, "code": thesis.course_code},
+        "advisor": {"id": str(thesis.advisor_id), "name": thesis.advisor_name} if thesis.advisor_id else None,
         "student": _public_main_author(authors),
         "authors": authors,
         "authorNames": [author["name"] for author in authors if author["name"]],
@@ -493,14 +483,14 @@ def public_repository_filters_payload() -> dict[str, list[dict[str, Any]]]:
         dict[str, list[dict[str, Any]]]: ``courses``, ``advisors``, ``years`` and ``keywords``.
     """
     base = published_theses()
-    course_rows = base.values("course_id", "course__name", "course__code").annotate(total=Count("id")).order_by("course__name")
-    advisor_rows = base.values("advisor_id", "advisor__name").annotate(total=Count("id")).order_by("advisor__name")
+    course_rows = base.values("course_id", "course_name", "course_code").annotate(total=Count("id")).order_by("course_name")
+    advisor_rows = base.values("advisor_id", "advisor_name").annotate(total=Count("id")).order_by("advisor_name")
     year_rows = base.annotate(repository_year=defense_year_expression()).values("repository_year").annotate(total=Count("id")).order_by("-repository_year")
     keyword_links = ThesisKeyword.objects.filter(thesis__in=base.values("pk"))
     keyword_rows = keyword_links.values("keyword__name", "keyword__normalized_name").annotate(total=Count("thesis_id", distinct=True)).order_by("-total", "keyword__name")[:PUBLIC_KEYWORDS_LIMIT]
     return {
-        "courses": [{"id": str(row["course_id"]), "name": row["course__name"], "code": row["course__code"], "count": row["total"]} for row in course_rows],
-        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor__name"] or "", "count": row["total"]} for row in advisor_rows],
+        "courses": [{"id": str(row["course_id"]), "name": row["course_name"], "code": row["course_code"], "count": row["total"]} for row in course_rows],
+        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor_name"] or "", "count": row["total"]} for row in advisor_rows],
         "years": [{"year": row["repository_year"], "count": row["total"]} for row in year_rows if row["repository_year"] is not None],
         "keywords": [{"name": row["keyword__name"], "value": row["keyword__normalized_name"], "count": row["total"]} for row in keyword_rows],
     }
@@ -516,17 +506,23 @@ def public_courses_payload(only_with_published: bool = False) -> list[dict[str, 
     Returns:
         list[dict[str, Any]]: Courses ordered by name.
     """
-    published_filter = Q(theses__in=published_theses().values("pk"))
-    courses = Course.objects.select_related("department").annotate(published_count=Count("theses", filter=published_filter)).order_by("name")
+    # A contagem vem dos snapshots da tese (banco do repositório/monografias).
+    # O catálogo de cursos fica no serviço acadêmico; os dois são combinados em Python.
+    rows = published_theses().values("course_id", "course_name", "course_code").annotate(total=Count("id")).order_by("course_name")
+    counts_by_course = {row["course_id"]: (row["course_name"], row["course_code"], row["total"]) for row in rows}
     if only_with_published:
-        courses = courses.filter(published_count__gt=0)
-    return [
-        {
+        course_ids = list(counts_by_course)
+    else:
+        course_ids = list(Course.objects.values_list("pk", flat=True))
+    courses = Course.objects.select_related("department").filter(pk__in=course_ids).order_by("name")
+    results: list[dict[str, Any]] = []
+    for course in courses:
+        name, code, total = counts_by_course.get(course.pk, (course.name, course.code, 0))
+        results.append({
             "id": str(course.pk),
-            "name": course.name,
-            "code": course.code,
-            "department": {"id": str(course.department_id), "name": course.department.name},
-            "publishedThesesCount": course.published_count,
-        }
-        for course in courses
-    ]
+            "name": name,
+            "code": code,
+            "department": {"id": str(course.department_id), "name": course.department.name} if course.department_id else None,
+            "publishedThesesCount": total,
+        })
+    return results

@@ -7,6 +7,7 @@ from unittest import mock
 
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -28,6 +29,7 @@ class SessionApiTests(TestCase):
     Test /api/v1/session behavior.
     """
     def setUp(self) -> None:
+        cache.clear()
         self.client = APIClient()
 
     def test_anonymous_session_returns_authenticated_false(self) -> None:

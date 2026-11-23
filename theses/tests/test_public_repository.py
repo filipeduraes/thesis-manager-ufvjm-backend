@@ -297,3 +297,28 @@ class DefenseDateOnPublicationTests(RepositoryTestCase):
         self.assertEqual(resolve_defense_date(thesis), date(2021, 4, 2))
         thesis = self._publish(thesis)
         self.assertEqual(thesis.defense_year, 2021)
+
+
+class PostgresFullTextSearchTests(RepositoryTestCase):
+    """PostgreSQL builds a tsvector query compatible with the GIN index."""
+
+    def test_postgres_search_uses_to_tsvector(self) -> None:
+        from theses.repository import PublicSearchFilters, search_public_theses
+
+        filters = PublicSearchFilters(query="sistemas distribuidos")
+        with patch.object(connection, "vendor", "postgresql"):
+            queryset = search_public_theses(filters)
+            sql = str(queryset.query)
+        self.assertIn("to_tsvector", sql)
+        self.assertIn("portuguese", sql)
+        self.assertIn("websearch_to_tsquery", sql)
+
+    def test_sqlite_keeps_the_portable_filter(self) -> None:
+        from theses.repository import PublicSearchFilters, search_public_theses
+
+        filters = PublicSearchFilters(query="sistemas distribuidos")
+        with patch.object(connection, "vendor", "sqlite"):
+            queryset = search_public_theses(filters)
+            sql = str(queryset.query)
+        self.assertNotIn("to_tsvector", sql)
+        self.assertIn("search_text", sql)

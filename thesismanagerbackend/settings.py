@@ -56,6 +56,10 @@ INSTALLED_APPS = [
     "reports",
     "events",
     "notifications",
+    "indexing",
+    "adjudication",
+    "repository_readmodel",
+    "reports_readmodel",
 ]
 
 MIDDLEWARE = [
@@ -72,7 +76,11 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "thesismanagerbackend.urls"
+SERVICE_NAME = env("SERVICE_NAME", default="")
+if SERVICE_NAME:
+    ROOT_URLCONF = f"thesismanagerbackend.service_urls.{SERVICE_NAME}"
+else:
+    ROOT_URLCONF = "thesismanagerbackend.urls"
 
 TEMPLATES = [
     {
@@ -96,9 +104,25 @@ WSGI_APPLICATION = "thesismanagerbackend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
+DATABASE_URL = env("DATABASE_URL")
 DATABASES = {
     "default": env.db("DATABASE_URL"),
 }
+
+# Cada serviço possui seu próprio banco em produção. O fallback mantém um
+# único banco em desenvolvimento/teste, onde não há dados reais a preservar.
+SERVICE_DATABASE_ALIASES = ("auth", "committee", "repository", "reports", "notifications")
+# O banco de committee está reservado para o futuro serviço de bancas; a lógica
+# atual vive no app theses. Fica listado aqui para não ser tratado como órfão.
+RESERVED_DATABASE_ALIASES = ("committee",)
+for _alias in SERVICE_DATABASE_ALIASES:
+    _url = env(f"{_alias.upper()}_DATABASE_URL", default=DATABASE_URL)
+    DATABASES[_alias] = env.db_url_config(_url)
+
+DATABASE_ROUTERS = ["thesismanagerbackend.routers.ServiceDatabaseRouter"]
+SERVICE_DATABASES_SHARED = env.bool("SERVICE_DATABASES_SHARED", default=True)
+TEST_RUNNER = "thesismanagerbackend.test_runner.ServiceAwareTestRunner"
+SERVICE_TOKEN = env("SERVICE_TOKEN", default="local-service-token-change-before-deploy")
 
 
 # Password validation
@@ -219,6 +243,7 @@ REST_FRAMEWORK = {
         "session": "120/min",
         "thesis": "120/min",
         "thesis_upload": "30/hour",
+        "upload_global": "50/day",
         "user_suggest": "60/min",
     },
 }
@@ -255,6 +280,7 @@ CACHES = {
     }
 }
 
+SESSION_DB_ALIAS = "auth" if env("SERVICE_DATABASES_SHARED", default="True").lower() in {"0", "false", "no"} else "default"
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 SESSION_CACHE_ALIAS = "default"
 SESSION_COOKIE_AGE = env.int("SESSION_COOKIE_AGE", default=8 * 60 * 60)
@@ -315,6 +341,14 @@ OUTBOX_RETRY_BASE_SECONDS = env.int("OUTBOX_RETRY_BASE_SECONDS", default=5)
 OUTBOX_RETRY_MAX_SECONDS = env.int("OUTBOX_RETRY_MAX_SECONDS", default=900)
 NOTIFICATIONS_QUEUE = env("NOTIFICATIONS_QUEUE", default="notifications.thesis-events")
 NOTIFICATIONS_PREFETCH = env.int("NOTIFICATIONS_PREFETCH", default=10)
+INDEXING_QUEUE = env("INDEXING_QUEUE", default="indexing.thesis-events")
+INDEXING_PREFETCH = env.int("INDEXING_PREFETCH", default=5)
+ADJUDICATION_QUEUE = env("ADJUDICATION_QUEUE", default="adjudication.thesis-events")
+ADJUDICATION_PREFETCH = env.int("ADJUDICATION_PREFETCH", default=5)
+REPOSITORY_QUEUE = env("REPOSITORY_QUEUE", default="repository.thesis-events")
+REPOSITORY_PREFETCH = env.int("REPOSITORY_PREFETCH", default=5)
+REPORTS_QUEUE = env("REPORTS_QUEUE", default="reports.thesis-events")
+REPORTS_PREFETCH = env.int("REPORTS_PREFETCH", default=5)
 
 
 # Logging
@@ -376,6 +410,8 @@ THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
 THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
+UPLOAD_TRACKING_TTL_SECONDS = env.int("UPLOAD_TRACKING_TTL_SECONDS", default=3600)
+UPLOAD_GLOBAL_DAILY_LIMIT = env.int("UPLOAD_GLOBAL_DAILY_LIMIT", default=50)
 # Cache Redis do repositório público; a invalidação é explícita (publicação,
 # edição ou despublicação), então o TTL só limita dados velhos de curso/orientador.
 PUBLIC_REPOSITORY_CACHE_TTL_SECONDS = env.int("PUBLIC_REPOSITORY_CACHE_TTL_SECONDS", default=300)

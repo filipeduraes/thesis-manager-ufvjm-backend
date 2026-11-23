@@ -21,17 +21,19 @@ from django.db.models import Q
 from django.utils import timezone
 
 from accounts.audit_entry import AuditEntry
+from accounts.concurrency import database_for_model
 from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent, EntityType
 from accounts.models import AuditAction, ExternalInvitation
 from accounts.services import issue_external_token, mark_external_token_sent, record_audit
 from events.catalog import ExternalInvitationTrigger
+from events.models import OutboxEvent
 from events.outbox import EventPayload
 from notifications.models import Notification, NotificationStatus, NotificationTemplateCode
 from notifications.plans import EntityNotFoundError, NotificationPlan
 from notifications.recipients import Recipient
 from notifications.rendering import RenderedMessage, TemplateContext, render_notification
-from theses.models import ACTIVE_DEFENSE_STATUSES, CommitteeRole, DefenseMember
+from theses.models import ACTIVE_DEFENSE_STATUSES, CommitteeRole, DefenseMember, Thesis
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,28 @@ def record_invitation_delivery(notification: Notification, event_id: UUID, trigg
     record_audit(AuditEntry(action=AuditAction.INVITE, entity_type=EntityType.EXTERNAL_INVITATION, entity_id=str(invitation_id), metadata=metadata))
 
 
+def issue_token_locked(event_id: UUID | None, invitation_id: UUID) -> tuple[ExternalInvitation, DefenseMember, str] | None:
+    """
+    Lock the invitation on the identity database and issue a token for one event.
+
+    Nothing is issued for superseded events, unusable invitations or inactive
+    defenses. The row lock covers the whole check-and-issue sequence.
+
+    Args:
+        event_id: Event that authorizes issuance.
+        invitation_id: Invitation to update.
+
+    Returns:
+        tuple | None: Locked invitation, member and readable token, or None.
+    """
+    auth_db = database_for_model(ExternalInvitation)
+    with transaction.atomic(using=auth_db):
+        invitation, member = lock_invitation_member(invitation_id)
+        if issuance_block_reason(invitation, member, event_id) is not None:
+            return None
+        return invitation, member, issue_external_token(invitation)
+
+
 def plan_external_member_invited(event_id: UUID, payload: EventPayload) -> NotificationPlan:
     """
     Issue a new token for the invitation and plan the e-mail that carries it.
@@ -165,13 +189,15 @@ def plan_external_member_invited(event_id: UUID, payload: EventPayload) -> Notif
     Raises:
         EntityNotFoundError: When the invitation or its member no longer exists.
     """
-    invitation, member = lock_invitation_member(payload["invitationId"])
-    thesis = member.defense.thesis
-    block_reason = issuance_block_reason(invitation, member, event_id)
-    if block_reason is not None:
-        logger.info("Event %s: invitation %s not e-mailed (%s)", event_id, invitation.pk, block_reason)
+    issued = issue_token_locked(event_id, payload["invitationId"])
+    if issued is None:
+        logger.info("Event %s: invitation %s not e-mailed (blocked)", event_id, payload["invitationId"])
+        thesis = Thesis.objects.filter(pk=payload["thesisId"]).first()
+        if thesis is None:
+            raise EntityNotFoundError("Thesis of the invitation event was not found")
         return NotificationPlan(NotificationTemplateCode.EXTERNAL_MEMBER_INVITED, thesis, [])
-    token = issue_external_token(invitation)
+    invitation, member, token = issued
+    thesis = member.defense.thesis
     recipient = Recipient(name=invitation.name, external_invitation=invitation, external_email=invitation.email)
     trigger = str(payload["trigger"])
 
@@ -245,30 +271,32 @@ def prepare_invitation_retry(notification_id: UUID, eligible: Q) -> PreparedInvi
         PreparedInvitationRetry | None: Prepared or cancelled retry; None when the row
             is locked by another run or no longer due.
     """
-    with transaction.atomic():
-        notification = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("template", "event").filter(eligible, pk=notification_id).first()
+    notification_db = database_for_model(Notification)
+    with transaction.atomic(using=notification_db):
+        notification = Notification.objects.using(notification_db).select_for_update(skip_locked=True, of=("self",)).select_related("template").filter(eligible, pk=notification_id).first()
         if notification is None:
             return None
-        outbox_event = notification.event
-        if outbox_event is None or notification.external_invitation_id is None:
+        if notification.event_id is None or notification.external_invitation_id is None:
             return _cancel_invitation_notification(notification, "superseded")
-        try:
-            invitation, member = lock_invitation_member(notification.external_invitation_id)
-        except EntityNotFoundError:
-            return _cancel_invitation_notification(notification, "member_not_found")
-        block_reason = issuance_block_reason(invitation, member, outbox_event.pk)
-        if block_reason is not None:
-            return _cancel_invitation_notification(notification, block_reason)
-        thesis = member.defense.thesis
-        context: TemplateContext = {"thesis_title": thesis.title, "reference_code": thesis.reference_code, "recipient_name": invitation.name, **invitation_context(invitation, member)}
-        stored_copy = render_notification(notification.template, context)
-        token = issue_external_token(invitation)
-        content = render_notification(notification.template, {**context, "access_token": token})
-        notification.subject = stored_copy.subject
-        notification.body = stored_copy.body_text
-        notification.body_html = stored_copy.body_html
-        notification.status = NotificationStatus.PENDING
-        notification.scheduled_at = timezone.now()
-        notification.save(update_fields=["subject", "body", "body_html", "status", "scheduled_at"])
+        outbox_event = OutboxEvent.objects.using(database_for_model(OutboxEvent)).filter(pk=notification.event_id).first()
+        if outbox_event is None:
+            return _cancel_invitation_notification(notification, "superseded")
+    try:
+        issued = issue_token_locked(outbox_event.pk, notification.external_invitation_id)
+    except EntityNotFoundError:
+        return _cancel_invitation_notification(notification, "member_not_found")
+    if issued is None:
+        return _cancel_invitation_notification(notification, "superseded")
+    invitation, member, token = issued
+    thesis = member.defense.thesis
+    context: TemplateContext = {"thesis_title": thesis.title, "reference_code": thesis.reference_code, "recipient_name": invitation.name, **invitation_context(invitation, member)}
+    stored_copy = render_notification(notification.template, context)
+    content = render_notification(notification.template, {**context, "access_token": token})
+    notification.subject = stored_copy.subject
+    notification.body = stored_copy.body_text
+    notification.body_html = stored_copy.body_html
+    notification.status = NotificationStatus.PENDING
+    notification.scheduled_at = timezone.now()
+    notification.save(update_fields=["subject", "body", "body_html", "status", "scheduled_at"])
     trigger = str(outbox_event.payload.get("trigger", ""))
     return PreparedInvitationRetry(notification, content, outbox_event.pk, trigger)

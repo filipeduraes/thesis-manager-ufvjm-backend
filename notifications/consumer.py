@@ -24,12 +24,13 @@ from events.envelope import EventEnvelope
 from events.models import OutboxEvent, ProcessedEvent
 from events.outbox import EventPayload
 from notifications.delivery import send_notification
+from accounts.concurrency import database_for_model
 from notifications.invitations import plan_external_member_invited
 from notifications.models import Notification, NotificationTemplate, NotificationTemplateCode
 from notifications.plans import EntityNotFoundError, NotificationPlan
-from notifications.recipients import evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
+from notifications.recipients import Recipient, defense_member, evaluating_committee_members, thesis_advisor, thesis_authors, unique_recipients
 from notifications.rendering import RenderedMessage, TemplateContext, render_notification
-from theses.models import CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, Thesis
+from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, Thesis
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def _get_thesis(thesis_id: str) -> Thesis:
     Raises:
         EntityNotFoundError: When the thesis does not exist.
     """
-    thesis = Thesis.objects.select_related("advisor").filter(pk=thesis_id).first()
+    thesis = Thesis.objects.filter(pk=thesis_id).first()
     if thesis is None:
         raise EntityNotFoundError("Thesis referenced by the event was not found")
     return thesis
@@ -134,6 +135,53 @@ def _plan_defense_scheduled(payload: EventPayload) -> NotificationPlan:
     return NotificationPlan(NotificationTemplateCode.DEFENSE_SCHEDULED, thesis, recipients, context)
 
 
+def _plan_defense_member_invited(payload: EventPayload) -> NotificationPlan:
+    """
+    Plan the invitation e-mail of one committee member.
+
+    Args:
+        payload: ``defense.member_invited`` payload.
+
+    Returns:
+        NotificationPlan: Plan for the invited member.
+
+    Raises:
+        EntityNotFoundError: When the member no longer exists.
+    """
+    member = DefenseMember.objects.filter(pk=payload["memberId"]).first()
+    if member is None:
+        raise EntityNotFoundError("Defense member referenced by the event was not found")
+    defense = _get_defense(payload["defenseId"])
+    thesis = _get_thesis(payload["thesisId"])
+    context: TemplateContext = {"scheduled_at": _format_datetime(defense.scheduled_datetime.isoformat())}
+    return NotificationPlan(NotificationTemplateCode.DEFENSE_MEMBER_INVITED, thesis, defense_member(member), context)
+
+
+def _plan_defense_cancelled(payload: EventPayload) -> NotificationPlan:
+    """Notify authors and advisor about a cancelled defense."""
+    thesis = _get_thesis(payload["thesisId"])
+    return NotificationPlan(NotificationTemplateCode.DEFENSE_CANCELLED, thesis, unique_recipients(thesis_authors(thesis), thesis_advisor(thesis)))
+
+
+def _plan_defense_rescheduled(payload: EventPayload) -> NotificationPlan:
+    """Notify authors, advisor and evaluating members about a new schedule."""
+    defense = _get_defense(payload["defenseId"])
+    thesis = _get_thesis(payload["thesisId"])
+    recipients = unique_recipients(thesis_authors(thesis), thesis_advisor(thesis), evaluating_committee_members(defense))
+    context: TemplateContext = {"scheduled_at": _format_datetime(payload["scheduledDatetime"])}
+    return NotificationPlan(NotificationTemplateCode.DEFENSE_RESCHEDULED, thesis, recipients, context)
+
+
+def _plan_thesis_review_recorded(payload: EventPayload) -> NotificationPlan:
+    """Notify the authors that the advisor recorded a review."""
+    from theses.models import ReviewDecision
+
+    thesis = _get_thesis(payload["thesisId"])
+    decision = payload["reviewDecision"]
+    context: TemplateContext = {"decision": ReviewDecision(decision).label if decision in ReviewDecision.values else decision}
+    return NotificationPlan(NotificationTemplateCode.THESIS_REVIEW_RECORDED, thesis, thesis_authors(thesis), context)
+
+
 def _plan_evaluation_recorded(payload: EventPayload) -> NotificationPlan:
     """
     Notify the advisor of the evaluation progress, without revealing any decision.
@@ -204,6 +252,10 @@ def _plan_thesis_published(payload: EventPayload) -> NotificationPlan:
 PLANNERS: dict[str, Callable[[EventPayload], NotificationPlan]] = {
     EventType.THESIS_SUBMITTED: _plan_thesis_submitted,
     EventType.DEFENSE_SCHEDULED: _plan_defense_scheduled,
+    EventType.DEFENSE_MEMBER_INVITED: _plan_defense_member_invited,
+    EventType.DEFENSE_CANCELLED: _plan_defense_cancelled,
+    EventType.DEFENSE_RESCHEDULED: _plan_defense_rescheduled,
+    EventType.THESIS_REVIEW_RECORDED: _plan_thesis_review_recorded,
     EventType.DEFENSE_EVALUATION_RECORDED: _plan_evaluation_recorded,
     EventType.DEFENSE_COMPLETED: _plan_defense_completed,
     EventType.THESIS_DEFENSE_RESULT_RECORDED: _plan_defense_result_recorded,
@@ -278,10 +330,10 @@ def _create_notifications(envelope: EventEnvelope, plan: NotificationPlan) -> li
         recipient_context: TemplateContext = {**base_context, "recipient_name": recipient.name}
         rendered = render_notification(template, recipient_context)
         notification = Notification.objects.create(
-            template=template,
-            event=outbox_event,
-            user=recipient.user,
-            external_invitation=recipient.external_invitation,
+            template_id=template.pk,
+            event_id=outbox_event.pk if outbox_event else None,
+            user_id=recipient.user.pk if recipient.user else None,
+            external_invitation_id=recipient.external_invitation.pk if recipient.external_invitation else None,
             external_email=recipient.external_email,
             subject=rendered.subject,
             body=rendered.body_text,
@@ -328,22 +380,29 @@ def handle_event(envelope: EventEnvelope) -> HandleOutcome:
         logger.warning("Rejected event %s: unsupported type/version or payload (%s %s)", envelope.event_id, envelope.event_type, envelope.event_version)
         return HandleOutcome.REJECTED
     started = time.monotonic()
-    with transaction.atomic():
-        try:
-            with transaction.atomic():
-                marker = ProcessedEvent.objects.create(consumer_group=CONSUMER_GROUP, event_id=envelope.event_id)
-        except IntegrityError:
-            logger.info("Event %s (%s) already processed; skipping", envelope.event_id, envelope.event_type)
-            return HandleOutcome.DUPLICATE
-        try:
-            plan = _plan_event(envelope)
-        except EntityNotFoundError:
-            logger.warning("Event %s (%s) refers to a record that no longer exists; no notification created", envelope.event_id, envelope.event_type)
-            deliveries: list[PlannedDelivery] = []
-        else:
-            deliveries = _create_notifications(envelope, plan)
-        marker.processing_time_ms = int((time.monotonic() - started) * 1000)
-        marker.save(update_fields=["processing_time_ms"])
+    marker_db = database_for_model(ProcessedEvent)
+    if ProcessedEvent.objects.using(marker_db).filter(consumer_group=CONSUMER_GROUP, event_id=envelope.event_id).exists():
+        logger.info("Event %s (%s) already processed; skipping", envelope.event_id, envelope.event_type)
+        return HandleOutcome.DUPLICATE
+    notification_db = database_for_model(Notification)
+    try:
+        with transaction.atomic(using=notification_db):
+            try:
+                plan = _plan_event(envelope)
+            except EntityNotFoundError:
+                logger.warning("Event %s (%s) refers to a record that no longer exists; no notification created", envelope.event_id, envelope.event_type)
+                deliveries: list[PlannedDelivery] = []
+            else:
+                deliveries = _create_notifications(envelope, plan)
+    except IntegrityError:
+        return HandleOutcome.DUPLICATE
+    try:
+        with transaction.atomic(using=marker_db):
+            marker = ProcessedEvent.objects.using(marker_db).create(consumer_group=CONSUMER_GROUP, event_id=envelope.event_id)
+    except IntegrityError:
+        return HandleOutcome.DUPLICATE
+    marker.processing_time_ms = int((time.monotonic() - started) * 1000)
+    marker.save(update_fields=["processing_time_ms"])
     sent = 0
     for delivery in deliveries:
         if not send_notification(delivery.notification, content=delivery.content):

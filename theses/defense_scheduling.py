@@ -19,10 +19,10 @@ from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
-from accounts.services import record_audit
+from accounts.services import avatar_urls_for, record_audit
 from theses.audit import audit_defense
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
-from theses.events import record_defense_completed, record_defense_scheduled
+from theses.events import record_defense_cancelled, record_defense_completed, record_defense_rescheduled, record_defense_scheduled
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import PublicationTrigger, publish_if_ready, purge_thesis_versions, thesis_summary_payload, user_is_admin
 
@@ -74,7 +74,7 @@ def record_defense_status_change(defense: Defense, previous_status: str, changed
     Returns:
         DefenseStatusHistory: Created history entry.
     """
-    return DefenseStatusHistory.objects.create(defense=defense, previous_status=previous_status, new_status=defense.status, changed_by=changed_by, reason=reason)
+    return DefenseStatusHistory.objects.create(defense=defense, previous_status=previous_status, new_status=defense.status, changed_by_id=changed_by.pk if changed_by else None, reason=reason)
 
 
 def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
@@ -87,7 +87,7 @@ def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
     Returns:
         list[dict[str, Any]]: History entries, oldest first.
     """
-    entries = defense.status_history.select_related("changed_by").order_by("created_at")
+    entries = defense.status_history.order_by("created_at")
     history: list[dict[str, Any]] = []
     for entry in entries:
         previous_label = DefenseStatus(entry.previous_status).label if entry.previous_status else None
@@ -140,15 +140,26 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
     clean_location = location.strip()
     validate_defense_location(modality, clean_location)
 
+    main_author = thesis.authors.filter(is_main_author=True).first()
+    snapshot = {
+        "thesisId": str(thesis.pk),
+        "title": thesis.title,
+        "referenceCode": thesis.reference_code,
+        "courseName": thesis.course.name if thesis.course_id else "",
+        "courseCode": thesis.course.code if thesis.course_id else "",
+        "advisorName": thesis.advisor.name if thesis.advisor_id else "",
+        "studentName": main_author.display_name if main_author else "",
+    }
     defense = Defense.objects.create(
         thesis=thesis,
+        thesis_snapshot=snapshot,
         scheduled_datetime=scheduled_datetime,
         duration_minutes=duration_minutes,
         modality=modality,
         location=clean_location,
         notes=notes.strip(),
         status=DefenseStatus.SCHEDULED,
-        created_by=actor,
+        created_by_id=actor.pk,
     )
     record_defense_status_change(defense, "", actor, "Banca agendada.")
 
@@ -159,7 +170,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         thesis=thesis,
         previous_status=previous_status,
         new_status=ThesisStatus.DEFENSE_SCHEDULED,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason="Defesa agendada.",
         metadata={"defenseId": str(defense.pk)},
     )
@@ -195,7 +206,7 @@ def _transition_defense_to_in_progress(defense: Defense, thesis: Thesis, *, chan
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=ThesisStatus.UNDER_EVALUATION,
-        changed_by=changed_by,
+        changed_by_id=changed_by.pk if changed_by else None,
         reason=reason,
         metadata={"defenseId": str(defense.pk)},
     )
@@ -322,6 +333,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         actor_user=actor,
         metadata=event_payload(AuditEvent.DEFENSE_UPDATED, availabilityReset=availability_reset),
     )
+    if datetime_changed or duration_changed:
+        record_defense_rescheduled(defense)
     return defense
 
 
@@ -365,7 +378,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=restore_to,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason=cancel_reason,
         metadata={"defenseId": str(defense.pk)},
     )
@@ -383,6 +396,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         actor_user=actor,
         metadata=event_payload(AuditEvent.DEFENSE_CANCELLED, reason=reason),
     )
+    record_defense_cancelled(defense, previous_status=defense.previous_status)
     return defense
 
 
@@ -533,7 +547,7 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=new_thesis_status,
-        changed_by=closed_by,
+        changed_by_id=closed_by.pk if closed_by else None,
         reason=result_reason,
         metadata={"defenseId": str(defense.pk), "defenseResult": result, "automatic": automatic},
     )
@@ -558,42 +572,6 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
     if new_thesis_status in APPROVED_DEFENSE_STATUSES:
         publish_if_ready(thesis, trigger=PublicationTrigger.DEFENSE_CLOSED, request=request)
     return defense
-
-
-def auto_close_after_last_evaluation(defense: Defense, request: HttpRequest | None = None) -> str | None:
-    """
-    Close the defense automatically when every required evaluation is in.
-
-    Runs in its own savepoint: if closing raises ValidationError (for example, an
-    approval whose thesis has no current PDF), only the close is rolled back, the
-    evaluation that triggered it stays saved and the defense stays IN_PROGRESS so
-    it can still be closed manually. A concurrent close is not reported as error.
-
-    Args:
-        defense: Defense that just received an evaluation.
-        request: HTTP request used for audit context.
-
-    Returns:
-        str | None: Error message when the automatic close failed, otherwise None.
-    """
-    try:
-        with transaction.atomic():
-            locked_defense = Defense.objects.select_for_update().get(pk=defense.pk)
-            if locked_defense.status != DefenseStatus.IN_PROGRESS or not all_required_evaluations_submitted(locked_defense):
-                return None
-            _finalize_defense(locked_defense, closed_by=None, automatic=True, request=request)
-    except ValidationError as exc:
-        error_message = exc.messages[0] if exc.messages else "Não foi possível encerrar a banca automaticamente."
-        logger.warning("Automatic close failed for defense %s after last evaluation: %s", defense.pk, error_message)
-        audit_defense(
-            action=AuditAction.EVALUATE,
-            defense=defense,
-            request=request,
-            metadata=event_payload(AuditEvent.AUTO_CLOSE_FAILED, reason=error_message),
-        )
-        return error_message
-    logger.info("Defense %s closed automatically after last evaluation", defense.pk)
-    return None
 
 
 @transaction.atomic
@@ -656,7 +634,7 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=ThesisStatus.DEFENSE_SCHEDULED,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason=f"Status da banca revertido pelo administrador. {reason}".strip(),
         metadata={"defenseId": str(defense.pk)},
     )
@@ -726,7 +704,7 @@ def defense_result_code(defense: Defense) -> str | None:
     return None
 
 
-def defense_payload(defense: Defense, viewer: Any = None, viewer_context: DefenseViewerContext | None = None) -> dict[str, Any]:
+def defense_payload(defense: Defense, viewer: Any = None, viewer_context: DefenseViewerContext | None = None, avatar_urls: dict | None = None) -> dict[str, Any]:
     """
     Serialize a defense session with its committee members.
 
@@ -747,6 +725,9 @@ def defense_payload(defense: Defense, viewer: Any = None, viewer_context: Defens
         viewer_context = build_defense_viewer_context(viewer, [defense.thesis_id])
     viewer_is_admin = viewer_context.is_admin
     viewer_can_manage = viewer_context.can_manage(defense.thesis_id)
+    members = list(defense.members.all())
+    if avatar_urls is None:
+        avatar_urls = avatar_urls_for(m.institutional_member_id for m in members)
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),
@@ -764,5 +745,8 @@ def defense_payload(defense: Defense, viewer: Any = None, viewer_context: Defens
         "resultLabel": DefenseResult(result_code).label if result_code else None,
         "createdAt": defense.created_at.isoformat(),
         "updatedAt": defense.updated_at.isoformat(),
-        "members": [defense_member_payload(m, viewer=viewer, viewer_is_admin=viewer_is_admin, viewer_can_manage=viewer_can_manage) for m in defense.members.all()],
+        "members": [
+            defense_member_payload(m, viewer=viewer, viewer_is_admin=viewer_is_admin, viewer_can_manage=viewer_can_manage, avatar_url=avatar_urls.get(m.institutional_member_id))
+            for m in members
+        ],
     }

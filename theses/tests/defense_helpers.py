@@ -40,4 +40,4 @@ def record_evaluation_without_auto_close(member: DefenseMember, decision: str) -
     Returns:
         DefenseMemberEvaluation: Created evaluation.
     """
-    return DefenseMemberEvaluation.objects.create(member=member, decision=decision)
+    return DefenseMemberEvaluation.objects.create(member=member, decision=decision, score="8.00", notes="Parecer de teste.")

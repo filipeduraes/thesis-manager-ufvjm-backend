@@ -70,6 +70,10 @@ class AdminUserReadSerializer(serializers.ModelSerializer):
     """
     Read serializer matching the user shape consumed by the frontend.
     """
+    registrationNumber = serializers.CharField(source="registration_number", read_only=True)
+    departmentId = serializers.SerializerMethodField()
+    departmentName = serializers.SerializerMethodField()
+    researchArea = serializers.CharField(source="research_area", read_only=True)
     role = serializers.SerializerMethodField()
     roleCode = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
@@ -87,6 +91,10 @@ class AdminUserReadSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "email",
+            "registrationNumber",
+            "departmentId",
+            "departmentName",
+            "researchArea",
             "role",
             "roleCode",
             "roles",
@@ -102,6 +110,12 @@ class AdminUserReadSerializer(serializers.ModelSerializer):
 
     def _codes(self, user: User) -> list[str]:
         return _role_codes(user)
+
+    def get_departmentId(self, user: User) -> str | None:
+        return str(user.department_id) if user.department_id else None
+
+    def get_departmentName(self, user: User) -> str | None:
+        return user.department.name if user.department_id else None
 
     def get_role(self, user: User) -> str:
         codes = self._codes(user)
@@ -157,6 +171,9 @@ class AdminUserCreateSerializer(serializers.Serializer):
     """
     name = serializers.CharField(max_length=200)
     email = serializers.EmailField()
+    registrationNumber = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
+    researchArea = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    departmentId = serializers.UUIDField(required=False, allow_null=True, default=None)
     role = serializers.CharField(required=False, allow_blank=True)
     roles = serializers.ListField(
         child=serializers.CharField(),
@@ -216,6 +233,9 @@ class AdminUserUpdateSerializer(serializers.Serializer):
     """
     name = serializers.CharField(max_length=200, required=False)
     email = serializers.EmailField(required=False)
+    registrationNumber = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    researchArea = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    departmentId = serializers.UUIDField(required=False, allow_null=True)
     role = serializers.CharField(required=False, allow_blank=True)
     roles = serializers.ListField(
         child=serializers.CharField(),

@@ -13,6 +13,8 @@ from uuid import UUID
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
+
+from accounts.concurrency import database_for_model
 from django.db.models import Q
 from django.utils import timezone
 
@@ -41,9 +43,18 @@ def notification_address(notification: Notification) -> str:
     """
     if notification.external_email:
         return notification.external_email
-    if notification.user is not None:
-        return notification.user.email
-    return notification.external_invitation.email
+    resolved = getattr(notification, "_resolved_email", None)
+    if resolved:
+        return resolved
+    if notification.user_id:
+        from accounts.models import User
+
+        return User.objects.filter(pk=notification.user_id).values_list("email", flat=True).first() or ""
+    if notification.external_invitation_id:
+        from accounts.models import ExternalInvitation
+
+        return ExternalInvitation.objects.filter(pk=notification.external_invitation_id).values_list("email", flat=True).first() or ""
+    return ""
 
 
 def sanitize_delivery_error(error: BaseException) -> str:
@@ -175,8 +186,12 @@ def retry_pending_notifications(limit: int) -> RetrySummary:
     summary = RetrySummary()
     eligible = _retry_eligible(timezone.now())
     invitation_ids: list[UUID] = []
-    with transaction.atomic():
-        candidates = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("user", "external_invitation", "template").filter(eligible).order_by("scheduled_at")[:limit]
+    notification_db = database_for_model(Notification)
+    with transaction.atomic(using=notification_db):
+        # Apenas "template" pertence ao banco das notificações; user e
+        # external_invitation ficam no banco de identidade e são resolvidos à
+        # parte por notification_address() (JOIN cross-DB não é possível).
+        candidates = Notification.objects.using(notification_db).select_for_update(skip_locked=True, of=("self",)).select_related("template").filter(eligible).order_by("scheduled_at")[:limit]
         for notification in candidates:
             if notification.template.code == NotificationTemplateCode.EXTERNAL_MEMBER_INVITED:
                 invitation_ids.append(notification.pk)

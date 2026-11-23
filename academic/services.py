@@ -5,11 +5,14 @@ Domain services for the academic registry.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
+
+from thesismanagerbackend.transactions import atomic_for_model
 from django.db.models import Count, Q
 from django.http import HttpRequest
 from django.utils import timezone
@@ -17,7 +20,7 @@ from django.utils import timezone
 from academic.models import Course, Department, UserCourseAssignment
 from accounts.audit_identifiers import EntityType
 from accounts.audit_entry import AuditEntry
-from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock
+from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock, database_for_model
 from accounts.models import AuditAction, ProfileRole, User, UserProfileRole
 from accounts.services import actor_from_request, record_audit
 
@@ -99,9 +102,10 @@ def resolve_pending_coordinators_for_user(
     if not email:
         return []
 
-    with transaction.atomic():
+    academic_db = database_for_model(Course)
+    with transaction.atomic(using=academic_db):
         courses = list(
-            Course.objects.select_for_update().filter(
+            Course.objects.using(academic_db).select_for_update().filter(
                 coordinator_email__iexact=email
             )
         )
@@ -258,12 +262,40 @@ def coordinator_payload(course: Course) -> dict[str, Any] | None:
     }
 
 
-def course_payload(course: Course) -> dict[str, Any]:
+def published_theses_counts(course_ids: Iterable) -> dict:
+    """
+    Count published theses per course from the thesis service database.
+
+    Args:
+        course_ids: Course identifiers to count.
+
+    Returns:
+        dict: Mapping of course id to published thesis count.
+    """
+    from django.db.models import Count
+
+    from theses.models import Thesis, ThesisStatus
+
+    identifiers = {pk for pk in course_ids if pk is not None}
+    if not identifiers:
+        return {}
+    thesis_db = database_for_model(Thesis)
+    rows = (
+        Thesis.objects.using(thesis_db)
+        .filter(course_id__in=identifiers, deleted_at__isnull=True, is_public=True, status=ThesisStatus.PUBLISHED, published_at__isnull=False)
+        .values("course_id")
+        .annotate(total=Count("pk"))
+    )
+    return {row["course_id"]: row["total"] for row in rows}
+
+
+def course_payload(course: Course, published_count: int | None = None) -> dict[str, Any]:
     """
     Serialize a course for the administrative API.
 
     Args:
         course: Course instance.
+        published_count: Precomputed count of published theses; resolved when omitted.
 
     Returns:
         dict[str, Any]: Serialized course payload.
@@ -294,11 +326,11 @@ def course_payload(course: Course) -> dict[str, Any]:
             coordinator["status"] if coordinator else "PENDING"
         ),
         "activeStudents": active_students,
-        "publishedTheses": 0,
+        "publishedTheses": published_count if published_count is not None else published_theses_counts([course.pk]).get(course.pk, 0),
     }
 
 
-@transaction.atomic
+@atomic_for_model(Department)
 def create_course(
     *,
     name: str,
@@ -325,6 +357,7 @@ def create_course(
     Raises:
         ValidationError: If required fields are missing or invalid.
     """
+    academic_db = database_for_model(Department)
     normalized_name = normalize_person_name(name)
     normalized_code = normalize_course_code(code)
     if not normalized_name:
@@ -333,7 +366,7 @@ def create_course(
         raise ValidationError({"code": "Informe o código do curso."})
 
     if department_id:
-        department = Department.objects.select_for_update().filter(pk=department_id).first()
+        department = Department.objects.using(academic_db).select_for_update().filter(pk=department_id).first()
         if not department:
             raise ValidationError({"departmentId": "Departamento inválido."})
     elif department_name:
@@ -362,6 +395,7 @@ def create_course(
     if user:
         ensure_coordinator_role(user)
         resolve_pending_coordinators_for_user(user, request=request)
+        set_user_course_assignment(user, course, assigned_by=actor_from_request(request), request=request)
 
     record_audit(AuditEntry(
         action=AuditAction.CREATE,
@@ -381,7 +415,7 @@ def create_course(
     return course
 
 
-@transaction.atomic
+@atomic_for_model(Course)
 def update_course(
     course: Course,
     *,
@@ -411,7 +445,8 @@ def update_course(
         ValidationError: If required fields are missing or invalid.
     """
     # Serializa edições concorrentes do mesmo curso (evita perda de alterações).
-    course = Course.objects.select_for_update().get(pk=course.pk)
+    academic_db = database_for_model(Course)
+    course = Course.objects.using(academic_db).select_for_update().get(pk=course.pk)
     old_department_id = course.department_id
     changes: dict[str, Any] = {}
 
@@ -456,6 +491,7 @@ def update_course(
     course.save()
     if coordinator_email is not None and course.coordinator_id:
         resolve_pending_coordinators_for_user(course.coordinator, request=request)
+        set_user_course_assignment(course.coordinator, course, assigned_by=actor_from_request(request), request=request)
     if old_department_id != course.department_id:
         prune_orphan_departments()
 
@@ -473,7 +509,7 @@ def update_course(
     return course
 
 
-@transaction.atomic
+@atomic_for_model(Course)
 def delete_course(course: Course, request: HttpRequest | None = None) -> None:
     """
     Delete a course and prune orphan departments when applicable.
@@ -511,6 +547,7 @@ def set_user_course_assignment(
     *,
     assigned_by: User | None = None,
     request: HttpRequest | None = None,
+    audit: bool = True,
 ) -> None:
     """
     Set the active course assignment for a user.
@@ -520,14 +557,17 @@ def set_user_course_assignment(
         course: Course to assign, or ``None`` to remove the active assignment.
         assigned_by: Administrator responsible for the change.
         request: HTTP request used for audit context.
+        audit: Whether to record a dedicated course-assignment entry. Callers
+            that already log the full user update pass False to avoid duplicates.
     """
-    with transaction.atomic():
+    academic_db = database_for_model(User)
+    with transaction.atomic(using=academic_db):
         # Bloqueia o usuário (a linha "pai") para serializar atribuições
         # concorrentes, inclusive quando ainda não existe nenhuma atribuição.
-        acquire_transaction_lock(COURSE_ASSIGNMENT_LOCK_KEY + (user.pk.int % 100000))
-        User.objects.select_for_update().get(pk=user.pk)
+        acquire_transaction_lock(COURSE_ASSIGNMENT_LOCK_KEY + (user.pk.int % 100000), using=academic_db)
+        User.objects.using(academic_db).select_for_update().get(pk=user.pk)
         now = timezone.now()
-        active = UserCourseAssignment.objects.select_for_update().filter(
+        active = UserCourseAssignment.objects.using(academic_db).select_for_update().filter(
             user=user,
             is_active=True,
         )
@@ -535,18 +575,19 @@ def set_user_course_assignment(
             changed = active.exists()
             active.update(is_active=False, revoked_at=now)
             if changed:
-                record_audit(AuditEntry(
-                    action=AuditAction.UPDATE,
-                    entity_type=EntityType.USER_COURSE_ASSIGNMENT,
-                    entity_id=str(user.pk),
-                    request=request,
-                    actor_user=assigned_by,
-                    changes={"course": None},
-                    metadata={
-                        "userName": user.name,
-                        "userEmail": user.email,
-                    },
-                ))
+                if audit:
+                    record_audit(AuditEntry(
+                        action=AuditAction.UPDATE,
+                        entity_type=EntityType.USER_COURSE_ASSIGNMENT,
+                        entity_id=str(user.pk),
+                        request=request,
+                        actor_user=assigned_by,
+                        changes={"course": None},
+                        metadata={
+                            "userName": user.name,
+                            "userEmail": user.email,
+                        },
+                    ))
             return
 
         current = active.filter(course=course).first()
@@ -568,21 +609,22 @@ def set_user_course_assignment(
                 ).first()
                 if current is None:
                     raise
-        record_audit(AuditEntry(
-            action=AuditAction.UPDATE,
-            entity_type=EntityType.USER_COURSE_ASSIGNMENT,
-            entity_id=str(user.pk),
-            request=request,
-            actor_user=assigned_by,
-            changes={
-                "courseId": str(course.pk),
-                "course": course.name,
-            },
-            metadata={
-                "userName": user.name,
-                "userEmail": user.email,
-            },
-        ))
+        if audit:
+            record_audit(AuditEntry(
+                action=AuditAction.UPDATE,
+                entity_type=EntityType.USER_COURSE_ASSIGNMENT,
+                entity_id=str(user.pk),
+                request=request,
+                actor_user=assigned_by,
+                changes={
+                    "courseId": str(course.pk),
+                    "course": course.name,
+                },
+                metadata={
+                    "userName": user.name,
+                    "userEmail": user.email,
+                },
+            ))
 
 
 def active_course_assignment(user: User) -> UserCourseAssignment | None:

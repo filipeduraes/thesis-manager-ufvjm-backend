@@ -30,6 +30,7 @@ from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
 from accounts.services import google_social_accounts_prefetch,  record_audit
 from academic.services import active_course_assignment
 from theses.filters import parse_year_filter
+from thesismanagerbackend.throttling import ClientIpScopedRateThrottle, DailyUploadThrottle
 from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
 from theses.models import (
     REVIEWABLE_STATUSES,
@@ -86,6 +87,8 @@ from theses.services import (
     upload_thesis_file,
     user_brief,
     user_can_access_thesis,
+    user_is_admin,
+    user_roles,
     validate_thesis_document,
     verify_stored_file_integrity,
 )
@@ -168,6 +171,10 @@ def visible_thesis_or_404(user: User, thesis_id: str) -> Thesis:
     """
     thesis = theses_visible_to(user).filter(pk=thesis_id).first()
     if thesis is None:
+        is_committee_member = DefenseMember.objects.filter(defense__thesis_id=thesis_id, institutional_member=user).exists()
+        if is_committee_member:
+            thesis = Thesis.objects.filter(pk=thesis_id, deleted_at__isnull=True).first()
+    if thesis is None:
         raise Http404("Monografia não encontrada.")
     return thesis
 
@@ -223,7 +230,10 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
     Returns:
         QuerySet[Thesis]: Filtered queryset.
     """
-    queryset = theses_visible_to(request.user, base_queryset=base_queryset or thesis_list_queryset())
+    base = base_queryset or thesis_list_queryset()
+    visible = theses_visible_to(request.user, base_queryset=base)
+    committee_theses = Thesis.objects.filter(defenses__members__institutional_member=request.user).values("pk")
+    queryset = base.filter(Q(pk__in=visible.order_by().values("pk")) | Q(pk__in=committee_theses)).distinct()
     scope = (request.query_params.get("scope") or "").strip().lower()
     if scope == "advised":
         queryset = queryset.filter(advisor_id=request.user.pk)
@@ -238,8 +248,8 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
             Q(title__icontains=query)
             | Q(abstract__icontains=query)
             | Q(reference_code__icontains=query)
-            | Q(authors__author__name__icontains=query)
-            | Q(advisor__name__icontains=query)
+            | Q(authors__name__icontains=query)
+            | Q(advisor_name__icontains=query)
             | Q(keyword_links__keyword__name__icontains=query)
         )
     status_filter = (request.query_params.get("status") or "").strip()
@@ -276,8 +286,8 @@ def _student_thesis(user) -> Thesis | None:
         Thesis | None: Main-authored thesis when present.
     """
     return (
-        Thesis.objects.select_related("course", "advisor")
-        .filter(origin=ThesisOrigin.WORKFLOW, authors__author=user, authors__is_main_author=True)
+        Thesis.objects
+        .filter(origin=ThesisOrigin.WORKFLOW, authors__author=user)
         .order_by("-created_at")
         .first()
     )
@@ -352,6 +362,7 @@ class StudentThesisView(APIView):
                 "maxPdfSizeMb": getattr(settings, "THESIS_MAX_PDF_SIZE_MB", 50),
                 "maxDocumentSizeMb": getattr(settings, "THESIS_MAX_DOCUMENT_SIZE_MB", 20),
                 "maxKeywords": getattr(settings, "THESIS_MAX_KEYWORDS", 10),
+                "maxAuthors": getattr(settings, "THESIS_MAX_AUTHORS", 5),
             },
         }
         return Response(payload)
@@ -379,6 +390,7 @@ class StudentThesisView(APIView):
                 data["keywords"],
                 thesis_type=data.get("type", "MONOGRAPH"),
                 journal=data.get("journal", ""),
+                author_ids=data.get("authors", []),
                 request=request,
             )
         except DjangoValidationError as exc:
@@ -394,6 +406,7 @@ class StudentThesisFileUploadView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsStudentUser]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request) -> Response:
         """
@@ -479,10 +492,15 @@ class ThesisListView(APIView):
         Returns:
             Response: Paginated thesis summaries.
         """
-        queryset = _scoped_theses(request).select_related("course", "advisor")
+        queryset = _scoped_theses(request)
         paginator = ThesisPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
-        results = [thesis_list_payload(thesis, request.user) for thesis in page]
+        viewer_context = {
+            "roles": user_roles(request.user),
+            "is_admin": user_is_admin(request.user),
+            "accessible_ids": {thesis.pk for thesis in page or []},
+        }
+        results = [thesis_list_payload(thesis, request.user, viewer_context) for thesis in page]
         return paginator.get_paginated_response(results)
 
 
@@ -540,6 +558,7 @@ class LegacyThesisCreateView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsAcademicManager]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request) -> Response:
         """
@@ -605,6 +624,7 @@ class PublishedThesisFileView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsAcademicManager]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request, thesis_id) -> Response:
         """
@@ -838,6 +858,7 @@ class ThesisDocumentUploadView(APIView):
 
     permission_classes = [IsInstitutionalUser]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request, thesis_id) -> Response:
         """
@@ -1166,7 +1187,7 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
         return get_object_or_404(Thesis.objects.filter(allowed, deleted_at__isnull=True), pk=thesis_id)
     if user_is_advisor(user):
         return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, advisor_id=user.pk)
-    return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, authors__author=user, authors__is_main_author=True)
+    return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, authors__author=user)
 
 
 # ─── Defense views ────────────────────────────────────────────────────────────
@@ -1200,7 +1221,9 @@ class DefenseListView(APIView):
         paginator = ThesisPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         viewer_context = defense_viewer_context_for(page, request.user)
-        results = [defense_list_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in page]
+        from accounts.services import avatar_urls_for
+        avatar_urls = avatar_urls_for(m.institutional_member_id for defense in page for m in defense.members.all())
+        results = [defense_list_payload(defense, viewer=request.user, viewer_context=viewer_context, avatar_urls=avatar_urls) for defense in page]
         return paginator.get_paginated_response(results)
 
 
@@ -1263,11 +1286,10 @@ class DefenseListCreateView(APIView):
         thesis = _scoped_thesis(request.user, thesis_id)
         defenses = list(
             Defense.objects.filter(thesis=thesis)
-            .select_related("thesis", "thesis__course", "thesis__advisor")
+            .select_related("thesis")
             .prefetch_related(
                 *DEFENSE_LIST_PREFETCH,
                 defense_close_entries_prefetch(),
-                google_social_accounts_prefetch("members__institutional_member__socialaccount_set"),
             )
             .order_by("-scheduled_datetime")
         )
@@ -1659,9 +1681,10 @@ class DefenseEvaluationView(APIView):
         """
         Submit or update a committee member's evaluation.
 
-        When it is the last required evaluation the defense is closed automatically;
-        if that close fails the evaluation is still saved and ``autoCloseError``
-        carries the reason (otherwise null).
+        The evaluation and its event are recorded in one transaction. The result
+        is calculated asynchronously by the adjudication consumer when the last
+        required evaluation arrives; ``resultCalculationQueued`` confirms that
+        the event was recorded.
 
         Args:
             request: HTTP request with evaluation data.
@@ -1669,7 +1692,7 @@ class DefenseEvaluationView(APIView):
             member_id: DefenseMember primary key from URL.
 
         Returns:
-            Response: Evaluation payload plus ``autoCloseError``, ``defenseStatus`` and ``defenseStatusLabel``.
+            Response: Evaluation payload plus ``resultCalculationQueued``, ``defenseStatus`` and ``defenseStatusLabel``.
         """
         defense = get_object_or_404(_scoped_defense_qs(request.user), pk=defense_id)
         defense = sync_defense_status(defense, request=request)
@@ -1682,7 +1705,7 @@ class DefenseEvaluationView(APIView):
         except DjangoValidationError as exc:
             return _validation_response(exc)
         defense.refresh_from_db(fields=["status"])
-        return Response({"evaluation": defense_evaluation_payload(outcome.evaluation, is_own=True), "autoCloseError": outcome.auto_close_error, "defenseStatus": defense.status, "defenseStatusLabel": DefenseStatus(defense.status).label})
+        return Response({"evaluation": defense_evaluation_payload(outcome.evaluation, is_own=True), "resultCalculationQueued": outcome.result_calculation_queued, "defenseStatus": defense.status, "defenseStatusLabel": DefenseStatus(defense.status).label})
 
 
 class DefenseMemberAvailabilityView(APIView):

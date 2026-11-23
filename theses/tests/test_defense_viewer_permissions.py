@@ -48,7 +48,7 @@ class DefenseViewerPermissionsTests(TestCase):
         self.admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         self.member_user = create_user("member@ufvjm.edu.br", "Prof. Membro", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.coordinator_member = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.other_coordinator, actor=self.admin)
         self.plain_member = add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
@@ -61,7 +61,7 @@ class DefenseViewerPermissionsTests(TestCase):
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         return member, ExternalInvitationPrincipal(invitation)
 
     def _detail(self, principal: User | ExternalInvitationPrincipal) -> dict[str, Any]:
@@ -169,7 +169,7 @@ class DefenseViewerPermissionsTests(TestCase):
 
     def test_thesis_defense_list_hides_availability_from_student(self) -> None:
         student = create_user("aluno@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
-        self.thesis.authors.create(author=student, is_main_author=True)
+        self.thesis.authors.create(author_id=student.pk, is_main_author=True)
         self.client.force_authenticate(user=student)
         response = self.client.get(f"/api/v1/theses/{self.thesis.pk}/defenses")
         self.assertEqual(response.status_code, 200)
@@ -187,7 +187,7 @@ class DefenseViewerPermissionsTests(TestCase):
         return len(captured.captured_queries)
 
     def _schedule_extra_defense(self, index: int) -> Defense:
-        thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title=f"Tese extra {index}", status=ThesisStatus.ADVISOR_APPROVED)
+        thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title=f"Tese extra {index}", status=ThesisStatus.ADVISOR_APPROVED)
         defense = schedule_defense(thesis, scheduled_datetime=timezone.now() + timedelta(days=10 + index), actor=self.admin)
         add_institutional_member(defense, CommitteeRole.PRESIDENT, self.other_coordinator, actor=self.admin)
         add_institutional_member(defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)

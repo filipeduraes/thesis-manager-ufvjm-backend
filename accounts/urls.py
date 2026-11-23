@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/v1/public/advisors", accounts_directory.PublicAdvisorsListView.as_view(), name="api_public_advisors"),
     path("api/v1/session", views.SessionView.as_view(), name="api_session"),
     path("api/v1/auth/google/start", views.GoogleStartView.as_view(), name="api_google_start"),
+    path("api/v1/auth/introspect", views.ServiceIntrospectionView.as_view(), name="api_auth_introspect"),
     path(
         "api/v1/auth/external-token",
         views.ExternalTokenExchangeView.as_view(),

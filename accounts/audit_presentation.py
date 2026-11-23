@@ -538,9 +538,9 @@ class AuditPresenter:
             return
         from theses.models import Thesis, ThesisAuthor
 
-        author_queryset = ThesisAuthor.objects.select_related("author").order_by("position")
+        author_queryset = ThesisAuthor.objects.order_by("position")
         author_prefetch = Prefetch("authors", queryset=author_queryset, to_attr="audit_authors")
-        theses = Thesis.objects.filter(pk__in=thesis_ids).select_related("advisor", "course").prefetch_related(author_prefetch)
+        theses = Thesis.objects.filter(pk__in=thesis_ids).prefetch_related(author_prefetch)
         for thesis in theses:
             self._theses[str(thesis.pk)] = thesis
 
@@ -597,7 +597,7 @@ class AuditPresenter:
             return
         from theses.models import DefenseMember
 
-        members = DefenseMember.objects.filter(pk__in=member_ids).select_related("institutional_member", "external_invitation")
+        members = DefenseMember.objects.filter(pk__in=member_ids)
         for member in members:
             self._members[str(member.pk)] = member
 
@@ -797,7 +797,7 @@ class AuditPresenter:
         if thesis is not None:
             authors = getattr(thesis, "audit_authors", None)
             if authors is None:
-                authors = list(thesis.authors.select_related("author").order_by("position"))
+                authors = list(thesis.authors.order_by("position"))
             names = []
             for link in authors:
                 name = _text(getattr(link, "name", "")) or _text(getattr(link.author, "name", "")) or _text(getattr(link.author, "email", ""))

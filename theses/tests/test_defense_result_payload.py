@@ -15,6 +15,10 @@ from academic.models import Course, Department
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import InvitationStatus, ProfileRole, User, UserProfileRole
 from accounts.services import create_external_invitation
+from adjudication.consumer import handle_event as handle_adjudication_event
+from events.catalog import EventType
+from events.envelope import EventEnvelope
+from events.models import OutboxEvent, ProcessedEvent
 from theses.defense_committee import add_institutional_member
 from theses.defense_scheduling import close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, DefenseMember, DefenseResult, DefenseStatus, Thesis, ThesisStatus
@@ -43,14 +47,14 @@ class DefenseResultPayloadTests(TestCase):
         self.advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         self.evaluator = create_user("ev@ufvjm.edu.br", "Avaliador", ProfileRole.ADVISOR)
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Suplente", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         self.member = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.evaluator, actor=self.admin)
         self.alternate = add_institutional_member(self.defense, CommitteeRole.ALTERNATE, self.alternate_user, actor=self.admin)
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        self.external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        self.external_member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         self.external_principal = ExternalInvitationPrincipal(invitation)
         confirm_committee(self.defense)
         self.client = APIClient()
@@ -66,9 +70,19 @@ class DefenseResultPayloadTests(TestCase):
         response = self.client.get("/api/v1/defenses")
         return next(item for item in response.data["results"] if item["id"] == str(self.defense.pk))
 
+    def _drain_adjudication(self) -> None:
+        """Process the queued evaluation events like the adjudication worker."""
+        processed = set(ProcessedEvent.objects.filter(consumer_group="adjudication").values_list("event_id", flat=True))
+        pending = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EVALUATION_RECORDED).exclude(pk__in=processed).order_by("created_at")
+        for event in pending:
+            handle_adjudication_event(EventEnvelope.from_outbox(event))
+
     def _evaluate(self, principal, member: DefenseMember, decision: str):
         self.client.force_authenticate(user=principal)
-        return self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision}, format="json")
+        response = self.client.put(f"/api/v1/defenses/{self.defense.pk}/members/{member.pk}/evaluation", {"decision": decision, "score": "8.00", "notes": "Parecer de teste."}, format="json")
+        if response.status_code == 200:
+            self._drain_adjudication()
+        return response
 
     # --- result / resultLabel ---
 
@@ -85,7 +99,8 @@ class DefenseResultPayloadTests(TestCase):
         start_defense(self.defense, actor=self.admin)
         self._evaluate(self.evaluator, self.member, DefenseResult.APPROVED)
         response = self._evaluate(self.external_principal, self.external_member, DefenseResult.REJECTED)
-        self.assertEqual(response.data["defenseStatus"], DefenseStatus.COMPLETED)
+        self.defense.refresh_from_db()
+        self.assertEqual(self.defense.status, DefenseStatus.COMPLETED)
 
         evaluator_detail = self._detail(self.evaluator)
         self.assertEqual(evaluator_detail["result"], DefenseResult.REJECTED)

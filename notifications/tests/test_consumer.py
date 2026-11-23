@@ -67,8 +67,8 @@ class NotificationHandlerTests(TestCase):
         self.advisor = create_user("orientador@ufvjm.edu.br", "Olga Orientadora", ProfileRole.ADVISOR)
         self.evaluator = create_user("avaliador@ufvjm.edu.br", "Vitor Avaliador", ProfileRole.ADVISOR)
         self.alternate_user = create_user("suplente@ufvjm.edu.br", "Sara Suplente", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Filas & <Eventos>", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, position=1, is_main_author=True)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Filas & <Eventos>", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=self.student.pk, position=1, is_main_author=True)
 
     def _schedule_with_committee(self) -> Defense:
         defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), modality=DefenseModality.REMOTE, location="https://meet.example.com/sala", actor=self.admin)
@@ -77,7 +77,7 @@ class NotificationHandlerTests(TestCase):
         add_institutional_member(defense, CommitteeRole.ALTERNATE, self.alternate_user, actor=self.admin)
         invitation = create_external_invitation(name="Edu Externo", email="externo@example.org", institution="UFMG", invited_by=self.admin)
         self.external_token = issue_external_token(invitation)
-        DefenseMember.objects.create(defense=defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Edu Externo", email="externo@example.org")
+        DefenseMember.objects.create(defense=defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Edu Externo", email="externo@example.org")
         return defense
 
     def _handle_latest(self, event_type: str) -> HandleOutcome:
@@ -108,7 +108,7 @@ class NotificationHandlerTests(TestCase):
         confirm_committee(defense)
         start_defense(defense, actor=self.admin)
         member = DefenseMember.objects.get(defense=defense, institutional_member=self.evaluator)
-        record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.REJECTED, notes="Parecer sigiloso", actor=self.evaluator)
+        record_committee_evaluation(Defense.objects.get(pk=defense.pk), member, decision=DefenseResult.REJECTED, score="6.00", notes="Parecer sigiloso", actor=self.evaluator)
         self._handle_latest(EventType.DEFENSE_EVALUATION_RECORDED)
         [message] = mail.outbox
         self.assertEqual(message.to, ["orientador@ufvjm.edu.br"])
@@ -179,8 +179,8 @@ class NotificationHandlerIdempotencyTests(TestCase):
         course = Course.objects.create(department=department, name="CC", code="CC001")
         self.student = create_user("aluno@ufvjm.edu.br", "Ana Aluna", ProfileRole.STUDENT)
         self.advisor = create_user("orientador@ufvjm.edu.br", "Olga Orientadora", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=course, advisor=self.advisor, title="Tese", status=ThesisStatus.APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, position=1, is_main_author=True)
+        self.thesis = Thesis.objects.create(course_id=course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author_id=self.student.pk, position=1, is_main_author=True)
         with transaction.atomic():
             self.event = record_thesis_published(self.thesis)
         self.envelope = envelope_for(self.event)
@@ -260,8 +260,8 @@ class EndToEndNotificationTests(TestCase):
         admin = create_user("admin@ufvjm.edu.br", "Admin", ProfileRole.ADMIN)
         student = create_user("aluno@ufvjm.edu.br", "Ana Aluna", ProfileRole.STUDENT)
         advisor = create_user("orientador@ufvjm.edu.br", "Olga Orientadora", ProfileRole.ADVISOR)
-        thesis = Thesis.objects.create(course=course, advisor=advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=thesis, author=student, position=1, is_main_author=True)
+        thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=thesis, author_id=student.pk, position=1, is_main_author=True)
         schedule_defense(thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=admin)
         self.assertEqual(mail.outbox, [])
         broker = InMemoryEventBroker()

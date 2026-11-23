@@ -53,7 +53,7 @@ class ResendInvitationTests(TestCase):
         self.other_advisor = create_user("other@ufvjm.edu.br", "Outro Orientador", ProfileRole.ADVISOR)
         self.committee_advisor = create_user("banca@ufvjm.edu.br", "Membro Interno", ProfileRole.ADVISOR)
         self.student = create_user("aluno@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
-        self.thesis = Thesis.objects.create(course=course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=timezone.now() + timedelta(days=7), actor=self.admin)
         add_institutional_member(self.defense, CommitteeRole.MEMBER, self.committee_advisor, actor=self.admin)
         self.advisor_client = self._client_for(self.advisor)
@@ -80,7 +80,8 @@ class ResendInvitationTests(TestCase):
         return APIClient().post("/api/v1/auth/external-token", {"token": token}, format="json").status_code
 
     def _invitation(self) -> ExternalInvitation:
-        return DefenseMember.objects.select_related("external_invitation").get(pk=self.member_id).external_invitation
+        member = DefenseMember.objects.only("external_invitation_id").get(pk=self.member_id)
+        return ExternalInvitation.objects.filter(pk=member.external_invitation_id).first()
 
     def _invited_events(self) -> int:
         return OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EXTERNAL_MEMBER_INVITED).count()

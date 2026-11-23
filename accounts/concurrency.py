@@ -16,7 +16,22 @@ COURSE_ASSIGNMENT_LOCK_KEY = 0x41535349474E4D54  # "ASSIGNMT"
 THESIS_DRAFT_LOCK_KEY = 0x54484553495344  # "THESISD"
 
 
-def acquire_transaction_lock(key: int) -> None:
+def database_for_model(model) -> str:
+    """
+    Return the database alias that owns a model, respecting the service router.
+
+    Args:
+        model: Django model class.
+
+    Returns:
+        str: Database alias.
+    """
+    from django.db import router
+
+    return router.db_for_write(model) or "default"
+
+
+def acquire_transaction_lock(key: int, using: str = "default") -> None:
     """
     Serialize the current critical section within a transaction.
 
@@ -26,7 +41,9 @@ def acquire_transaction_lock(key: int) -> None:
     Args:
         key: Stable advisory-lock identifier.
     """
-    if connection.vendor != "postgresql":
+    from django.db import connections
+
+    if connections[using].vendor != "postgresql":
         return
-    with connection.cursor() as cursor:
+    with connections[using].cursor() as cursor:
         cursor.execute("SELECT pg_advisory_xact_lock(%s)", [key])

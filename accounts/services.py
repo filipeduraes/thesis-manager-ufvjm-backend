@@ -26,7 +26,7 @@ from django.utils.dateparse import parse_datetime
 from accounts.audit_entry import AuditEntry
 from accounts.audit_identifiers import EntityType
 from accounts.audit_payload import AuditPayload
-from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock
+from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock, database_for_model
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -164,6 +164,26 @@ def google_social_accounts_prefetch(lookup: str = "socialaccount_set") -> Prefet
     """
     google_accounts = SocialAccount.objects.filter(provider="google")
     return Prefetch(lookup, queryset=google_accounts, to_attr=GOOGLE_SOCIAL_ACCOUNTS_ATTR)
+
+
+def avatar_urls_for(user_ids) -> dict:
+    """
+    Resolve Google avatar URLs for many users in one query.
+
+    Args:
+        user_ids: Iterable of user identifiers.
+
+    Returns:
+        dict: Mapping of user id to a safe https URL or None.
+    """
+    identifiers = {uid for uid in user_ids if uid is not None}
+    if not identifiers:
+        return {}
+    accounts = SocialAccount.objects.filter(provider="google", user_id__in=identifiers).only("user_id", "extra_data")
+    by_user: dict[UUID, SocialAccount] = {}
+    for account in accounts:
+        by_user.setdefault(account.user_id, account)
+    return {uid: _avatar_url(by_user.get(uid)) for uid in identifiers}
 
 
 def user_avatar_url(user: User) -> str | None:
@@ -342,10 +362,11 @@ def record_audit(entry: AuditEntry) -> AuditLog:
     user_agent = (user_agent or "")[:512]
     origin = str(origin)
 
-    with transaction.atomic():
-        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY)
+    audit_db = database_for_model(AuditLog)
+    with transaction.atomic(using=audit_db):
+        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY, using=audit_db)
         previous = (
-            AuditLog.objects.select_for_update()
+            AuditLog.objects.using(audit_db).select_for_update()
             .order_by("-occurred_at", "-id")
             .first()
         )
@@ -379,7 +400,7 @@ def record_audit(entry: AuditEntry) -> AuditLog:
             json.dumps(payload.as_dict(), sort_keys=True, default=str).encode("utf-8")
         ).digest()
 
-        return AuditLog.objects.create(
+        return AuditLog.objects.using(audit_db).create(
             actor_user=actor_user,
             actor_external_invitation=actor_external_invitation,
             actor_role=actor_role,
@@ -441,11 +462,12 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     if ProfileRole.STUDENT in normalized_roles and len(normalized_roles) > 1:
         raise ValidationError("O perfil Aluno não pode ser combinado com outros perfis.")
 
-    with transaction.atomic():
+    auth_db = database_for_model(User)
+    with transaction.atomic(using=auth_db):
         # A contagem de administradores e a revogação do papel precisam ser uma
         # única seção crítica, senão dois administradores podem remover um ao
         # outro e deixar o sistema sem acesso administrativo.
-        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY, using=auth_db)
         if (
             _is_admin_user(user)
             and ProfileRole.ADMIN not in normalized_roles
@@ -483,7 +505,7 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     return normalized_roles
 
 
-def create_institutional_user(*, email: str, name: str, roles: Iterable[str], assigned_by: User | None = None, request: HttpRequest | None = None,) -> User:
+def create_institutional_user(*, email: str, name: str, roles: Iterable[str], assigned_by: User | None = None, registration_number: str = "", research_area: str = "", department=None, request: HttpRequest | None = None,) -> User:
     """
     Pre-provision an institutional user without a local password.
     """
@@ -495,8 +517,14 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
     if User.objects.filter(email__iexact=normalized_email).exists():
         raise UserAlreadyExistsError("Já existe um usuário com este e-mail.")
 
-    with transaction.atomic():
-        user = User.objects.create_user(email=normalized_email, name=name.strip())
+    with transaction.atomic(using=database_for_model(User)):
+        user = User.objects.create_user(
+            email=normalized_email,
+            name=name.strip(),
+            registration_number=(registration_number or "").strip(),
+            research_area=(research_area or "").strip(),
+            department=department,
+        )
         set_user_roles(user, roles, assigned_by=assigned_by)
         # Resolve coordenações pendentes vinculadas ao e-mail institucional.
         try:
@@ -524,8 +552,9 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
     """
     Soft-delete a user, protecting the last administrative account.
     """
-    with transaction.atomic():
-        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+    auth_db = database_for_model(User)
+    with transaction.atomic(using=auth_db):
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY, using=auth_db)
         if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
             raise LastAdminError("Não é possível desativar o último administrador.")
         if actor is not None and actor.pk == user.pk:
@@ -548,7 +577,7 @@ def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: Us
     """
     Reactivate a previously soft-deleted user.
     """
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(User)):
         if not user.is_active:
             user.is_active = True
             user.save(update_fields=["is_active"])
@@ -706,7 +735,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             hours=getattr(settings, "EXTERNAL_INVITATION_TOKEN_TTL_HOURS", 72)
         )
 
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(ExternalInvitation)):
         invitation = ExternalInvitation.objects.create(
             invited_by=invited_by,
             name=name.strip(),
@@ -749,15 +778,16 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
         }
     ).first()
     if expired is not None:
-        with transaction.atomic():
-            ExternalInvitation.objects.filter(pk=expired.pk).update(
+        with transaction.atomic(using=database_for_model(ExternalInvitation)):
+            ExternalInvitation.objects.using(database_for_model(ExternalInvitation)).filter(pk=expired.pk).update(
                 status=InvitationStatus.EXPIRED
             )
         raise ExternalTokenError("Token inválido ou expirado.")
 
-    with transaction.atomic():
+    invitation_db = database_for_model(ExternalInvitation)
+    with transaction.atomic(using=invitation_db):
         try:
-            invitation = ExternalInvitation.objects.select_for_update().get(
+            invitation = ExternalInvitation.objects.using(invitation_db).select_for_update().get(
                 token_hash=digest
             )
         except ExternalInvitation.DoesNotExist as exc:

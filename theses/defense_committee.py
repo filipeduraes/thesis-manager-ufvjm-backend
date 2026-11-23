@@ -23,6 +23,7 @@ from accounts.models import AuditAction, ExternalInvitation, InvitationStatus, U
 from accounts.services import create_external_invitation, revoke_external_invitation, user_avatar_url
 from events.catalog import ExternalInvitationTrigger
 from theses.audit import audit_defense
+from theses.events import record_defense_member_invited
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.events import record_external_member_invited
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
@@ -238,7 +239,10 @@ def resolve_committee_member(defense: Defense, principal: User | ExternalInvitat
     return None
 
 
-def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None, viewer_can_manage: bool | None = None) -> dict[str, Any]:
+AVATAR_UNSET = object()
+
+
+def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None, viewer_can_manage: bool | None = None, avatar_url: object = AVATAR_UNSET) -> dict[str, Any]:
     """
     Serialize a committee member.
 
@@ -279,7 +283,7 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "hasConflict": member.has_conflict,
         "conflictReason": member.conflict_reason if member.has_conflict else "",
         "isInstitutional": member.institutional_member_id is not None,
-        "avatarUrl": user_avatar_url(member.institutional_member) if member.institutional_member_id else None,
+        "avatarUrl": (user_avatar_url(member.institutional_member) if avatar_url is AVATAR_UNSET else avatar_url) if member.institutional_member_id else None,
         "createdAt": member.created_at.isoformat(),
         "evaluation": None,
     }
@@ -431,6 +435,39 @@ def _has_schedule_overlap(defense: Defense, user_id: Any) -> bool:
     return False
 
 
+def _has_external_schedule_overlap(defense: Defense, email: str) -> bool:
+    """
+    Return whether the same external e-mail is in another overlapping defense.
+
+    The external invitation has no cross-defense identity, so the normalized
+    e-mail is used as the identity of the guest.
+
+    Args:
+        defense: Defense with the (possibly unsaved) interval being checked.
+        email: Normalized external member e-mail.
+
+    Returns:
+        bool: True when an overlapping active defense is found.
+    """
+    this_start = defense.scheduled_datetime
+    this_end = this_start + timedelta(minutes=defense.duration_minutes)
+    candidates = (
+        Defense.objects.filter(
+            members__email__iexact=email,
+            members__external_invitation__isnull=False,
+            status__in=ACTIVE_DEFENSE_STATUSES,
+        )
+        .exclude(pk=defense.pk)
+        .values("scheduled_datetime", "duration_minutes")
+    )
+    for other in candidates:
+        other_start = other["scheduled_datetime"]
+        other_end = other_start + timedelta(minutes=other["duration_minutes"])
+        if this_start < other_end and other_start < this_end:
+            return True
+    return False
+
+
 def _check_schedule_overlap(defense: Defense, user: User) -> None:
     """
     Raise ValidationError when user already belongs to an overlapping active defense.
@@ -450,18 +487,22 @@ def check_committee_schedule_conflicts(defense: Defense) -> None:
     """
     Validate that no institutional member of the defense has an overlapping active defense.
 
-    Used when the defense date, time or duration changes. External members are not
-    checked because they have no cross-defense identity (one invitation per membership).
+    Used when the defense date, time or duration changes. External members are
+    identified by their normalized e-mail.
 
     Args:
         defense: Defense carrying the new (possibly unsaved) schedule.
 
     Raises:
-        ValidationError: Naming the first institutional member found in conflict.
+        ValidationError: Naming the first member found in conflict.
     """
     institutional_members = defense.members.filter(institutional_member__isnull=False).order_by("created_at")
     for member in institutional_members:
         if _has_schedule_overlap(defense, member.institutional_member_id):
+            raise ValidationError(f"O membro {member.name} já participa de outra banca no mesmo período.")
+    external_members = defense.members.filter(external_invitation__isnull=False, email__isnull=False).exclude(email="").order_by("created_at")
+    for member in external_members:
+        if _has_external_schedule_overlap(defense, member.email.strip().lower()):
             raise ValidationError(f"O membro {member.name} já participa de outra banca no mesmo período.")
 
 
@@ -501,7 +542,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
             member = DefenseMember.objects.create(
                 defense=defense,
                 role=role,
-                institutional_member=user,
+                institutional_member_id=user.pk,
                 name=user.name or user.email,
                 email=user.email,
                 institution="",
@@ -519,6 +560,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
         actor_user=actor,
         metadata=event_payload(AuditEvent.MEMBER_ADDED, memberId=str(member.pk), memberName=member.name, memberRole=role, type="institutional"),
     )
+    record_defense_member_invited(defense, member)
     return member
 
 
@@ -563,6 +605,8 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
     clean_email = (email or "").strip().lower()
     if not clean_email:
         raise ValidationError("Informe o e-mail do membro externo.")
+    if _has_external_schedule_overlap(defense, clean_email):
+        raise ValidationError("Este membro já participa de outra banca no mesmo período.")
 
     invitation = create_external_invitation(
         name=clean_name,
@@ -576,7 +620,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         member = DefenseMember.objects.create(
             defense=defense,
             role=role,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name=clean_name,
             email=clean_email,
             institution=institution.strip(),
@@ -838,7 +882,7 @@ def resend_external_member_invitation(defense: Defense, member: DefenseMember, *
     refusal = _resend_refusal_message(invitation)
     if refusal is not None:
         raise ValidationError(refusal)
-    member.external_invitation = invitation
+    member.external_invitation_id = invitation.pk
     event = record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.RESENT)
     audit_defense(
         action=AuditAction.INVITE,
@@ -888,7 +932,7 @@ def regenerate_external_member_invitation(defense: Defense, member: DefenseMembe
 
     revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
     new_invitation = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
-    member.external_invitation = new_invitation
+    member.external_invitation_id = new_invitation.pk
     member.save(update_fields=["external_invitation"])
     audit_defense(
         action=AuditAction.INVITE,

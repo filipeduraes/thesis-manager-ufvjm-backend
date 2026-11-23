@@ -4,6 +4,8 @@ Models for the thesis submission, review and publication workflow.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import secrets
 import uuid
 from datetime import date
@@ -318,6 +320,7 @@ class StoredFile(models.Model):
         null=True,
         blank=True,
         related_name="stored_files",
+        db_constraint=False,
     )
     uploaded_at = models.DateTimeField(default=timezone.now)
     processing_status = models.CharField(
@@ -327,6 +330,9 @@ class StoredFile(models.Model):
         db_index=True,
     )
     extracted_text_path = models.CharField(max_length=512, blank=True, default="")
+    # O texto extraído também fica no banco para ser indexado e pesquisado; o arquivo
+    # derivado é mantido apenas para auditoria e reprocessamento.
+    extracted_text = models.TextField(blank=True, default="")
     extracted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -388,11 +394,13 @@ class Thesis(models.Model):
         Course,
         on_delete=models.PROTECT,
         related_name="theses",
+        db_constraint=False,
     )
     advisor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="advised_theses",
+        db_constraint=False,
     )
     type = models.CharField(
         max_length=20,
@@ -400,7 +408,16 @@ class Thesis(models.Model):
         default=ThesisType.MONOGRAPH,
     )
     title = models.CharField(max_length=500)
+    # Identidade bibliográfica replicada dos serviços de autenticação/acadêmico.
+    # Evita JOINs entre bancos quando os serviços são separados fisicamente.
+    advisor_name = models.CharField(max_length=200, blank=True, default="")
+    course_name = models.CharField(max_length=200, blank=True, default="")
+    course_code = models.CharField(max_length=30, blank=True, default="")
+    main_author_name = models.CharField(max_length=200, blank=True, default="")
     abstract = models.TextField(blank=True, default="")
+    # Texto normalizado (sem acentos) com segmentos rotulados de todos os campos
+    # pesquisáveis, incluindo o PDF extraído. Mantido pelos serviços de domínio.
+    search_text = models.TextField(blank=True, default="")
     journal = models.CharField(max_length=200, blank=True, default="")
     reference_code = models.CharField(max_length=50, unique=True, editable=False)
     status = models.CharField(
@@ -524,6 +541,7 @@ class ThesisAuthor(models.Model):
         related_name="authored_theses",
         null=True,
         blank=True,
+        db_constraint=False,
     )
     name = models.CharField(max_length=200, blank=True, default="")
     position = models.PositiveSmallIntegerField(default=1)
@@ -654,6 +672,7 @@ class ThesisFile(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="uploaded_thesis_files",
+        db_constraint=False,
     )
     uploaded_at = models.DateTimeField(default=timezone.now)
     hash_verified_at = models.DateTimeField(null=True, blank=True)
@@ -711,6 +730,7 @@ class ThesisReview(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="thesis_reviews",
+        db_constraint=False,
     )
     decision = models.CharField(max_length=30, choices=ReviewDecision.choices)
     comments = models.TextField(blank=True, default="")
@@ -768,6 +788,7 @@ class ThesisStatusHistory(models.Model):
         null=True,
         blank=True,
         related_name="thesis_status_changes",
+        db_constraint=False,
     )
     reason = models.TextField(blank=True, default="")
     metadata = models.JSONField(default=dict, blank=True)
@@ -833,6 +854,7 @@ class ThesisDocument(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="submitted_thesis_documents",
+        db_constraint=False,
     )
     validated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -840,6 +862,7 @@ class ThesisDocument(models.Model):
         null=True,
         blank=True,
         related_name="validated_thesis_documents",
+        db_constraint=False,
     )
     submitted_at = models.DateTimeField(default=timezone.now)
     validated_at = models.DateTimeField(null=True, blank=True)
@@ -882,6 +905,9 @@ class Defense(models.Model):
         on_delete=models.PROTECT,
         related_name="defenses",
     )
+    # Snapshot bibliográfico da tese: o serviço de bancas lê daqui, sem JOIN
+    # com as tabelas do serviço de monografias quando os bancos forem separados.
+    thesis_snapshot = models.JSONField(default=dict, blank=True)
     scheduled_datetime = models.DateTimeField()
     duration_minutes = models.PositiveSmallIntegerField(default=120)
     modality = models.CharField(
@@ -914,6 +940,7 @@ class Defense(models.Model):
         null=True,
         blank=True,
         related_name="scheduled_defenses",
+        db_constraint=False,
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -975,6 +1002,7 @@ class DefenseStatusHistory(models.Model):
         blank=True,
         related_name="defense_status_changes",
         help_text="Nulo em transições automáticas (ex.: abertura pelo horário agendado).",
+        db_constraint=False,
     )
     reason = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)
@@ -1020,6 +1048,7 @@ class DefenseMember(models.Model):
         null=True,
         blank=True,
         related_name="committee_memberships",
+        db_constraint=False,
     )
     external_invitation = models.OneToOneField(
         "accounts.ExternalInvitation",
@@ -1027,6 +1056,7 @@ class DefenseMember(models.Model):
         null=True,
         blank=True,
         related_name="defense_membership",
+        db_constraint=False,
     )
     name = models.CharField(max_length=200)
     email = models.EmailField(max_length=254)
@@ -1099,8 +1129,8 @@ class DefenseMemberEvaluation(models.Model):
         related_name="evaluation",
     )
     decision = models.CharField(max_length=30, choices=DefenseResult.choices)
-    score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
-    notes = models.TextField(blank=True, default="")
+    score = models.DecimalField(max_digits=4, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(default="")
     submitted_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1114,9 +1144,9 @@ class DefenseMemberEvaluation(models.Model):
         verbose_name_plural = "Avaliações da banca"
         ordering = ["-submitted_at"]
         constraints = [
-            # Nota deve estar entre 0,00 e 10,00, se informada.
+            # Nota obrigatória entre 0,00 e 10,00.
             models.CheckConstraint(
-                condition=Q(score__isnull=True) | (Q(score__gte=0) & Q(score__lte=10)),
+                condition=Q(score__gte=0) & Q(score__lte=10),
                 name="defense_evaluation_score_range",
             ),
         ]

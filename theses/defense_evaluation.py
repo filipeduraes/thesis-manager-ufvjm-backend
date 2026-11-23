@@ -18,7 +18,6 @@ from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, User
 from accounts.services import record_audit
 from theses.audit import audit_defense
-from theses.defense_scheduling import auto_close_after_last_evaluation
 from theses.events import record_defense_evaluation_recorded
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseResult, DefenseStatus
 
@@ -30,20 +29,20 @@ class EvaluationOutcome:
 
     Attributes:
         evaluation: Saved evaluation.
-        auto_close_error: Message when the automatic close after the last evaluation
-            failed (the evaluation is still saved), otherwise None.
+        result_calculation_queued: Whether the asynchronous adjudication event was
+            recorded for this evaluation.
     """
 
     evaluation: DefenseMemberEvaluation
-    auto_close_error: str | None = None
+    result_calculation_queued: bool = True
 
 
 def submit_committee_evaluation(defense: Defense, member: DefenseMember, *, decision: str, score=None, notes: str = "", actor: User | ExternalInvitationPrincipal, request: HttpRequest | None = None) -> DefenseMemberEvaluation:
     """
     Submit or update a committee member's evaluation and return only the evaluation.
 
-    Thin wrapper over ``record_committee_evaluation`` kept for callers that do not
-    need the automatic-close outcome; the automatic close still runs.
+    Thin wrapper over ``record_committee_evaluation`` for callers that only need
+    the saved evaluation; the result calculation is queued asynchronously.
 
     Args:
         defense: Defense session.
@@ -68,10 +67,10 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
     """
     Submit or update a committee member's evaluation for an in-progress defense.
 
-    After the evaluation is saved, if every non-alternate member has evaluated, the
-    defense is closed automatically through the same logic as ``close_defense``,
-    in a separate savepoint: a failure there never undoes the evaluation and is
-    reported in ``EvaluationOutcome.auto_close_error``.
+    After the evaluation is saved, ``defense.evaluation_recorded`` is recorded in
+    the transactional outbox. The adjudication consumer later checks whether every
+    non-alternate member has evaluated and closes the defense asynchronously, so
+    a slow quorum calculation never blocks the HTTP response.
 
     Alternates are blocked from evaluating. Only the member themselves (institutional
     or external) may submit their own evaluation. After the defense is COMPLETED,
@@ -90,14 +89,13 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
         request: HTTP request used for audit context.
 
     Returns:
-        EvaluationOutcome: Saved evaluation and the automatic-close error, if any.
+        EvaluationOutcome: Saved evaluation and the queued-calculation flag.
 
     Raises:
         ValidationError: When the defense status, member role, identity, or score is invalid.
     """
     actor_user = actor if isinstance(actor, User) else None
     actor_ext = actor.invitation if isinstance(actor, ExternalInvitationPrincipal) else None
-
     # Tentativa após encerramento: audit persiste fora de transação, depois levanta exceção
     if defense.status == DefenseStatus.COMPLETED:
         audit_defense(
@@ -129,6 +127,10 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
 
     if decision not in DefenseResult.values:
         raise ValidationError("Decisão de avaliação inválida.")
+    if score is None:
+        raise ValidationError("Informe a nota do avaliador (0 a 10).")
+    if not (notes or "").strip():
+        raise ValidationError("Informe o parecer do avaliador.")
 
     # Validar nota
     score_value = None
@@ -181,8 +183,7 @@ def record_committee_evaluation(defense: Defense, member: DefenseMember, *, deci
             metadata=event_payload(AuditEvent.EVALUATION_BLOCKED_AFTER_CLOSE, memberId=str(member.pk)),
         )
         raise ValidationError("A banca já foi encerrada. Avaliações não podem ser alteradas.")
-    auto_close_error = auto_close_after_last_evaluation(defense, request=request)
-    return EvaluationOutcome(evaluation=evaluation, auto_close_error=auto_close_error)
+    return EvaluationOutcome(evaluation=evaluation, result_calculation_queued=True)
 
 
 def defense_evaluation_payload(evaluation: DefenseMemberEvaluation, *, is_own: bool = False) -> dict[str, Any]:

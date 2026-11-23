@@ -41,6 +41,16 @@ class User(AbstractBaseUser, PermissionsMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(max_length=254, unique=True)
     name = models.CharField(max_length=200, blank=True)
+    registration_number = models.CharField(max_length=30, blank=True, default="", verbose_name="Matrícula")
+    department = models.ForeignKey(
+        "academic.Department",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="members",
+        verbose_name="Departamento",
+    )
+    research_area = models.CharField(max_length=200, blank=True, default="", verbose_name="Área de pesquisa")
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     date_joined = models.DateTimeField(default=timezone.now)

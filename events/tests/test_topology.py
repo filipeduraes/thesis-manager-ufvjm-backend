@@ -11,22 +11,33 @@ from django.test import SimpleTestCase, override_settings
 from events.topology import declare_topology, event_topology
 
 
-@override_settings(EVENTS_EXCHANGE="thesis.events", NOTIFICATIONS_QUEUE="notifications.thesis-events")
+@override_settings(
+    EVENTS_EXCHANGE="thesis.events",
+    NOTIFICATIONS_QUEUE="notifications.thesis-events",
+    INDEXING_QUEUE="indexing.thesis-events",
+    ADJUDICATION_QUEUE="adjudication.thesis-events",
+    REPOSITORY_QUEUE="repository.thesis-events",
+    REPORTS_QUEUE="reports.thesis-events",
+)
 class EventTopologyTests(SimpleTestCase):
-    """The topology declares durable exchanges, the consumer queue with its DLQ and the bindings."""
+    """The topology declares durable exchanges and one queue plus DLQ per consumer."""
 
     def test_topology_names_follow_settings(self) -> None:
         topology = event_topology()
         self.assertEqual(topology.exchange, "thesis.events")
         self.assertEqual(topology.dead_letter_exchange, "thesis.events.dlx")
-        [queue_spec] = topology.consumer_queues
-        self.assertEqual(queue_spec.queue, "notifications.thesis-events")
-        self.assertEqual(queue_spec.dead_letter_queue, "notifications.thesis-events.dlq")
-        self.assertEqual(queue_spec.routing_keys, ("thesis.*", "defense.*"))
+        queues = {spec.queue: spec for spec in topology.consumer_queues}
+        self.assertEqual(set(queues), {"notifications.thesis-events", "indexing.thesis-events", "adjudication.thesis-events", "repository.thesis-events", "reports.thesis-events"})
+        self.assertEqual(queues["notifications.thesis-events"].routing_keys, ("thesis.*", "defense.*"))
+        self.assertEqual(queues["indexing.thesis-events"].routing_keys, ("thesis.text_extraction_requested",))
+        self.assertEqual(queues["adjudication.thesis-events"].routing_keys, ("defense.evaluation_recorded",))
+        for spec in queues.values():
+            self.assertEqual(spec.dead_letter_queue, f"{spec.queue}.dlq")
 
     def test_declares_exchanges_queues_and_bindings(self) -> None:
         channel = MagicMock()
-        declare_topology(channel, event_topology())
+        topology = event_topology()
+        declare_topology(channel, topology)
         self.assertEqual(
             channel.exchange_declare.call_args_list,
             [
@@ -34,18 +45,14 @@ class EventTopologyTests(SimpleTestCase):
                 call(exchange="thesis.events.dlx", exchange_type="direct", durable=True),
             ],
         )
-        self.assertEqual(
-            channel.queue_declare.call_args_list,
-            [
-                call(queue="notifications.thesis-events.dlq", durable=True),
-                call(queue="notifications.thesis-events", durable=True, arguments={"x-dead-letter-exchange": "thesis.events.dlx", "x-dead-letter-routing-key": "notifications.thesis-events"}),
-            ],
-        )
-        self.assertEqual(
-            channel.queue_bind.call_args_list,
-            [
-                call(queue="notifications.thesis-events.dlq", exchange="thesis.events.dlx", routing_key="notifications.thesis-events"),
-                call(queue="notifications.thesis-events", exchange="thesis.events", routing_key="thesis.*"),
-                call(queue="notifications.thesis-events", exchange="thesis.events", routing_key="defense.*"),
-            ],
-        )
+        declared = {call_args.kwargs["queue"] for call_args in channel.queue_declare.call_args_list}
+        expected_declared = set()
+        for spec in topology.consumer_queues:
+            expected_declared.update({spec.queue, spec.dead_letter_queue})
+        self.assertEqual(declared, expected_declared)
+        bindings = {(item.kwargs["queue"], item.kwargs["routing_key"]) for item in channel.queue_bind.call_args_list}
+        expected_bindings = set()
+        for spec in topology.consumer_queues:
+            expected_bindings.add((spec.dead_letter_queue, spec.queue))
+            expected_bindings.update((spec.queue, routing_key) for routing_key in spec.routing_keys)
+        self.assertEqual(bindings, expected_bindings)

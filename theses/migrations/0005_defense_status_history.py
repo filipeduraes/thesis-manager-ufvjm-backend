@@ -23,7 +23,7 @@ class Migration(migrations.Migration):
                 ('new_status', models.CharField(choices=[('SCHEDULED', 'Agendada'), ('IN_PROGRESS', 'Em andamento'), ('COMPLETED', 'Realizada'), ('CANCELLED', 'Cancelada')], max_length=20)),
                 ('reason', models.TextField(blank=True, default='')),
                 ('created_at', models.DateTimeField(default=django.utils.timezone.now)),
-                ('changed_by', models.ForeignKey(blank=True, help_text='Nulo em transições automáticas (ex.: abertura pelo horário agendado).', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='defense_status_changes', to=settings.AUTH_USER_MODEL)),
+                ('changed_by', models.ForeignKey(blank=True, help_text='Nulo em transições automáticas (ex.: abertura pelo horário agendado).', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='defense_status_changes', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('defense', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='status_history', to='theses.defense')),
             ],
             options={

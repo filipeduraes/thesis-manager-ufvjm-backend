@@ -44,7 +44,7 @@ class DefenseAvailabilityTests(TestCase):
         self.president_user = create_user("pres@ufvjm.edu.br", "Profa. Presidente", ProfileRole.ADVISOR)
         self.member_user = create_user("member@ufvjm.edu.br", "Prof. Membro", ProfileRole.ADVISOR)
         self.alternate_user = create_user("alt@ufvjm.edu.br", "Prof. Suplente", ProfileRole.ADVISOR)
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
+        self.thesis = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese", status=ThesisStatus.ADVISOR_APPROVED)
         self.start = (timezone.now() + timedelta(days=7)).replace(microsecond=0)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=self.start, actor=self.admin)
         self.president = add_institutional_member(self.defense, CommitteeRole.PRESIDENT, self.president_user, actor=self.admin)
@@ -63,7 +63,7 @@ class DefenseAvailabilityTests(TestCase):
         invitation = create_external_invitation(name="Dr. Externo", email="ext@example.com", institution="UFMG", invited_by=self.admin)
         invitation.status = InvitationStatus.ACCEPTED
         invitation.save(update_fields=["status"])
-        member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation=invitation, name="Dr. Externo", email="ext@example.com")
+        member = DefenseMember.objects.create(defense=self.defense, role=CommitteeRole.MEMBER, external_invitation_id=invitation.pk, name="Dr. Externo", email="ext@example.com")
         return member, ExternalInvitationPrincipal(invitation)
 
     # --- resposta do membro ---
@@ -242,7 +242,7 @@ class AvailabilityMigrationDataTests(TestCase):
         advisor = create_user("advisor@ufvjm.edu.br", "Orientador", ProfileRole.ADVISOR)
         members_by_status: dict[str, DefenseMember] = {}
         for index, defense_status in enumerate((DefenseStatus.SCHEDULED, DefenseStatus.IN_PROGRESS, DefenseStatus.COMPLETED, DefenseStatus.CANCELLED)):
-            thesis = Thesis.objects.create(course=course, advisor=advisor, title=f"Tese {index}", status=ThesisStatus.ADVISOR_APPROVED)
+            thesis = Thesis.objects.create(course_id=course.pk, advisor_id=advisor.pk, title=f"Tese {index}", status=ThesisStatus.ADVISOR_APPROVED)
             defense = schedule_defense(thesis, scheduled_datetime=timezone.now() + timedelta(days=index + 1), actor=admin)
             member_user = create_user(f"m{index}@ufvjm.edu.br", f"Membro {index}", ProfileRole.ADVISOR)
             members_by_status[defense_status] = add_institutional_member(defense, CommitteeRole.MEMBER, member_user, actor=admin)
