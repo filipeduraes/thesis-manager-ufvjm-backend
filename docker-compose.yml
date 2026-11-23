@@ -60,7 +60,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -90,8 +90,8 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     ports:
-      - "127.0.0.1:5672:5672"
-      - "127.0.0.1:15672:15672"
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_UI_PORT:-15672}:15672"
     healthcheck:
       # Verifica se os listeners (AMQP e painel) aceitam conexões, não só se o nó está de pé.
       test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
@@ -108,7 +108,7 @@ services:
     environment:
       MP_MAX_MESSAGES: "500"
     ports:
-      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
     healthcheck:
       test: ["CMD", "/mailpit", "readyz"]
       interval: 5s
@@ -146,7 +146,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
 
   event-publisher:
     build: *backend-build
@@ -370,7 +370,7 @@ services:
       - notifications-service
       - reports-service
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
 
   frontend:
     profiles: ["frontend"]
@@ -381,13 +381,13 @@ services:
       - frontend_node_modules:/app/node_modules
     command: sh -c "npm install && npm start"
     environment:
-      REACT_APP_API_BASE_URL: http://localhost:8000
+      REACT_APP_API_BASE_URL: http://localhost:${BACKEND_PORT:-8000}
       BROWSER: "none"
       HOST: 0.0.0.0
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
     stdin_open: true
     tty: true
 
