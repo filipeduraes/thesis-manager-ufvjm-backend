@@ -51,7 +51,6 @@ class CoordinatorCourseAssignmentTests(TestCase):
     def test_admin_patch_logs_course_change_once(self) -> None:
         target = User.objects.create_user(email="aluno@ufvjm.edu.br", name="Aluno")
         course = create_course(name="Destino", code="C3", department_id=str(self.department.pk))
-        logs_before = AuditLog.objects.count()
         self.client.force_authenticate(user=self.admin)
 
         response = self.client.patch(
@@ -62,8 +61,8 @@ class CoordinatorCourseAssignmentTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
 
-        new_logs = list(AuditLog.objects.order_by("-id")[: AuditLog.objects.count() - logs_before])
-        self.assertFalse(any(log.entity_type == EntityType.USER_COURSE_ASSIGNMENT for log in new_logs))
-        user_logs = [log for log in new_logs if log.entity_type == EntityType.USER and log.entity_id == str(target.pk)]
-        self.assertEqual(len(user_logs), 1)
-        self.assertEqual(user_logs[0].changes["course"]["to"], course.name)
+        assignment_logs = AuditLog.objects.filter(entity_type=EntityType.USER_COURSE_ASSIGNMENT, entity_id=str(target.pk))
+        self.assertEqual(assignment_logs.count(), 0)
+        user_logs = AuditLog.objects.filter(entity_type=EntityType.USER, entity_id=str(target.pk))
+        self.assertEqual(user_logs.count(), 1)
+        self.assertEqual(user_logs.get().changes["course"]["to"], course.name)

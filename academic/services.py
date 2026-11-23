@@ -5,11 +5,14 @@ Domain services for the academic registry.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
+
+from thesismanagerbackend.transactions import atomic_for_model
 from django.db.models import Count, Q
 from django.http import HttpRequest
 from django.utils import timezone
@@ -259,12 +262,40 @@ def coordinator_payload(course: Course) -> dict[str, Any] | None:
     }
 
 
-def course_payload(course: Course) -> dict[str, Any]:
+def published_theses_counts(course_ids: Iterable) -> dict:
+    """
+    Count published theses per course from the thesis service database.
+
+    Args:
+        course_ids: Course identifiers to count.
+
+    Returns:
+        dict: Mapping of course id to published thesis count.
+    """
+    from django.db.models import Count
+
+    from theses.models import Thesis, ThesisStatus
+
+    identifiers = {pk for pk in course_ids if pk is not None}
+    if not identifiers:
+        return {}
+    thesis_db = database_for_model(Thesis)
+    rows = (
+        Thesis.objects.using(thesis_db)
+        .filter(course_id__in=identifiers, deleted_at__isnull=True, is_public=True, status=ThesisStatus.PUBLISHED, published_at__isnull=False)
+        .values("course_id")
+        .annotate(total=Count("pk"))
+    )
+    return {row["course_id"]: row["total"] for row in rows}
+
+
+def course_payload(course: Course, published_count: int | None = None) -> dict[str, Any]:
     """
     Serialize a course for the administrative API.
 
     Args:
         course: Course instance.
+        published_count: Precomputed count of published theses; resolved when omitted.
 
     Returns:
         dict[str, Any]: Serialized course payload.
@@ -295,11 +326,11 @@ def course_payload(course: Course) -> dict[str, Any]:
             coordinator["status"] if coordinator else "PENDING"
         ),
         "activeStudents": active_students,
-        "publishedTheses": 0,
+        "publishedTheses": published_count if published_count is not None else published_theses_counts([course.pk]).get(course.pk, 0),
     }
 
 
-@transaction.atomic
+@atomic_for_model(Department)
 def create_course(
     *,
     name: str,
@@ -326,6 +357,7 @@ def create_course(
     Raises:
         ValidationError: If required fields are missing or invalid.
     """
+    academic_db = database_for_model(Department)
     normalized_name = normalize_person_name(name)
     normalized_code = normalize_course_code(code)
     if not normalized_name:
@@ -334,7 +366,7 @@ def create_course(
         raise ValidationError({"code": "Informe o código do curso."})
 
     if department_id:
-        department = Department.objects.select_for_update().filter(pk=department_id).first()
+        department = Department.objects.using(academic_db).select_for_update().filter(pk=department_id).first()
         if not department:
             raise ValidationError({"departmentId": "Departamento inválido."})
     elif department_name:
@@ -383,7 +415,7 @@ def create_course(
     return course
 
 
-@transaction.atomic
+@atomic_for_model(Course)
 def update_course(
     course: Course,
     *,
@@ -413,7 +445,8 @@ def update_course(
         ValidationError: If required fields are missing or invalid.
     """
     # Serializa edições concorrentes do mesmo curso (evita perda de alterações).
-    course = Course.objects.select_for_update().get(pk=course.pk)
+    academic_db = database_for_model(Course)
+    course = Course.objects.using(academic_db).select_for_update().get(pk=course.pk)
     old_department_id = course.department_id
     changes: dict[str, Any] = {}
 
@@ -476,7 +509,7 @@ def update_course(
     return course
 
 
-@transaction.atomic
+@atomic_for_model(Course)
 def delete_course(course: Course, request: HttpRequest | None = None) -> None:
     """
     Delete a course and prune orphan departments when applicable.

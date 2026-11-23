@@ -12,6 +12,7 @@ from django.utils.dateparse import parse_datetime
 
 from events.catalog import EventType
 from events.envelope import EventEnvelope
+from accounts.concurrency import database_for_model
 from events.models import ProcessedEvent
 from reports_readmodel.models import ReportFact
 from theses.models import Defense, Thesis, ThesisStatus
@@ -37,13 +38,13 @@ def _fact(thesis_id: str) -> ReportFact:
     """Return the fact of a thesis, loading identity data when needed."""
     fact, _ = ReportFact.objects.get_or_create(thesis_id=thesis_id)
     if not fact.course_id:
-        thesis = Thesis.objects.using("default").filter(pk=thesis_id).select_related("course", "advisor").first()
+        thesis = Thesis.objects.using("default").filter(pk=thesis_id).first()
         if thesis is not None:
             fact.course_id = thesis.course_id
-            fact.course_name = thesis.course.name if thesis.course_id else ""
-            fact.course_code = thesis.course.code if thesis.course_id else ""
+            fact.course_name = thesis.course_name
+            fact.course_code = thesis.course_code
             fact.advisor_id = thesis.advisor_id
-            fact.advisor_name = thesis.advisor.name if thesis.advisor_id else ""
+            fact.advisor_name = thesis.advisor_name
             fact.save(update_fields=["course_id", "course_name", "course_code", "advisor_id", "advisor_name"])
     return fact
 
@@ -54,11 +55,10 @@ def handle_event(envelope: EventEnvelope) -> str:
         return "SKIPPED"
     if set(envelope.payload) != EXPECTED_KEYS[envelope.event_type]:
         return "REJECTED"
-    with transaction.atomic():
-        try:
-            ProcessedEvent.objects.create(consumer_group="reports", event_id=envelope.event_id)
-        except IntegrityError:
-            return "DUPLICATE"
+    marker_db = database_for_model(ProcessedEvent)
+    if ProcessedEvent.objects.using(marker_db).filter(consumer_group="reports", event_id=envelope.event_id).exists():
+        return "DUPLICATE"
+    with transaction.atomic(using=database_for_model(ReportFact)):
         payload = envelope.payload
         fact = _fact(payload["thesisId"])
         if envelope.event_type == EventType.THESIS_SUBMITTED:
@@ -85,4 +85,9 @@ def handle_event(envelope: EventEnvelope) -> str:
                 fact.defense_year = thesis.defense_year
                 fact.defense_at = thesis.defense_date if thesis.defense_date else fact.defense_at
         fact.save()
+    try:
+        with transaction.atomic(using=marker_db):
+            ProcessedEvent.objects.using(marker_db).create(consumer_group="reports", event_id=envelope.event_id)
+    except IntegrityError:
+        return "DUPLICATE"
     return "PROCESSED"

@@ -5,6 +5,10 @@ x-backend-build: &backend-build
   context: .
   dockerfile: Dockerfile
 
+x-backend-volumes: &backend-volumes
+  - .:/app
+  - media_data:/app/media
+
 x-backend-environment: &backend-environment
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-only-change-before-deploy}
   DEBUG: ${DEBUG:-True}
@@ -32,6 +36,7 @@ x-backend-environment: &backend-environment
   ADMIN_ALLOWED_CIDRS: "127.0.0.1/32,::1/128,172.16.0.0/12"
   EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
   SERVICE_TOKEN: ${SERVICE_TOKEN:-local-service-token-change-before-deploy}
+  MEDIA_ROOT: /app/media
   SERVICE_DATABASES_SHARED: "False"
   INDEXING_QUEUE: ${INDEXING_QUEUE:-indexing.thesis-events}
   ADJUDICATION_QUEUE: ${ADJUDICATION_QUEUE:-adjudication.thesis-events}
@@ -92,8 +97,7 @@ services:
   init:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: sh -c "python manage.py ensure_service_databases && for db in auth default committee repository reports notifications; do python manage.py migrate --database $$db --noinput || exit 1; done && python manage.py declare_event_topology"
     environment: *backend-environment
     restart: "no"
@@ -108,8 +112,7 @@ services:
   backend:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
     environment: *backend-environment
     depends_on:
@@ -125,8 +128,7 @@ services:
   event-publisher:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     # Forma de lista (sem sh -c) para o SIGTERM chegar ao processo Python e o encerramento ser limpo.
     command: ["python", "manage.py", "publish_outbox_events"]
     environment: *backend-environment
@@ -142,8 +144,7 @@ services:
   notification-consumer:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "consume_notifications"]
     environment: *backend-environment
     restart: unless-stopped
@@ -158,8 +159,7 @@ services:
   indexing-consumer:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "consume_indexing_events"]
     environment: *backend-environment
     restart: unless-stopped
@@ -174,8 +174,7 @@ services:
   adjudication-consumer:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "consume_adjudication_events"]
     environment: *backend-environment
     restart: unless-stopped
@@ -193,8 +192,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8011"]
     environment:
       <<: *backend-environment
@@ -213,8 +211,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8012"]
     environment:
       <<: *backend-environment
@@ -233,8 +230,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8013"]
     environment:
       <<: *backend-environment
@@ -253,8 +249,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8014"]
     environment:
       <<: *backend-environment
@@ -273,8 +268,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8015"]
     environment:
       <<: *backend-environment
@@ -293,8 +287,7 @@ services:
     profiles: ["microservices"]
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "runserver", "0.0.0.0:8016"]
     environment:
       <<: *backend-environment
@@ -312,8 +305,7 @@ services:
   repository-projection:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "consume_repository_events"]
     environment: *backend-environment
     restart: unless-stopped
@@ -328,8 +320,7 @@ services:
   reports-projection:
     build: *backend-build
     working_dir: /app
-    volumes:
-      - .:/app
+    volumes: *backend-volumes
     command: ["python", "manage.py", "consume_reports_events"]
     environment: *backend-environment
     restart: unless-stopped
@@ -376,6 +367,7 @@ services:
     tty: true
 
 volumes:
+  media_data:
   postgres_data:
   redis_data:
   rabbitmq_data:

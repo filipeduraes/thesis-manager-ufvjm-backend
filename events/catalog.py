@@ -25,6 +25,9 @@ class EventType(models.TextChoices):
     DEFENSE_MEMBER_INVITED = "defense.member_invited", "Membro da banca convidado"
     DEFENSE_EVALUATION_RECORDED = "defense.evaluation_recorded", "Avaliação registrada"
     DEFENSE_COMPLETED = "defense.completed", "Banca concluída"
+    DEFENSE_CANCELLED = "defense.cancelled", "Banca cancelada"
+    DEFENSE_RESCHEDULED = "defense.rescheduled", "Banca remarcada"
+    THESIS_REVIEW_RECORDED = "thesis.review_recorded", "Parecer do orientador registrado"
     THESIS_DEFENSE_RESULT_RECORDED = "thesis.defense_result_recorded", "Resultado da banca registrado"
     THESIS_PUBLISHED = "thesis.published", "Monografia publicada"
 
@@ -40,6 +43,9 @@ PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     EventType.DEFENSE_MEMBER_INVITED: frozenset({"defenseId", "thesisId", "memberId", "invitationId"}),
     EventType.DEFENSE_EVALUATION_RECORDED: frozenset({"defenseId", "thesisId", "memberId", "isUpdate"}),
     EventType.DEFENSE_COMPLETED: frozenset({"defenseId", "thesisId", "result", "thesisNewStatus", "automatic"}),
+    EventType.DEFENSE_CANCELLED: frozenset({"defenseId", "thesisId", "previousStatus"}),
+    EventType.DEFENSE_RESCHEDULED: frozenset({"defenseId", "thesisId", "scheduledDatetime", "durationMinutes"}),
+    EventType.THESIS_REVIEW_RECORDED: frozenset({"thesisId", "reviewDecision"}),
     EventType.THESIS_DEFENSE_RESULT_RECORDED: frozenset({"thesisId", "result", "thesisNewStatus"}),
     EventType.THESIS_PUBLISHED: frozenset({"thesisId", "referenceCode", "publishedAt"}),
 }

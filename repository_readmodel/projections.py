@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from django.db import transaction
 
+from accounts.concurrency import database_for_model
 from events.catalog import EventType
 from events.envelope import EventEnvelope
 from repository_readmodel.models import PublicAdvisor, PublicCourse, PublicKeyword, PublicThesis
@@ -24,7 +25,7 @@ def project_thesis(thesis_id: str) -> None:
     Args:
         thesis_id: Identifier from the event payload.
     """
-    thesis = Thesis.objects.using("default").filter(pk=thesis_id).select_related("course", "advisor").first()
+    thesis = Thesis.objects.using("default").filter(pk=thesis_id).first()
     if thesis is None or thesis.status != ThesisStatus.PUBLISHED or not thesis.is_public or thesis.deleted_at is not None:
         PublicThesis.objects.filter(pk=thesis_id).delete()
         return
@@ -36,11 +37,11 @@ def project_thesis(thesis_id: str) -> None:
     if thesis.course_id:
         course, _ = PublicCourse.objects.update_or_create(
             pk=thesis.course_id,
-            defaults={"name": thesis.course.name, "code": thesis.course.code},
+            defaults={"name": thesis.course_name, "code": thesis.course_code},
         )
     advisor = None
     if thesis.advisor_id:
-        advisor, _ = PublicAdvisor.objects.update_or_create(pk=thesis.advisor_id, defaults={"name": thesis.advisor.name})
+        advisor, _ = PublicAdvisor.objects.update_or_create(pk=thesis.advisor_id, defaults={"name": thesis.advisor_name})
     PublicThesis.objects.update_or_create(
         pk=thesis.pk,
         defaults={
@@ -108,10 +109,14 @@ def handle_event(envelope: EventEnvelope) -> str:
     from events.models import ProcessedEvent
     from django.db import IntegrityError
 
-    with transaction.atomic():
-        try:
-            ProcessedEvent.objects.create(consumer_group="repository", event_id=envelope.event_id)
-        except IntegrityError:
-            return "DUPLICATE"
+    marker_db = database_for_model(ProcessedEvent)
+    if ProcessedEvent.objects.using(marker_db).filter(consumer_group="repository", event_id=envelope.event_id).exists():
+        return "DUPLICATE"
+    with transaction.atomic(using=database_for_model(PublicThesis)):
         project_thesis(envelope.payload["thesisId"])
+    try:
+        with transaction.atomic(using=marker_db):
+            ProcessedEvent.objects.using(marker_db).create(consumer_group="repository", event_id=envelope.event_id)
+    except IntegrityError:
+        return "DUPLICATE"
     return "PROCESSED"

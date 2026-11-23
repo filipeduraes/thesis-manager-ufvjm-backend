@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+
+from accounts.concurrency import database_for_model
+from thesismanagerbackend.transactions import atomic_for_model
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -28,6 +31,7 @@ from academic.services import (
     department_payload,
     get_or_create_department,
     prune_orphan_departments,
+    published_theses_counts,
     update_course,
 )
 from accounts.audit_identifiers import EntityType
@@ -106,7 +110,7 @@ class AdminDepartmentsView(APIView):
         results = [department_payload(item) for item in queryset]
         return Response({"results": results, "count": len(results)})
 
-    @transaction.atomic
+    @atomic_for_model(Department)
     def post(self, request) -> Response:
         """
         Create or reuse a department.
@@ -139,7 +143,7 @@ class AdminDepartmentDetailView(APIView):
     permission_classes = [IsInstitutionalAdmin]
     throttle_scope = "session"
 
-    @transaction.atomic
+    @atomic_for_model(Department)
     def patch(self, request, department_id) -> Response:
         """
         Update a department.
@@ -151,8 +155,9 @@ class AdminDepartmentDetailView(APIView):
         Returns:
             Response: Updated department payload or validation error.
         """
+        department_db = database_for_model(Department)
         department = get_object_or_404(
-            Department.objects.select_for_update(), pk=department_id
+            Department.objects.using(department_db).select_for_update(), pk=department_id
         )
         serializer = DepartmentWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -177,7 +182,7 @@ class AdminDepartmentDetailView(APIView):
             ))
         return Response(department_payload(department))
 
-    @transaction.atomic
+    @atomic_for_model(Department)
     def delete(self, request, department_id) -> Response:
         """
         Delete a department when it has no associated courses.
@@ -247,7 +252,8 @@ class AdminCoursesView(APIView):
             )
         paginator = AdminPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
-        data = [course_payload(course) for course in page]
+        counts = published_theses_counts(course.pk for course in page)
+        data = [course_payload(course, counts.get(course.pk, 0)) for course in page]
         return paginator.get_paginated_response(data)
 
     def post(self, request) -> Response:

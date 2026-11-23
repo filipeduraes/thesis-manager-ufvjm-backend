@@ -22,7 +22,7 @@ from accounts.models import AuditAction, AuditLog, User
 from accounts.services import avatar_urls_for, record_audit
 from theses.audit import audit_defense
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
-from theses.events import record_defense_completed, record_defense_scheduled
+from theses.events import record_defense_cancelled, record_defense_completed, record_defense_rescheduled, record_defense_scheduled
 from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import PublicationTrigger, publish_if_ready, purge_thesis_versions, thesis_summary_payload, user_is_admin
 
@@ -74,7 +74,7 @@ def record_defense_status_change(defense: Defense, previous_status: str, changed
     Returns:
         DefenseStatusHistory: Created history entry.
     """
-    return DefenseStatusHistory.objects.create(defense=defense, previous_status=previous_status, new_status=defense.status, changed_by=changed_by, reason=reason)
+    return DefenseStatusHistory.objects.create(defense=defense, previous_status=previous_status, new_status=defense.status, changed_by_id=changed_by.pk if changed_by else None, reason=reason)
 
 
 def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
@@ -159,7 +159,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         location=clean_location,
         notes=notes.strip(),
         status=DefenseStatus.SCHEDULED,
-        created_by=actor,
+        created_by_id=actor.pk,
     )
     record_defense_status_change(defense, "", actor, "Banca agendada.")
 
@@ -170,7 +170,7 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         thesis=thesis,
         previous_status=previous_status,
         new_status=ThesisStatus.DEFENSE_SCHEDULED,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason="Defesa agendada.",
         metadata={"defenseId": str(defense.pk)},
     )
@@ -206,7 +206,7 @@ def _transition_defense_to_in_progress(defense: Defense, thesis: Thesis, *, chan
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=ThesisStatus.UNDER_EVALUATION,
-        changed_by=changed_by,
+        changed_by_id=changed_by.pk if changed_by else None,
         reason=reason,
         metadata={"defenseId": str(defense.pk)},
     )
@@ -333,6 +333,8 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         actor_user=actor,
         metadata=event_payload(AuditEvent.DEFENSE_UPDATED, availabilityReset=availability_reset),
     )
+    if datetime_changed or duration_changed:
+        record_defense_rescheduled(defense)
     return defense
 
 
@@ -376,7 +378,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=restore_to,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason=cancel_reason,
         metadata={"defenseId": str(defense.pk)},
     )
@@ -394,6 +396,7 @@ def cancel_defense(defense: Defense, *, reason: str = "", actor: User, request: 
         actor_user=actor,
         metadata=event_payload(AuditEvent.DEFENSE_CANCELLED, reason=reason),
     )
+    record_defense_cancelled(defense, previous_status=defense.previous_status)
     return defense
 
 
@@ -544,7 +547,7 @@ def _finalize_defense(defense: Defense, *, closed_by: User | None, automatic: bo
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=new_thesis_status,
-        changed_by=closed_by,
+        changed_by_id=closed_by.pk if closed_by else None,
         reason=result_reason,
         metadata={"defenseId": str(defense.pk), "defenseResult": result, "automatic": automatic},
     )
@@ -631,7 +634,7 @@ def revert_defense_status(defense: Defense, *, reason: str, actor: User, request
         thesis=thesis,
         previous_status=previous_thesis_status,
         new_status=ThesisStatus.DEFENSE_SCHEDULED,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason=f"Status da banca revertido pelo administrador. {reason}".strip(),
         metadata={"defenseId": str(defense.pk)},
     )

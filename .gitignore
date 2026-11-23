@@ -143,3 +143,8 @@ GitHub.sublime-settings
 .history
 
 e2e.sqlite3
+e2e.sqlite3-wal
+e2e.sqlite3-shm
+e2e-*.sqlite3
+e2e-*.sqlite3-wal
+e2e-*.sqlite3-shm

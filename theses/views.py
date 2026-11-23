@@ -30,6 +30,7 @@ from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
 from accounts.services import google_social_accounts_prefetch,  record_audit
 from academic.services import active_course_assignment
 from theses.filters import parse_year_filter
+from thesismanagerbackend.throttling import ClientIpScopedRateThrottle, DailyUploadThrottle
 from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
 from theses.models import (
     REVIEWABLE_STATUSES,
@@ -405,6 +406,7 @@ class StudentThesisFileUploadView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsStudentUser]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request) -> Response:
         """
@@ -556,6 +558,7 @@ class LegacyThesisCreateView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsAcademicManager]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request) -> Response:
         """
@@ -621,6 +624,7 @@ class PublishedThesisFileView(APIView):
 
     permission_classes = [IsInstitutionalUser, IsAcademicManager]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request, thesis_id) -> Response:
         """
@@ -854,6 +858,7 @@ class ThesisDocumentUploadView(APIView):
 
     permission_classes = [IsInstitutionalUser]
     throttle_scope = "thesis_upload"
+    throttle_classes = [ClientIpScopedRateThrottle, DailyUploadThrottle]
 
     def post(self, request, thesis_id) -> Response:
         """

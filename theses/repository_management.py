@@ -239,7 +239,7 @@ def _replace_authors(thesis: Thesis, authors: list[LegacyAuthor]) -> None:
     """
     thesis.authors.all().delete()
     for position, author in enumerate(authors, start=1):
-        ThesisAuthor.objects.create(thesis=thesis, author=author.user, name=author.name, position=position, is_main_author=position == 1)
+        ThesisAuthor.objects.create(thesis=thesis, author_id=author.user.pk if author.user else None, name=author.name, position=position, is_main_author=position == 1)
 
 
 def _ensure_pdf_not_in_other_thesis(digest: bytes, thesis: Thesis | None = None) -> None:
@@ -297,8 +297,8 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     now = timezone.now()
     defense_date = clean.defense_date
     thesis = Thesis.objects.create(
-        course=clean.course,
-        advisor=clean.advisor,
+        course_id=clean.course.pk,
+        advisor_id=clean.advisor.pk,
         advisor_name=clean.advisor.name or clean.advisor.email,
         course_name=clean.course.name,
         course_code=clean.course.code,
@@ -317,7 +317,7 @@ def import_legacy_thesis(user: User, metadata: ThesisMetadataInput, result: str,
     _replace_authors(thesis, clean.authors)
     _sync_keywords(thesis, clean.keywords)
     stored_file = _store_pdf(uploaded_file, thesis, user, "THESIS_MAX_PDF_SIZE_MB", 50)
-    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, change_description="Versão publicada (cadastro de acervo).", uploaded_by=user, hash_verified_at=now)
+    ThesisFile.objects.create(thesis=thesis, stored_file=stored_file, version_number=1, is_current=True, change_description="Versão publicada (cadastro de acervo).", uploaded_by_id=user.pk, hash_verified_at=now)
     history_metadata = {"event": AuditEvent.LEGACY_IMPORT.value, "origin": ThesisOrigin.LEGACY_IMPORT, "result": result, "versionNumber": 1, "sha256": stored_file.sha256_hex}
     _add_status_history(thesis, "", ThesisStatus.PUBLISHED, user, "Monografia cadastrada manualmente a partir do acervo anterior ao sistema.", metadata=history_metadata)
     audit_metadata = event_payload(AuditEvent.LEGACY_IMPORT, result=result, defenseYear=clean.defense_year, sha256=stored_file.sha256_hex, sizeBytes=stored_file.size_bytes)
@@ -434,8 +434,8 @@ def update_published_thesis(user: User, thesis: Thesis, metadata: ThesisMetadata
     thesis.abstract = clean.abstract
     thesis.type = clean.thesis_type
     thesis.journal = clean.journal
-    thesis.advisor = clean.advisor
-    thesis.course = clean.course
+    thesis.advisor_id = clean.advisor.pk
+    thesis.course_id = clean.course.pk
     thesis.defense_year = clean.defense_year
     thesis.defense_date = clean.defense_date
     thesis.save()

@@ -516,7 +516,7 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
     if User.objects.filter(email__iexact=normalized_email).exists():
         raise UserAlreadyExistsError("Já existe um usuário com este e-mail.")
 
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(User)):
         user = User.objects.create_user(
             email=normalized_email,
             name=name.strip(),
@@ -576,7 +576,7 @@ def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: Us
     """
     Reactivate a previously soft-deleted user.
     """
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(User)):
         if not user.is_active:
             user.is_active = True
             user.save(update_fields=["is_active"])
@@ -648,7 +648,7 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             hours=getattr(settings, "EXTERNAL_INVITATION_TOKEN_TTL_HOURS", 72)
         )
 
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(ExternalInvitation)):
         invitation = ExternalInvitation.objects.create(
             invited_by=invited_by,
             name=name.strip(),
@@ -691,15 +691,16 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
         }
     ).first()
     if expired is not None:
-        with transaction.atomic():
-            ExternalInvitation.objects.filter(pk=expired.pk).update(
+        with transaction.atomic(using=database_for_model(ExternalInvitation)):
+            ExternalInvitation.objects.using(database_for_model(ExternalInvitation)).filter(pk=expired.pk).update(
                 status=InvitationStatus.EXPIRED
             )
         raise ExternalTokenError("Token inválido ou expirado.")
 
-    with transaction.atomic():
+    invitation_db = database_for_model(ExternalInvitation)
+    with transaction.atomic(using=invitation_db):
         try:
-            invitation = ExternalInvitation.objects.select_for_update().get(
+            invitation = ExternalInvitation.objects.using(invitation_db).select_for_update().get(
                 token_hash=digest
             )
         except ExternalInvitation.DoesNotExist as exc:

@@ -30,7 +30,7 @@ from accounts.concurrency import THESIS_DRAFT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User
 from accounts.network import get_client_ip
 from accounts.services import active_role_codes, record_audit
-from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_submitted, record_thesis_text_extraction_requested
+from theses.events import record_thesis_defense_result_recorded, record_thesis_published, record_thesis_review_recorded, record_thesis_submitted, record_thesis_text_extraction_requested
 from theses.repository_cache import invalidate_public_repository_cache
 from theses.search_index import refresh_search_text
 from theses.uploads import clear_upload_in_progress, mark_upload_in_progress, upload_in_progress
@@ -501,7 +501,7 @@ def _add_status_history(thesis: Thesis, previous_status: str, new_status: str, a
         thesis=thesis,
         previous_status=previous_status or "",
         new_status=new_status,
-        changed_by=actor,
+        changed_by_id=actor.pk if actor else None,
         reason=reason,
         metadata=metadata or {},
     )
@@ -597,7 +597,7 @@ def _sync_coauthors(thesis: Thesis, coauthors: list[User]) -> None:
         if coauthor.pk in current:
             ThesisAuthor.objects.filter(thesis=thesis, author=coauthor).update(position=next_position)
         else:
-            ThesisAuthor.objects.create(thesis=thesis, author=coauthor, name=coauthor.name or coauthor.email, position=next_position)
+            ThesisAuthor.objects.create(thesis=thesis, author_id=coauthor.pk, name=coauthor.name or coauthor.email, position=next_position)
         next_position += 1
 
 
@@ -652,8 +652,8 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     if thesis is not None:
         _ensure_student_owner(user, thesis)
         _ensure_editable(thesis)
-        thesis.course = course
-        thesis.advisor = advisor
+        thesis.course_id = course.pk
+        thesis.advisor_id = advisor.pk
         for field, value in identity.items():
             setattr(thesis, field, value)
         thesis.title = clean_title
@@ -663,8 +663,8 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         thesis.save()
     else:
         thesis = Thesis.objects.create(
-            course=course,
-            advisor=advisor,
+            course_id=course.pk,
+            advisor_id=advisor.pk,
             **identity,
             title=clean_title,
             abstract=clean_abstract,
@@ -674,7 +674,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         )
         ThesisAuthor.objects.create(
             thesis=thesis,
-            author=user,
+            author_id=user.pk,
             name=user.name or user.email,
             position=1,
             is_main_author=True,
@@ -796,7 +796,7 @@ def _store_pdf(uploaded_file: Any, thesis: Thesis, user: User, setting_name: str
         size_bytes=size,
         sha256=digest,
         storage_path=stored_name,
-        uploaded_by=user,
+        uploaded_by_id=user.pk,
         processing_status=ProcessingStatus.PENDING,
     )
     transaction.on_commit(lambda: mark_upload_in_progress(digest_hex))
@@ -875,7 +875,7 @@ def _add_thesis_version(thesis: Thesis, stored_file: StoredFile, user: User, cha
         is_current=True,
         is_correction=is_correction,
         change_description=(change_description or "").strip(),
-        uploaded_by=user,
+        uploaded_by_id=user.pk,
     )
 
 
@@ -1076,7 +1076,7 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
         audit_action = AuditAction.REJECT
     review = ThesisReview.objects.create(
         thesis_file=current,
-        reviewer=user,
+        reviewer_id=user.pk,
         decision=decision,
         comments=clean_comments,
         recommendations=(recommendations or "").strip(),
@@ -1100,6 +1100,7 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
         user,
         metadata={"decision": decision, "versionNumber": current.version_number, "reviewId": str(review.pk)},
     )
+    record_thesis_review_recorded(thesis, decision)
     return review
 
 
@@ -1496,7 +1497,7 @@ def upload_thesis_document(user: User, thesis: Thesis, document_type: str, uploa
         stored_file=stored_file,
         type=document_type,
         status=DocumentStatus.SUBMITTED,
-        submitted_by=user,
+        submitted_by_id=user.pk,
     )
     _audit_thesis(
         AuditAction.UPLOAD,
@@ -1533,7 +1534,7 @@ def validate_thesis_document(user: User, thesis: Thesis, document: ThesisDocumen
     if document.status == DocumentStatus.VALIDATED:
         return document
     document.status = DocumentStatus.VALIDATED
-    document.validated_by = user
+    document.validated_by_id = user.pk
     document.validated_at = timezone.now()
     document.rejection_reason = ""
     document.save(update_fields=["status", "validated_by", "validated_at", "rejection_reason"])

@@ -193,6 +193,28 @@ def record_defense_completed(defense: Defense, result: str, thesis_new_status: s
     return record_event(EventType.DEFENSE_COMPLETED, _defense_aggregate(defense), payload)
 
 
+def record_defense_cancelled(defense: Defense, previous_status: str) -> OutboxEvent:
+    """Record ``defense.cancelled`` with the previous defense status code."""
+    payload = {"defenseId": str(defense.pk), "thesisId": str(defense.thesis_id), "previousStatus": previous_status}
+    return record_event(EventType.DEFENSE_CANCELLED, _defense_aggregate(defense), payload)
+
+
+def record_defense_rescheduled(defense: Defense) -> OutboxEvent:
+    """Record ``defense.rescheduled`` after a date or duration change."""
+    payload = {
+        "defenseId": str(defense.pk),
+        "thesisId": str(defense.thesis_id),
+        "scheduledDatetime": _isoformat(defense.scheduled_datetime),
+        "durationMinutes": defense.duration_minutes,
+    }
+    return record_event(EventType.DEFENSE_RESCHEDULED, _defense_aggregate(defense), payload)
+
+
+def record_thesis_review_recorded(thesis: Thesis, decision: str) -> OutboxEvent:
+    """Record ``thesis.review_recorded`` after an advisor review."""
+    return record_event(EventType.THESIS_REVIEW_RECORDED, _thesis_aggregate(thesis), {"thesisId": str(thesis.pk), "reviewDecision": decision})
+
+
 def record_thesis_defense_result_recorded(thesis: Thesis, result: str, thesis_new_status: str) -> OutboxEvent:
     """
     Record ``thesis.defense_result_recorded`` when a manager records the result without a ``Defense``.

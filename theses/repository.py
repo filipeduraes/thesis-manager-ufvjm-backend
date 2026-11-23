@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from django.db.models import Case, Count, F, IntegerField, Q, QuerySet, Value, When
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
+from django.db import connection
+from django.db.models import Case, Count, ExpressionWrapper, F, FloatField, IntegerField, Q, QuerySet, Value, When
 from django.db.models.functions import Coalesce, ExtractYear, Lower
 
 from academic.models import Course
@@ -151,6 +153,26 @@ def defense_year_expression() -> Coalesce:
     return Coalesce(F("defense_year"), publication_year, output_field=IntegerField())
 
 
+def use_postgres_full_text() -> bool:
+    """
+    Tell whether PostgreSQL full-text search is available in this environment.
+
+    Returns:
+        bool: True only for the production PostgreSQL connection.
+    """
+    return connection.vendor == "postgresql"
+
+
+def _full_text_vector() -> SearchVector:
+    """Return the expression indexed by the repository GIN index."""
+    return SearchVector("search_text", config="portuguese")
+
+
+def _full_text_query(query: str) -> SearchQuery:
+    """Return the tsquery for a normalized user-supplied search string."""
+    return SearchQuery(search_term(query), config="portuguese", search_type="websearch")
+
+
 def _free_text_filter(query: str) -> Q:
     """
     Build the accent-insensitive free-text filter over the normalized index.
@@ -170,7 +192,7 @@ def _free_text_filter(query: str) -> Q:
     return combined
 
 
-def _relevance_expression(query: str) -> Any:
+def _relevance_expression(query: str, vector: SearchVector | None = None, text_query: SearchQuery | None = None) -> Any:
     """
     Build the relevance score for a free-text query.
 
@@ -191,6 +213,9 @@ def _relevance_expression(query: str) -> Any:
     score: Any = Value(0)
     for condition, weight in conditions:
         score = score + Case(When(condition, then=Value(weight)), default=Value(0), output_field=IntegerField())
+    if vector is not None and text_query is not None:
+        rank = SearchRank(vector, text_query)
+        score = ExpressionWrapper(score + rank * 10, output_field=FloatField())
     return score
 
 
@@ -208,7 +233,13 @@ def search_public_theses(filters: PublicSearchFilters) -> QuerySet[Thesis]:
         QuerySet[Thesis]: Ordered public queryset with list relations prefetched.
     """
     queryset = public_theses_queryset().annotate(repository_year=defense_year_expression())
-    if filters.query:
+    search_vector = None
+    text_query = None
+    if filters.query and use_postgres_full_text():
+        search_vector = _full_text_vector()
+        text_query = _full_text_query(filters.query)
+        queryset = queryset.annotate(repository_search=search_vector).filter(repository_search=text_query)
+    elif filters.query:
         queryset = queryset.filter(_free_text_filter(filters.query))
     if filters.title:
         queryset = queryset.filter(search_text__icontains=field_term("title", filters.title))
@@ -230,7 +261,7 @@ def search_public_theses(filters: PublicSearchFilters) -> QuerySet[Thesis]:
     if ordering == ORDERING_TITLE:
         return queryset.order_by(Lower("title"), "-published_at", "pk")
     if ordering == ORDERING_RELEVANCE:
-        queryset = queryset.annotate(relevance=_relevance_expression(filters.query))
+        queryset = queryset.annotate(relevance=_relevance_expression(filters.query, search_vector, text_query))
         return queryset.order_by("-relevance", F("defense_date").desc(nulls_last=True), "-published_at", "pk")
     return queryset.order_by(F("defense_date").desc(nulls_last=True), "-published_at", "pk")
 

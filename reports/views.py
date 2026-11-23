@@ -5,6 +5,7 @@ Read-only reporting endpoints for coordinator and administrator dashboards.
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
 from django.http import HttpResponse
 from django.utils import timezone
@@ -19,6 +20,8 @@ from accounts.audit_entry import AuditEntry
 from accounts.models import AuditAction
 from accounts.permissions import IsCoordinatorOrAdmin
 from accounts.services import record_audit
+from reports.csv_export import render_overview_csv
+from reports.models import ReportExecution
 from reports.pdf import render_overview_pdf, report_pdf_filename
 from reports.serializers import OverviewFiltersSerializer
 from reports.services import ReportFilters, get_overview_payload, resolve_report_scope
@@ -58,10 +61,27 @@ class ReportsOverviewView(APIView):
         filters = filters_serializer.to_filters()
         scope = resolve_report_scope(request.user, filters)
         payload = get_overview_payload(scope, filters)
+        record_execution(request, scope.code, filters, "json")
         return Response(payload, status=status.HTTP_200_OK)
 
 
-def _export_audit_metadata(scope_code: str, filters: ReportFilters) -> dict[str, str | int | None]:
+def record_execution(request: Request, scope_code: str, filters: ReportFilters, report_format: str) -> None:
+    """Persist one report execution in the reporting service database."""
+    user = getattr(request, "user", None)
+    ReportExecution.objects.create(
+        actor_id=getattr(user, "pk", uuid4()),
+        actor_name=getattr(user, "name", "") or "",
+        format=report_format,
+        scope=scope_code,
+        filters={
+            "courseId": str(filters.course_id) if filters.course_id else None,
+            "advisorId": str(filters.advisor_id) if filters.advisor_id else None,
+            "year": filters.year,
+        },
+    )
+
+
+def _export_audit_metadata(scope_code: str, filters: ReportFilters, report_format: str = "pdf") -> dict[str, str | int | None]:
     """
     Build the audit metadata of a report export: identifiers only, no names.
 
@@ -73,7 +93,7 @@ def _export_audit_metadata(scope_code: str, filters: ReportFilters) -> dict[str,
         dict[str, str | int | None]: Metadata stored in ``audit_log``.
     """
     return {
-        "format": "pdf",
+        "format": report_format,
         "scope": scope_code,
         "courseId": str(filters.course_id) if filters.course_id else None,
         "advisorId": str(filters.advisor_id) if filters.advisor_id else None,
@@ -137,9 +157,38 @@ class ReportsOverviewPdfView(APIView):
             request=request,
             metadata=_export_audit_metadata(scope.code, filters),
         ))
+        record_execution(request, scope.code, filters, "pdf")
         logger.info("Reports overview PDF exported: scope=%s size=%d", scope.code, len(pdf_content))
         filename = report_pdf_filename(generated_at)
         response = HttpResponse(pdf_content, content_type=PDF_CONTENT_TYPE)
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class ReportsOverviewCsvView(ReportsOverviewPdfView):
+    """``GET /api/v1/reports/overview/csv``: overview report as a CSV download."""
+
+    def get(self, request: Request) -> HttpResponse:
+        """Render the caller's overview report as a CSV attachment."""
+        filters_serializer = OverviewFiltersSerializer(data=request.query_params)
+        if not filters_serializer.is_valid():
+            return Response(filters_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        filters = filters_serializer.to_filters()
+        scope = resolve_report_scope(request.user, filters)
+        payload = get_overview_payload(scope, filters)
+        generated_at = timezone.now()
+        csv_content = render_overview_csv(payload)
+        record_audit(AuditEntry(
+            action=AuditAction.DOWNLOAD,
+            entity_type=EntityType.REPORT_OVERVIEW,
+            entity_id="overview",
+            request=request,
+            metadata=_export_audit_metadata(scope.code, filters, "csv"),
+        ))
+        record_execution(request, scope.code, filters, "csv")
+        logger.info("Reports overview CSV exported: scope=%s size=%d", scope.code, len(csv_content))
+        response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="relatorio-tcc-{generated_at:%Y%m%d-%H%M}.csv"'
         response["Cache-Control"] = "no-store"
         return response

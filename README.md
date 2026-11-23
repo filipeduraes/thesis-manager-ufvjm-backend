@@ -42,6 +42,30 @@ No Google OAuth, cadastre este endereço de retorno:
 http://localhost:8000/accounts/google/login/callback/
 ```
 
+### Decisão de autenticação: Google Workspace institucional
+
+O sistema **não mantém login e senha locais** para usuários institucionais. A
+autenticação é feita exclusivamente pelo Google Workspace, por meio do
+`django-allauth` em modo headless/social (`SOCIALACCOUNT_ONLY=True`). Além da
+autenticação do próprio Google, o backend valida o domínio institucional
+(`INSTITUTIONAL_EMAIL_DOMAIN`), o `email_verified` e o `hd` retornados pelo
+provedor.
+
+Assim, a credencial (login e senha) é conferida pelo provedor de identidade da
+UFVJM e a aplicação recebe apenas uma sessão já autenticada. Não armazenamos
+senhas, hashes de senha nem fluxo de recuperação no banco: isso reduz a
+superfície de exposição e evita duplicar a política de senhas da instituição.
+O primeiro login provê o usuário local e atribui o perfil padrão `STUDENT`; os
+demais perfis são derivados do banco, nunca do cliente.
+
+Membros externos da banca não possuem conta permanente: acessam por token
+temporário com TTL e escopo limitado, sem cadastro local.
+
+Essa decisão é tratada como política do projeto: o requisito de "login e senha"
+do enunciado é atendido por delegação ao IdP institucional, com integração ao
+domínio da faculdade. Não introduzir formulário de senha, cadastro local nem
+recuperação de senha sem uma decisão explícita e documentada.
+
 ## Iniciar o backend com Docker Compose
 
 O comando padrão inicia PostgreSQL, Redis, RabbitMQ, o backend e os workers de eventos. Não requer o repositório do frontend:
@@ -132,6 +156,34 @@ python manage.py check
 python manage.py test
 ```
 
+### Suítes de teste
+
+```bash
+# Rápida (~1 min): rode a cada mudança. Regras de domínio, permissões,
+# roteamento entre serviços, transições de estado e contratos de API.
+DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e python manage.py test_fast
+
+# Completa (~8 min): depois de mudanças grandes, antes de finalizar/mergear.
+DJANGO_SETTINGS_MODULE=thesismanagerbackend.settings_e2e python manage.py test
+
+# E2E (frontend): inclui os fluxos de UI; ~1 min.
+cd ../thesis-manager-ufvjm-frontend && npm run test:e2e
+```
+
+As duas suítes usam `settings_e2e` (SQLite, cache em memória, e-mail em memória). O
+banco, o cache e o diretório de mídia são derivados do PID do processo, então
+**dois agentes podem rodar `test_fast`/`test` ao mesmo tempo sem conflito**.
+
+Para duas suítes E2E simultâneas, use o script que aloca portas livres e nomes
+únicos (o `npm run test:e2e` comum usa as portas padrão 8001/3001/8002):
+
+```bash
+cd ../thesis-manager-ufvjm-frontend && ./scripts/run-e2e-isolated.sh
+```
+
+As variáveis `E2E_RUN_ID`, `E2E_DB_NAME`, `E2E_MEDIA_ROOT`, `E2E_BACKEND_PORT`,
+`E2E_FRONTEND_PORT` e `E2E_WORKER_PORT` permitem controlar manualmente o isolamento.
+
 Operação dos eventos assíncronos (no Docker, prefixe com `docker compose exec -T backend`):
 
 ```bash
@@ -143,6 +195,8 @@ python manage.py consume_adjudication_events                  # calcula o result
 python manage.py consume_repository_events                    # projeta publicações no banco do repositório
 python manage.py consume_reports_events                       # projeta fatos no banco de relatórios
 python manage.py verify_audit_chain                           # verifica a integridade do log de auditoria
+python manage.py cleanup_events --days 30 --dry-run            # simula a limpeza de eventos antigos
+python manage.py cleanup_events --days 30                      # remove eventos publicados e marcadores antigos
 ```
 
 As filas `indexing.thesis-events` e `adjudication.thesis-events` (e suas DLQs) são declaradas por `declare_event_topology`. No Compose, os serviços `indexing-consumer` e `adjudication-consumer` rodam esses comandos.
@@ -163,6 +217,8 @@ Além do gateway `backend` (URLconf completa), cada fronteira tem sua própria A
 ```bash
 docker compose --profile microservices up --build
 ```
+
+Os uploads (PDFs, documentos e texto extraído) ficam no volume nomeado `media_data`, montado em `/app/media`. `docker compose down` preserva o volume; `docker compose down -v` remove banco, cache, fila **e arquivos enviados**. O diretório `./media` do checkout é ignorado pelo Git e não é mais usado pelo Compose.
 
 Cada serviço tem seu próprio banco (`AUTH_DATABASE_URL`, `REPOSITORY_DATABASE_URL`, etc.). O Compose define `SERVICE_DATABASES_SHARED=False`, ativando a separação física. Fora do Compose (desenvolvimento/E2E) o padrão é `True`, com todos os aliases no mesmo SQLite/Postgres.
 

@@ -112,6 +112,9 @@ DATABASES = {
 # Cada serviço possui seu próprio banco em produção. O fallback mantém um
 # único banco em desenvolvimento/teste, onde não há dados reais a preservar.
 SERVICE_DATABASE_ALIASES = ("auth", "committee", "repository", "reports", "notifications")
+# O banco de committee está reservado para o futuro serviço de bancas; a lógica
+# atual vive no app theses. Fica listado aqui para não ser tratado como órfão.
+RESERVED_DATABASE_ALIASES = ("committee",)
 for _alias in SERVICE_DATABASE_ALIASES:
     _url = env(f"{_alias.upper()}_DATABASE_URL", default=DATABASE_URL)
     DATABASES[_alias] = env.db_url_config(_url)
@@ -237,6 +240,7 @@ REST_FRAMEWORK = {
         "session": "120/min",
         "thesis": "120/min",
         "thesis_upload": "30/hour",
+        "upload_global": "50/day",
         "user_suggest": "60/min",
     },
 }
@@ -402,6 +406,7 @@ THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
 UPLOAD_TRACKING_TTL_SECONDS = env.int("UPLOAD_TRACKING_TTL_SECONDS", default=3600)
+UPLOAD_GLOBAL_DAILY_LIMIT = env.int("UPLOAD_GLOBAL_DAILY_LIMIT", default=50)
 # Cache Redis do repositório público; a invalidação é explícita (publicação,
 # edição ou despublicação), então o TTL só limita dados velhos de curso/orientador.
 PUBLIC_REPOSITORY_CACHE_TTL_SECONDS = env.int("PUBLIC_REPOSITORY_CACHE_TTL_SECONDS", default=300)

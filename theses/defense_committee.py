@@ -471,7 +471,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
             member = DefenseMember.objects.create(
                 defense=defense,
                 role=role,
-                institutional_member=user,
+                institutional_member_id=user.pk,
                 name=user.name or user.email,
                 email=user.email,
                 institution="",
@@ -549,7 +549,7 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         member = DefenseMember.objects.create(
             defense=defense,
             role=role,
-            external_invitation=invitation,
+            external_invitation_id=invitation.pk,
             name=clean_name,
             email=clean_email,
             institution=institution.strip(),
@@ -787,7 +787,7 @@ def regenerate_external_member_token(defense: Defense, member: DefenseMember, *,
 
     revoke_external_invitation(previous_invitation, revoked_by=actor, request=request)
     new_invitation, access_token = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
-    member.external_invitation = new_invitation
+    member.external_invitation_id = new_invitation.pk
     member.save(update_fields=["external_invitation"])
     audit_defense(
         action=AuditAction.INVITE,

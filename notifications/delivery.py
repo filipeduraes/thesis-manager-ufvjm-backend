@@ -12,6 +12,8 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
+
+from accounts.concurrency import database_for_model
 from django.db.models import Q
 from django.utils import timezone
 
@@ -135,8 +137,9 @@ def retry_pending_notifications(limit: int) -> RetrySummary:
     now = timezone.now()
     stale_pending = Q(status=NotificationStatus.PENDING, scheduled_at__lte=now - PENDING_RETRY_GRACE)
     failed = Q(status=NotificationStatus.FAILED, scheduled_at__lte=now)
-    with transaction.atomic():
-        candidates = list(Notification.objects.select_for_update(skip_locked=True, of=("self",)).filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit])
+    notification_db = database_for_model(Notification)
+    with transaction.atomic(using=notification_db):
+        candidates = list(Notification.objects.using(notification_db).select_for_update(skip_locked=True, of=("self",)).filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit])
         from accounts.models import ExternalInvitation, User
 
         user_ids = [n.user_id for n in candidates if n.user_id]

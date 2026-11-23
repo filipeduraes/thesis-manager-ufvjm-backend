@@ -73,12 +73,12 @@ class ReportScope:
 
     Attributes:
         code: ``ALL`` for administrators, ``COORDINATED_COURSES`` otherwise.
-        course_ids: Courses in scope, or ``None`` when every course is visible.
+        course_ids: IDs of courses in scope, or ``None`` when every course is visible.
         cache_owner: Cache namespace shared by callers who see the same data.
     """
 
     code: str
-    course_ids: QuerySet[Course] | None
+    course_ids: frozenset[UUID] | None
     cache_owner: str
 
 
@@ -114,10 +114,10 @@ def resolve_report_scope(user: User, filters: ReportFilters) -> ReportScope:
     if user_is_admin(user) and not filters.coordinated_only:
         return ReportScope(code=SCOPE_ALL, course_ids=None, cache_owner="all")
     if not user_is_coordinator(user):
-        empty_courses: QuerySet[Course] = Course.objects.none()
-        return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=empty_courses, cache_owner=f"user:{user.pk}")
+        return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=frozenset(), cache_owner=f"user:{user.pk}")
     course_filter = coordinated_courses_filter(user)
-    coordinated_ids: QuerySet[Course] = Course.objects.filter(course_filter).values("pk").distinct()
+    # O banco de cursos é outro; materializar os IDs evita subquery cross-DB.
+    coordinated_ids = frozenset(Course.objects.filter(course_filter).values_list("pk", flat=True))
     return ReportScope(code=SCOPE_COORDINATED_COURSES, course_ids=coordinated_ids, cache_owner=f"user:{user.pk}")
 
 

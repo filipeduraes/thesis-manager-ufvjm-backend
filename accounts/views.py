@@ -13,6 +13,8 @@ from allauth.socialaccount.providers import registry
 from django.conf import settings
 from django.contrib.auth import login as auth_login, logout
 from django.db import transaction
+
+from accounts.concurrency import database_for_model
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
@@ -366,7 +368,7 @@ class AdminUsersView(APIView):
         serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            with transaction.atomic():
+            with transaction.atomic(using=database_for_model(User)):
                 from academic.models import Department
 
                 department_id = serializer.validated_data.get("departmentId")
@@ -463,7 +465,7 @@ class AdminUserDetailView(APIView):
         previous_department = user.department.name if user.department_id else None
 
         try:
-            with transaction.atomic():
+            with transaction.atomic(using=database_for_model(User)):
                 if "roles" in validated:
                     set_user_roles(
                         user,
@@ -881,7 +883,7 @@ def _dev_login_user(email: str, name: str, roles: list[str], request) -> User:
 
     normalized_email = (email or "").strip().lower() or f"teste-{timezone.now().timestamp():.0f}@dev.local"
     display_name = (name or "").strip() or normalized_email.split("@", 1)[0]
-    with transaction.atomic():
+    with transaction.atomic(using=database_for_model(User)):
         user = User.objects.filter(email__iexact=normalized_email).first()
         if user is None:
             user = User(email=normalized_email, name=display_name, is_active=True)
