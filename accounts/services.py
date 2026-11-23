@@ -23,6 +23,10 @@ from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from accounts.audit_entry import AuditEntry
+from accounts.audit_identifiers import EntityType
+from accounts.audit_payload import AuditPayload
+from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -101,6 +105,14 @@ def active_role_codes(user: User) -> list[str]:
         user.active_profile_roles().values_list("role", flat=True)
     )
     return [role for role in ROLE_PRIORITY if role in assigned]
+
+
+def actor_from_request(request: HttpRequest | None) -> User | None:
+    """Return the authenticated institutional user of a request, if any."""
+    candidate = getattr(request, "user", None) if request is not None else None
+    if candidate is not None and candidate.is_authenticated and isinstance(candidate, User):
+        return candidate
+    return None
 
 
 def get_active_role(user: User) -> str | None:
@@ -275,32 +287,33 @@ def build_session_payload(request: HttpRequest) -> dict:
     }
 
 
-def _audit_payload(*, action: str, entity_type: str, entity_id: str, entity_app_label: str, actor_user_id: str | None, actor_external_invitation_id: str | None, actor_role: str | None, origin: str, ip_address: str | None, user_agent: str, changes: dict, metadata: dict, occurred_at: timezone.datetime, previous_hash_hex: str | None,) -> dict:
-    return {
-        "actor_user_id": actor_user_id,
-        "actor_external_invitation_id": actor_external_invitation_id,
-        "actor_role": actor_role,
-        "action": action,
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "entity_app_label": entity_app_label,
-        "origin": origin,
-        "ip_address": ip_address,
-        "user_agent": user_agent,
-        "changes": changes,
-        "metadata": metadata,
-        "occurred_at": occurred_at.isoformat(),
-        "previous_hash": previous_hash_hex,
-    }
-
-
-def record_audit(*, action: str, entity_type: str, entity_id: str, request: HttpRequest | None = None, actor_user: User | None = None, actor_external_invitation: ExternalInvitation | None = None, actor_role: str | None = None, origin: str | None = None, ip_address: str | None = None, user_agent: str | None = None, changes: dict | None = None, metadata: dict | None = None, entity_app_label: str = "accounts",) -> AuditLog:
+def record_audit(entry: AuditEntry) -> AuditLog:
     """
-    Append a hash-chained audit entry.
+    Append a hash-chained audit entry described by ``entry``.
+
+    Args:
+        entry: Audit context grouping entity, actor, HTTP context and content.
+
+    Returns:
+        AuditLog: The appended audit entry.
     """
+    action = entry.action
+    entity_type = EntityType(entry.entity_type)
+    entity_id = entry.entity_id
+    entity_app_label = entity_type.app_label
+    request = entry.request
+    actor_user = entry.actor_user
+    actor_external_invitation = entry.actor_external_invitation
+    actor_role = entry.actor_role
+    actor_roles = entry.actor_roles
+    origin = entry.origin
+    ip_address = entry.ip_address
+    user_agent = entry.user_agent
+    changes = entry.changes or {}
+    metadata = entry.metadata or {}
     occurred_at = timezone.now()
-    changes = changes or {}
-    metadata = metadata or {}
+    from accounts.audit_presentation import derive_audit_category
+    computed_category = derive_audit_category(str(action), entity_type, metadata)
 
     if actor_user is None and request is not None:
         candidate = getattr(request, "user", None)
@@ -309,6 +322,16 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
 
     if actor_role is None and actor_user is not None:
         actor_role = get_active_role(actor_user)
+
+    if actor_roles is None and actor_user is not None:
+        actor_roles = active_role_codes(actor_user)
+    if actor_roles is None:
+        actor_roles = [actor_role] if actor_role else []
+    normalized_actor_roles: list[str] = []
+    for role in actor_roles:
+        role_code = str(role)
+        if role_code and role_code not in normalized_actor_roles:
+            normalized_actor_roles.append(role_code)
 
     if request is not None:
         ip_address = ip_address or get_client_ip(request)
@@ -320,6 +343,7 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
     origin = str(origin)
 
     with transaction.atomic():
+        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY)
         previous = (
             AuditLog.objects.select_for_update()
             .order_by("-occurred_at", "-id")
@@ -329,18 +353,11 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
         previous_hash_hex = (
             bytes(previous_hash).hex() if previous_hash is not None else None
         )
-        payload = _audit_payload(
+        payload = AuditPayload(
             action=str(action),
             entity_type=entity_type,
             entity_id=str(entity_id),
             entity_app_label=entity_app_label,
-            actor_user_id=str(actor_user.pk) if actor_user else None,
-            actor_external_invitation_id=(
-                str(actor_external_invitation.pk)
-                if actor_external_invitation
-                else None
-            ),
-            actor_role=str(actor_role) if actor_role else None,
             origin=origin,
             ip_address=ip_address,
             user_agent=user_agent,
@@ -348,15 +365,26 @@ def record_audit(*, action: str, entity_type: str, entity_id: str, request: Http
             metadata=metadata,
             occurred_at=occurred_at,
             previous_hash_hex=previous_hash_hex,
+            actor_user_id=str(actor_user.pk) if actor_user else None,
+            actor_external_invitation_id=(
+                str(actor_external_invitation.pk)
+                if actor_external_invitation
+                else None
+            ),
+            actor_role=str(actor_role) if actor_role else None,
+            actor_roles=tuple(normalized_actor_roles),
+            category=computed_category,
         )
         row_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(payload.as_dict(), sort_keys=True, default=str).encode("utf-8")
         ).digest()
 
         return AuditLog.objects.create(
             actor_user=actor_user,
             actor_external_invitation=actor_external_invitation,
             actor_role=actor_role,
+            actor_roles=normalized_actor_roles,
+            category=computed_category,
             action=action,
             entity_type=entity_type,
             entity_id=str(entity_id),
@@ -413,39 +441,44 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     if ProfileRole.STUDENT in normalized_roles and len(normalized_roles) > 1:
         raise ValidationError("O perfil Aluno não pode ser combinado com outros perfis.")
 
-    if (
-        _is_admin_user(user)
-        and ProfileRole.ADMIN not in normalized_roles
-        and count_active_admins(exclude_user=user) == 0
-    ):
-        raise LastAdminError("Não é possível remover o último administrador.")
+    with transaction.atomic():
+        # A contagem de administradores e a revogação do papel precisam ser uma
+        # única seção crítica, senão dois administradores podem remover um ao
+        # outro e deixar o sistema sem acesso administrativo.
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        if (
+            _is_admin_user(user)
+            and ProfileRole.ADMIN not in normalized_roles
+            and count_active_admins(exclude_user=user) == 0
+        ):
+            raise LastAdminError("Não é possível remover o último administrador.")
 
-    current = set(user.active_profile_roles().values_list("role", flat=True))
-    requested = set(normalized_roles)
-    now = timezone.now()
+        current = set(user.active_profile_roles().values_list("role", flat=True))
+        requested = set(normalized_roles)
+        now = timezone.now()
 
-    user.profile_roles.filter(
-        role__in=current - requested,
-        revoked_at__isnull=True,
-    ).update(revoked_at=now)
+        user.profile_roles.filter(
+            role__in=current - requested,
+            revoked_at__isnull=True,
+        ).update(revoked_at=now)
 
-    for role in requested - current:
-        UserProfileRole.objects.create(
-            user=user,
-            role=role,
-            assigned_by=assigned_by,
-        )
+        for role in requested - current:
+            UserProfileRole.objects.create(
+                user=user,
+                role=role,
+                assigned_by=assigned_by,
+            )
 
-    if ProfileRole.ADMIN in requested and not user.is_staff:
-        user.is_staff = True
-        user.save(update_fields=["is_staff"])
-    elif (
-        ProfileRole.ADMIN not in requested
-        and user.is_staff
-        and not user.is_superuser
-    ):
-        user.is_staff = False
-        user.save(update_fields=["is_staff"])
+        if ProfileRole.ADMIN in requested and not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=["is_staff"])
+        elif (
+            ProfileRole.ADMIN not in requested
+            and user.is_staff
+            and not user.is_superuser
+        ):
+            user.is_staff = False
+            user.save(update_fields=["is_staff"])
 
     return normalized_roles
 
@@ -474,15 +507,15 @@ def create_institutional_user(*, email: str, name: str, roles: Iterable[str], as
             logger.exception(
                 "Failed to resolve pending coordinators: user_id=%s", user.pk
             )
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.CREATE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=assigned_by,
-            changes={"email": user.email, "roles": list(roles)},
-        )
+            changes={"name": user.name, "email": user.email, "roles": list(roles)},
+            metadata={"name": user.name, "email": user.email},
+        ))
     logger.info("Institutional user created: user_id=%s", user.pk)
     return user
 
@@ -491,22 +524,22 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
     """
     Soft-delete a user, protecting the last administrative account.
     """
-    if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
-        raise LastAdminError("Não é possível desativar o último administrador.")
-    if actor is not None and actor.pk == user.pk:
-        raise ValidationError("O administrador não pode desativar a própria conta.")
-
     with transaction.atomic():
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
+            raise LastAdminError("Não é possível desativar o último administrador.")
+        if actor is not None and actor.pk == user.pk:
+            raise ValidationError("O administrador não pode desativar a própria conta.")
         User.objects.deactivate(user)
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DELETE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=actor,
             changes={"is_active": False},
-        )
+            metadata={"name": user.name, "email": user.email},
+        ))
     logger.info("User deactivated: user_id=%s", user.pk)
     return user
 
@@ -521,15 +554,15 @@ def reactivate_user(user: User, roles: Iterable[str] | None = None, *, actor: Us
             user.save(update_fields=["is_active"])
         if roles is not None:
             set_user_roles(user, roles, assigned_by=actor)
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="User",
+            entity_type=EntityType.USER,
             entity_id=str(user.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=actor,
             changes={"is_active": True},
-        )
+            metadata={"name": user.name, "email": user.email},
+        ))
     return user
 
 
@@ -682,15 +715,14 @@ def create_external_invitation(*, name: str, email: str, institution: str = "", 
             token_hash=unissued_token_hash(),
             expires_at=expires_at,
         )
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.INVITE,
-            entity_type="ExternalInvitation",
+            entity_type=EntityType.EXTERNAL_INVITATION,
             entity_id=str(invitation.pk),
-            entity_app_label="accounts",
             request=request,
             actor_user=invited_by,
-            metadata={"email": invitation.email},
-        )
+            metadata={"name": invitation.name, "email": invitation.email, "institution": invitation.institution},
+        ))
     logger.info("External invitation created: invitation_id=%s", invitation.pk)
     return invitation
 
@@ -701,6 +733,27 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
     """
     digest = hash_external_token(token)
     now = timezone.now()
+
+    # Um convite vencido deve ser marcado como EXPIRED mesmo que a troca falhe.
+    # Isso precisa acontecer em uma transação própria: um savepoint dentro da
+    # transação principal seria revertido junto com o ExternalTokenError.
+    expired = ExternalInvitation.objects.filter(
+        token_hash=digest,
+        expires_at__lte=now,
+    ).exclude(
+        status__in={
+            InvitationStatus.REVOKED,
+            InvitationStatus.USED,
+            InvitationStatus.DECLINED,
+            InvitationStatus.EXPIRED,
+        }
+    ).first()
+    if expired is not None:
+        with transaction.atomic():
+            ExternalInvitation.objects.filter(pk=expired.pk).update(
+                status=InvitationStatus.EXPIRED
+            )
+        raise ExternalTokenError("Token inválido ou expirado.")
 
     with transaction.atomic():
         try:
@@ -724,11 +777,6 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             )
             raise ExternalTokenError("Token inválido ou expirado.")
 
-        if invitation.expires_at <= now:
-            invitation.status = InvitationStatus.EXPIRED
-            invitation.save(update_fields=["status"])
-            raise ExternalTokenError("Token inválido ou expirado.")
-
         if invitation.accepted_at is None:
             invitation.accepted_at = now
         invitation.used_at = now
@@ -742,24 +790,23 @@ def exchange_external_token(token: str, request: HttpRequest) -> ExternalInvitat
             now + timedelta(minutes=ttl_minutes),
             invitation.expires_at,
         )
-        request.session.flush()
-        request.session["external_invitation_id"] = str(invitation.pk)
-        request.session["external_session_expires_at"] = (
-            session_expires_at.isoformat()
-        )
-        request.session.set_expiry(
-            max(1, int((session_expires_at - now).total_seconds()))
-        )
-
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.TOKEN_ACCESS,
-            entity_type="ExternalInvitation",
+            entity_type=EntityType.EXTERNAL_INVITATION,
             entity_id=str(invitation.pk),
-            entity_app_label="accounts",
             request=request,
             actor_external_invitation=invitation,
             metadata={"session_expires_at": session_expires_at.isoformat()},
-        )
+        ))
+
+    # Sessão/cache não são transacionais: aplicar o flush somente após o commit
+    # evita uma sessão externa órfã se a gravação no banco falhar.
+    request.session.flush()
+    request.session["external_invitation_id"] = str(invitation.pk)
+    request.session["external_session_expires_at"] = session_expires_at.isoformat()
+    request.session.set_expiry(
+        max(1, int((session_expires_at - now).total_seconds()))
+    )
 
     logger.info("External token exchanged: invitation_id=%s", invitation.pk)
     return invitation
@@ -774,15 +821,15 @@ def revoke_external_invitation(invitation: ExternalInvitation, *, revoked_by: Us
     invitation.status = InvitationStatus.REVOKED
     invitation.revoked_by = revoked_by
     invitation.save(update_fields=["revoked_at", "status", "revoked_by"])
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.DELETE,
-        entity_type="ExternalInvitation",
+        entity_type=EntityType.EXTERNAL_INVITATION,
         entity_id=str(invitation.pk),
-        entity_app_label="accounts",
         request=request,
         actor_user=revoked_by,
         changes={"status": InvitationStatus.REVOKED},
-    )
+        metadata={"name": invitation.name, "email": invitation.email},
+    ))
     return invitation
 
 

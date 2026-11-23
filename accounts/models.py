@@ -336,6 +336,8 @@ class AuditLog(models.Model):
         null=True,
         blank=True,
     )
+    actor_roles = models.JSONField(default=list, blank=True)
+    category = models.CharField(max_length=20, blank=True, default="")
     action = models.CharField(max_length=30, choices=AuditAction.choices)
     entity_type = models.CharField(max_length=50)
     entity_id = models.CharField(max_length=100)

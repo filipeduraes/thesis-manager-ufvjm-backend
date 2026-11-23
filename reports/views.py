@@ -14,6 +14,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.models import AuditAction
 from accounts.permissions import IsCoordinatorOrAdmin
 from accounts.services import record_audit
@@ -128,14 +130,13 @@ class ReportsOverviewPdfView(APIView):
         payload = get_overview_payload(scope, filters)
         generated_at = timezone.now()
         pdf_content = render_overview_pdf(payload, generated_at)
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DOWNLOAD,
-            entity_type="ReportOverview",
+            entity_type=EntityType.REPORT_OVERVIEW,
             entity_id="overview",
-            entity_app_label="reports",
             request=request,
             metadata=_export_audit_metadata(scope.code, filters),
-        )
+        ))
         logger.info("Reports overview PDF exported: scope=%s size=%d", scope.code, len(pdf_content))
         filename = report_pdf_filename(generated_at)
         response = HttpResponse(pdf_content, content_type=PDF_CONTENT_TYPE)

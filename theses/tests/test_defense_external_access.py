@@ -142,7 +142,7 @@ class ExternalMemberTokenTests(TestCase):
         self._external_session(new_token)
         regenerated_event = OutboxEvent.objects.filter(event_type=EventType.DEFENSE_EXTERNAL_MEMBER_INVITED).latest("created_at")
         self.assertEqual(regenerated_event.payload["trigger"], "REGENERATED")
-        self.assertTrue(AuditLog.objects.filter(metadata__event="EXTERNAL_INVITATION_REGENERATED").exists())
+        self.assertTrue(AuditLog.objects.filter(metadata__event="EXTERNAL_TOKEN_REGENERATED").exists())
         for token in (old_token, new_token):
             assert_token_not_stored(self, token)
             assert_token_not_logged(self, captured, token)

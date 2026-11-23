@@ -19,6 +19,8 @@ from academic.serializers import (
     CourseWriteSerializer,
     DepartmentWriteSerializer,
 )
+from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
+
 from academic.services import (
     course_payload,
     create_course,
@@ -28,6 +30,8 @@ from academic.services import (
     prune_orphan_departments,
     update_course,
 )
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalAdmin
 from accounts.services import record_audit, user_avatar_url
@@ -96,7 +100,7 @@ class AdminDepartmentsView(APIView):
         if query:
             queryset = queryset.filter(name__icontains=query.strip())
         selectable = request.query_params.get("selectable")
-        if str(selectable).lower() in {"1", "true", "yes"}:
+        if str(selectable).lower() in TRUTHY_QUERY_VALUES:
             # Includes departments referenced by courses; orphans are pruned elsewhere.
             queryset = queryset.filter(courses__isnull=False).distinct()
         results = [department_payload(item) for item in queryset]
@@ -116,15 +120,14 @@ class AdminDepartmentsView(APIView):
         serializer = DepartmentWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         department = get_or_create_department(serializer.validated_data["name"])
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.CREATE,
-            entity_type="Department",
+            entity_type=EntityType.DEPARTMENT,
             entity_id=str(department.pk),
-            entity_app_label="academic",
             request=request,
             actor_user=request.user if request.user.is_authenticated else None,
             changes={"name": department.name},
-        )
+        ))
         return Response(department_payload(department), status=status.HTTP_201_CREATED)
 
 
@@ -148,7 +151,9 @@ class AdminDepartmentDetailView(APIView):
         Returns:
             Response: Updated department payload or validation error.
         """
-        department = get_object_or_404(Department, pk=department_id)
+        department = get_object_or_404(
+            Department.objects.select_for_update(), pk=department_id
+        )
         serializer = DepartmentWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         name = serializer.validated_data.get("name")
@@ -162,15 +167,14 @@ class AdminDepartmentDetailView(APIView):
                 )
             department.name = name
             department.save(update_fields=["name", "updated_at"])
-            record_audit(
+            record_audit(AuditEntry(
                 action=AuditAction.UPDATE,
-                entity_type="Department",
+                entity_type=EntityType.DEPARTMENT,
                 entity_id=str(department.pk),
-                entity_app_label="academic",
                 request=request,
                 actor_user=request.user if request.user.is_authenticated else None,
                 changes={"name": department.name},
-            )
+            ))
         return Response(department_payload(department))
 
     @transaction.atomic
@@ -196,15 +200,14 @@ class AdminDepartmentDetailView(APIView):
         department_id_str = str(department.pk)
         name = department.name
         department.delete()
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DELETE,
-            entity_type="Department",
+            entity_type=EntityType.DEPARTMENT,
             entity_id=department_id_str,
-            entity_app_label="academic",
             request=request,
             actor_user=request.user if request.user.is_authenticated else None,
             changes={"name": name},
-        )
+        ))
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

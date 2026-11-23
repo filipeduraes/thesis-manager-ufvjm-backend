@@ -9,14 +9,17 @@ from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest
 from django.utils import timezone
 
 from academic.models import Course, Department, UserCourseAssignment
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
+from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock
 from accounts.models import AuditAction, ProfileRole, User, UserProfileRole
-from accounts.services import record_audit
+from accounts.services import actor_from_request, record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -118,18 +121,13 @@ def resolve_pending_coordinators_for_user(
             if changed_fields:
                 course.save(update_fields=[*changed_fields, "updated_at"])
                 updated_ids.append(str(course.pk))
-                record_audit(
+                record_audit(AuditEntry(
                     action=AuditAction.UPDATE,
-                    entity_type="Course",
+                    entity_type=EntityType.COURSE,
                     entity_id=str(course.pk),
-                    entity_app_label="academic",
                     request=request,
                     actor_user=(
-                        request.user
-                        if request
-                        and getattr(request.user, "is_authenticated", False)
-                        and isinstance(request.user, User)
-                        else None
+                        actor_from_request(request)
                     ),
                     changes={
                         "coordinatorResolved": True,
@@ -137,7 +135,7 @@ def resolve_pending_coordinators_for_user(
                         "coordinatorEmail": email,
                     },
                     metadata={"trigger": "coordinator_resolution"},
-                )
+                ))
 
         if updated_ids:
             role_created = ensure_coordinator_role(user)
@@ -191,7 +189,10 @@ def get_or_create_department(name: str) -> Department:
     department = Department.objects.filter(name__iexact=normalized).first()
     if department:
         return department
-    return Department.objects.create(name=normalized)
+    try:
+        return Department.objects.create(name=normalized)
+    except IntegrityError:
+        return Department.objects.get(name__iexact=normalized)
 
 
 def prune_orphan_departments() -> int:
@@ -354,23 +355,21 @@ def create_course(
         coordinator_email=normalized_coordinator_email,
     )
     user = resolve_course_coordinator(course)
-    course.save()
+    try:
+        course.save()
+    except IntegrityError as exc:
+        raise ValidationError({"code": "Já existe um curso com este código."}) from exc
     if user:
         ensure_coordinator_role(user)
         resolve_pending_coordinators_for_user(user, request=request)
 
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.CREATE,
-        entity_type="Course",
+        entity_type=EntityType.COURSE,
         entity_id=str(course.pk),
-        entity_app_label="academic",
         request=request,
         actor_user=(
-            request.user
-            if request
-            and getattr(request.user, "is_authenticated", False)
-            and isinstance(request.user, User)
-            else None
+            actor_from_request(request)
         ),
         changes={
             "name": course.name,
@@ -378,7 +377,7 @@ def create_course(
             "departmentId": str(course.department_id),
             "coordinatorEmail": course.coordinator_email,
         },
-    )
+    ))
     return course
 
 
@@ -411,6 +410,8 @@ def update_course(
     Raises:
         ValidationError: If required fields are missing or invalid.
     """
+    # Serializa edições concorrentes do mesmo curso (evita perda de alterações).
+    course = Course.objects.select_for_update().get(pk=course.pk)
     old_department_id = course.department_id
     changes: dict[str, Any] = {}
 
@@ -459,21 +460,16 @@ def update_course(
         prune_orphan_departments()
 
     if changes:
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="Course",
+            entity_type=EntityType.COURSE,
             entity_id=str(course.pk),
-            entity_app_label="academic",
             request=request,
             actor_user=(
-                request.user
-                if request
-                and getattr(request.user, "is_authenticated", False)
-                and isinstance(request.user, User)
-                else None
+                actor_from_request(request)
             ),
             changes=changes,
-        )
+        ))
     return course
 
 
@@ -497,21 +493,16 @@ def delete_course(course: Course, request: HttpRequest | None = None) -> None:
     course.delete()
     if old_department_id:
         prune_orphan_departments()
-    record_audit(
+    record_audit(AuditEntry(
         action=AuditAction.DELETE,
-        entity_type="Course",
+        entity_type=EntityType.COURSE,
         entity_id=course_id,
-        entity_app_label="academic",
         request=request,
         actor_user=(
-            request.user
-            if request
-            and getattr(request.user, "is_authenticated", False)
-            and isinstance(request.user, User)
-            else None
+            actor_from_request(request)
         ),
         changes=snapshot,
-    )
+    ))
 
 
 def set_user_course_assignment(
@@ -531,6 +522,10 @@ def set_user_course_assignment(
         request: HTTP request used for audit context.
     """
     with transaction.atomic():
+        # Bloqueia o usuário (a linha "pai") para serializar atribuições
+        # concorrentes, inclusive quando ainda não existe nenhuma atribuição.
+        acquire_transaction_lock(COURSE_ASSIGNMENT_LOCK_KEY + (user.pk.int % 100000))
+        User.objects.select_for_update().get(pk=user.pk)
         now = timezone.now()
         active = UserCourseAssignment.objects.select_for_update().filter(
             user=user,
@@ -540,11 +535,10 @@ def set_user_course_assignment(
             changed = active.exists()
             active.update(is_active=False, revoked_at=now)
             if changed:
-                record_audit(
+                record_audit(AuditEntry(
                     action=AuditAction.UPDATE,
-                    entity_type="UserCourseAssignment",
+                    entity_type=EntityType.USER_COURSE_ASSIGNMENT,
                     entity_id=str(user.pk),
-                    entity_app_label="academic",
                     request=request,
                     actor_user=assigned_by,
                     changes={"course": None},
@@ -552,7 +546,7 @@ def set_user_course_assignment(
                         "userName": user.name,
                         "userEmail": user.email,
                     },
-                )
+                ))
             return
 
         current = active.filter(course=course).first()
@@ -560,17 +554,24 @@ def set_user_course_assignment(
             return
         active.exclude(course=course).update(is_active=False, revoked_at=now)
         if not current:
-            UserCourseAssignment.objects.create(
-                user=user,
-                course=course,
-                assigned_by=assigned_by,
-                is_active=True,
-            )
-        record_audit(
+            try:
+                UserCourseAssignment.objects.create(
+                    user=user,
+                    course=course,
+                    assigned_by=assigned_by,
+                    is_active=True,
+                )
+            except IntegrityError:
+                # Outra requisição já criou a atribuição equivalente.
+                current = UserCourseAssignment.objects.filter(
+                    user=user, course=course, is_active=True
+                ).first()
+                if current is None:
+                    raise
+        record_audit(AuditEntry(
             action=AuditAction.UPDATE,
-            entity_type="UserCourseAssignment",
+            entity_type=EntityType.USER_COURSE_ASSIGNMENT,
             entity_id=str(user.pk),
-            entity_app_label="academic",
             request=request,
             actor_user=assigned_by,
             changes={
@@ -581,7 +582,7 @@ def set_user_course_assignment(
                 "userName": user.name,
                 "userEmail": user.email,
             },
-        )
+        ))
 
 
 def active_course_assignment(user: User) -> UserCourseAssignment | None:

@@ -204,12 +204,16 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.ScopedRateThrottle",
+        # Mesma regra de IP de accounts.network: X-Forwarded-For só vale quando o
+        # par é um proxy confiável (TRUSTED_PROXY_CIDRS), ao contrário de NUM_PROXIES.
+        "thesismanagerbackend.throttling.ClientIpScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "external_token": "10/min",
         # Reenvio e novo convite de membro externo: cada pedido dispara um e-mail com token novo.
         "invitation_resend": "5/min",
+        "public_download": "30/min",
+        "public_repository": "120/min",
         "reports": "60/min",
         "reports_export": "10/min",
         "session": "120/min",
@@ -266,6 +270,7 @@ CSRF_COOKIE_SECURE = env.bool("CSRF_COOKIE_SECURE", default=not DEBUG)
 # Só considere cabeçalhos de encaminhamento quando a quantidade de proxies for configurada.
 
 TRUSTED_PROXY_COUNT = env.int("TRUSTED_PROXY_COUNT", default=0)
+TRUSTED_PROXY_CIDRS = env.list("TRUSTED_PROXY_CIDRS", default=[])
 INSTITUTIONAL_NETWORK_CIDRS = env.list("INSTITUTIONAL_NETWORK_CIDRS", default=[])
 VPN_NETWORK_CIDRS = env.list("VPN_NETWORK_CIDRS", default=[])
 ADMIN_ALLOWED_CIDRS = env.list(
@@ -371,6 +376,9 @@ THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
 THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
+# Cache Redis do repositório público; a invalidação é explícita (publicação,
+# edição ou despublicação), então o TTL só limita dados velhos de curso/orientador.
+PUBLIC_REPOSITORY_CACHE_TTL_SECONDS = env.int("PUBLIC_REPOSITORY_CACHE_TTL_SECONDS", default=300)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field

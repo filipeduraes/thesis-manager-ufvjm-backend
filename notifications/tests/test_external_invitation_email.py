@@ -10,6 +10,8 @@ from django.core import mail
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
+from accounts.audit_events import SCHEMA_VERSION
+from accounts.audit_presentation import AuditPresenter
 from accounts.models import AuditAction, AuditLog, ExternalInvitation
 from accounts.services import hash_external_token, revoke_external_invitation
 from events.catalog import ExternalInvitationTrigger
@@ -80,6 +82,23 @@ class ExternalInvitationEmailTests(InvitationFixtureMixin, TestCase):
         self.assertEqual(entry.metadata["defenseId"], str(self.defense.pk))
         self.assertNotIn(token, str(entry.metadata))
         self.assertNotIn("externo@example.org", str(entry.metadata))
+
+    def test_delivery_audit_follows_the_typed_contract_and_reads_without_token(self) -> None:
+        handle_event(envelope_for(self._record()))
+        handle_event(envelope_for(self._record(ExternalInvitationTrigger.RESENT)))
+        token = last_emailed_token(self)
+        entries = list(AuditLog.objects.filter(action=AuditAction.INVITE, metadata__event__in=["INVITATION_EMAIL_SENT", "INVITATION_EMAIL_RESENT"]).order_by("occurred_at"))
+        self.assertEqual(len(entries), 2)
+        presenter = AuditPresenter()
+        presenter.prime(entries)
+        for entry in entries:
+            self.assertEqual(entry.metadata["schemaVersion"], SCHEMA_VERSION)
+            summary = presenter.summary(entry)
+            details = str(presenter.details(entry))
+            self.assertIn("Edu Externo", summary)
+            self.assertNotIn(token, summary + details)
+        self.assertIn("Enviou por e-mail", presenter.summary(entries[0]))
+        self.assertIn("Reenviou por e-mail", presenter.summary(entries[1]))
 
     def test_resent_delivery_is_audited_as_resend(self) -> None:
         handle_event(envelope_for(self._record()))

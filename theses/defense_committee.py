@@ -11,15 +11,18 @@ from typing import Any
 from uuid import UUID
 
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 
+from accounts.audit_events import event_payload
+from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, ExternalInvitation, InvitationStatus, User
-from accounts.services import create_external_invitation, record_audit, revoke_external_invitation, user_avatar_url
+from accounts.services import create_external_invitation, revoke_external_invitation, user_avatar_url
 from events.catalog import ExternalInvitationTrigger
+from theses.audit import audit_defense
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.events import record_external_member_invited
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
@@ -493,24 +496,28 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
     _check_schedule_overlap(defense, user)
 
     has_conflict = bool(conflict_reason.strip())
-    member = DefenseMember.objects.create(
-        defense=defense,
-        role=role,
-        institutional_member=user,
-        name=user.name or user.email,
-        email=user.email,
-        institution="",
-        has_conflict=has_conflict,
-        conflict_reason=conflict_reason.strip(),
-    )
-    record_audit(
+    try:
+        with transaction.atomic():
+            member = DefenseMember.objects.create(
+                defense=defense,
+                role=role,
+                institutional_member=user,
+                name=user.name or user.email,
+                email=user.email,
+                institution="",
+                has_conflict=has_conflict,
+                conflict_reason=conflict_reason.strip(),
+            )
+    except IntegrityError as exc:
+        if role == CommitteeRole.PRESIDENT:
+            raise ValidationError("Esta banca já possui um presidente.") from exc
+        raise ValidationError("Este usuário já faz parte da banca.") from exc
+    audit_defense(
         action=AuditAction.CREATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "institutional"},
+        metadata=event_payload(AuditEvent.MEMBER_ADDED, memberId=str(member.pk), memberName=member.name, memberRole=role, type="institutional"),
     )
     return member
 
@@ -565,24 +572,27 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
         request=request,
     )
     has_conflict = bool(conflict_reason.strip())
-    member = DefenseMember.objects.create(
-        defense=defense,
-        role=role,
-        external_invitation=invitation,
-        name=clean_name,
-        email=clean_email,
-        institution=institution.strip(),
-        has_conflict=has_conflict,
-        conflict_reason=conflict_reason.strip(),
-    )
-    record_audit(
+    try:
+        member = DefenseMember.objects.create(
+            defense=defense,
+            role=role,
+            external_invitation=invitation,
+            name=clean_name,
+            email=clean_email,
+            institution=institution.strip(),
+            has_conflict=has_conflict,
+            conflict_reason=conflict_reason.strip(),
+        )
+    except IntegrityError as exc:
+        if role == CommitteeRole.PRESIDENT:
+            raise ValidationError("Esta banca já possui um presidente.") from exc
+        raise ValidationError("Não foi possível adicionar o membro à banca.") from exc
+    audit_defense(
         action=AuditAction.CREATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_ADDED", "memberId": str(member.pk), "role": role, "type": "external", "invitationId": str(invitation.pk)},
+        metadata=event_payload(AuditEvent.MEMBER_ADDED, memberId=str(member.pk), memberName=member.name, memberRole=role, type="external", invitationId=str(invitation.pk)),
     )
     record_external_member_invited(defense, member, ExternalInvitationTrigger.CREATED)
     return member
@@ -622,20 +632,19 @@ def remove_member(defense: Defense, member: DefenseMember, *, actor: User, reque
 
     member_id = str(member.pk)
     role = member.role
+    member_name = member.name
     invitation = member.external_invitation
     member.delete()
 
     if invitation is not None:
         revoke_external_invitation(invitation, revoked_by=actor, request=request)
 
-    record_audit(
+    audit_defense(
         action=AuditAction.DELETE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "MEMBER_REMOVED", "memberId": member_id, "role": role},
+        metadata=event_payload(AuditEvent.MEMBER_REMOVED, memberId=member_id, memberName=member_name, memberRole=role),
     )
 
 
@@ -742,15 +751,13 @@ def respond_availability(defense: Defense, member: DefenseMember, *, availabilit
 
     actor_user = actor if isinstance(actor, User) else None
     actor_external = actor.invitation if isinstance(actor, ExternalInvitationPrincipal) else None
-    record_audit(
+    audit_defense(
         action=AuditAction.UPDATE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor_user,
         actor_external_invitation=actor_external,
-        metadata={"event": "AVAILABILITY_RESPONDED", "memberId": str(member.pk), "from": previous_status, "to": availability_status},
+        metadata=event_payload(AuditEvent.AVAILABILITY_RESPONDED, memberId=str(member.pk), memberName=member.name, memberRole=member.role, fromStatus=previous_status, toStatus=availability_status),
     )
     return member
 
@@ -833,14 +840,12 @@ def resend_external_member_invitation(defense: Defense, member: DefenseMember, *
         raise ValidationError(refusal)
     member.external_invitation = invitation
     event = record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.RESENT)
-    record_audit(
+    audit_defense(
         action=AuditAction.INVITE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "INVITATION_RESEND_REQUESTED", "memberId": str(member.pk), "invitationId": str(invitation.pk), "eventId": str(event.pk)},
+        metadata=event_payload(AuditEvent.INVITATION_RESEND_REQUESTED, memberId=str(member.pk), invitationId=str(invitation.pk), eventId=str(event.pk)),
     )
     return member
 
@@ -885,14 +890,12 @@ def regenerate_external_member_invitation(defense: Defense, member: DefenseMembe
     new_invitation = create_external_invitation(name=member.name, email=member.email, institution=member.institution, invited_by=actor, request=request)
     member.external_invitation = new_invitation
     member.save(update_fields=["external_invitation"])
-    record_audit(
+    audit_defense(
         action=AuditAction.INVITE,
-        entity_type="Defense",
-        entity_id=str(defense.pk),
-        entity_app_label="theses",
+        defense=defense,
         request=request,
         actor_user=actor,
-        metadata={"event": "EXTERNAL_INVITATION_REGENERATED", "memberId": str(member.pk), "previousInvitationId": str(previous_invitation.pk), "invitationId": str(new_invitation.pk)},
+        metadata=event_payload(AuditEvent.EXTERNAL_TOKEN_REGENERATED, memberId=str(member.pk), memberName=member.name, memberRole=member.role, previousInvitationId=str(previous_invitation.pk), invitationId=str(new_invitation.pk)),
     )
     record_external_member_invited(locked_defense, member, ExternalInvitationTrigger.REGENERATED)
     return member

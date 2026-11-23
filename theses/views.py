@@ -15,29 +15,51 @@ from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.audit_identifiers import EntityType
+from accounts.audit_entry import AuditEntry
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction
 from accounts.permissions import IsInstitutionalAdmin, IsInstitutionalUser
-from accounts.services import record_audit
+from accounts.services import google_social_accounts_prefetch,  record_audit
 from academic.services import active_course_assignment
+from theses.filters import parse_year_filter
+from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
 from theses.models import (
     REVIEWABLE_STATUSES,
     StoredFile,
     Thesis,
     ThesisDocument,
     ThesisFile,
+    ThesisOrigin,
     ThesisStatus,
 )
 from theses.permissions import IsAcademicManager, IsAdvisorUser, IsStudentUser
+from theses.repository import (
+    public_courses_payload,
+    public_repository_filters_payload,
+    public_thesis_detail_payload,
+    public_thesis_list_payload,
+    public_theses_queryset,
+    published_theses,
+    search_public_theses,
+)
+from theses.repository_cache import cached_payload, courses_cache_key, detail_cache_key, filters_cache_key, search_cache_key
+from theses.repository_management import current_metadata, delete_thesis, import_legacy_thesis, replace_published_file, unpublish_thesis, update_published_thesis
 from theses.serializers import (
     DefenseResultSerializer,
     DocumentUploadSerializer,
+    LegacyThesisSerializer,
+    PublishedFileSerializer,
+    PublishedThesisUpdateSerializer,
+    PublicThesisSearchSerializer,
+    UnpublishThesisSerializer,
     ThesisMetadataSerializer,
     ThesisReviewSerializer,
 )
@@ -48,8 +70,6 @@ from theses.services import (
     course_brief,
     document_payload,
     get_accessible_thesis,
-    public_theses_filtered,
-    public_thesis_payload,
     publish_thesis,
     record_defense_result,
     review_payload,
@@ -130,6 +150,26 @@ def _validation_response(exc: DjangoValidationError) -> Response:
     """
     detail, errors = _error_detail(exc)
     return Response({"detail": detail, "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def visible_thesis_or_404(user: User, thesis_id: str) -> Thesis:
+    """
+    Return a thesis visible to ``user`` or raise 404.
+
+    Args:
+        user: Authenticated user requesting the thesis.
+        thesis_id: Identifier of the requested thesis.
+
+    Returns:
+        Thesis: The visible thesis.
+
+    Raises:
+        Http404: When the thesis does not exist or is not visible to the user.
+    """
+    thesis = theses_visible_to(user).filter(pk=thesis_id).first()
+    if thesis is None:
+        raise Http404("Monografia não encontrada.")
+    return thesis
 
 
 class ThesisPagination(PageNumberPagination):
@@ -216,14 +256,11 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
         queryset = queryset.filter(advisor_id=advisor_id)
     year = (request.query_params.get("year") or "").strip()
     if year:
-        try:
-            parsed_year = int(year)
-        except (TypeError, ValueError):
-            parsed_year = None
+        parsed_year = parse_year_filter(year)
         if parsed_year is not None:
             queryset = queryset.filter(Q(submitted_at__year=parsed_year) | Q(published_at__year=parsed_year))
     pending_review = (request.query_params.get("pendingReview") or "").strip().lower()
-    if pending_review in {"1", "true", "yes"}:
+    if pending_review in TRUTHY_QUERY_VALUES:
         queryset = queryset.filter(status__in=REVIEWABLE_STATUSES)
     return queryset.distinct().order_by("-updated_at")
 
@@ -240,7 +277,7 @@ def _student_thesis(user) -> Thesis | None:
     """
     return (
         Thesis.objects.select_related("course", "advisor")
-        .filter(authors__author=user, authors__is_main_author=True)
+        .filter(origin=ThesisOrigin.WORKFLOW, authors__author=user, authors__is_main_author=True)
         .order_by("-created_at")
         .first()
     )
@@ -468,9 +505,155 @@ class ThesisDetailView(APIView):
         Returns:
             Response: Thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)})
+
+    def delete(self, request, thesis_id) -> Response:
+        """
+        Soft-delete a thesis that was never published.
+
+        Published theses are refused with 400 (even for administrators); they can
+        only be unpublished through ``POST /api/v1/theses/<id>/unpublish``.
+
+        Args:
+            request: HTTP request.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: 204 on success, 400 when refused, 403 outside the manager's courses.
+        """
+        if not IsAcademicManager().has_permission(request, self):
+            raise PermissionDenied(IsAcademicManager.message)
+        thesis = visible_thesis_or_404(request.user, thesis_id)
+        try:
+            delete_thesis(request.user, thesis, request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LegacyThesisCreateView(APIView):
+    """
+    Register a legacy (already approved) thesis directly in the public repository.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis_upload"
+
+    def post(self, request) -> Response:
+        """
+        Create a published thesis with origin ``LEGACY_IMPORT`` from multipart data.
+
+        Args:
+            request: HTTP request (multipart) with ``title``, ``abstract``, ``keywords``,
+                ``authors`` (JSON list of ``{name, userId}``), ``advisorId``, ``courseId``,
+                ``defenseYear`` and/or ``defenseDate``, ``result``, optional ``type`` and
+                ``journal``, and the PDF in ``file``.
+
+        Returns:
+            Response: 201 with the thesis payload; 400 for invalid data; 403 outside
+                the coordinator's courses.
+        """
+        serializer = LegacyThesisSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis = import_legacy_thesis(request.user, serializer.to_metadata(), serializer.validated_data["result"], serializer.validated_data["file"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)}, status=status.HTTP_201_CREATED)
+
+
+class PublishedThesisUpdateView(APIView):
+    """
+    Edit the metadata of a published thesis.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis"
+
+    def patch(self, request, thesis_id) -> Response:
+        """
+        Apply a partial edit to a published thesis and record it.
+
+        Args:
+            request: HTTP request (JSON) with any of ``title``, ``abstract``, ``keywords``,
+                ``authors``, ``advisorId``, ``courseId``, ``defenseYear``, ``defenseDate``,
+                ``type``, ``journal`` and an optional ``reason``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: Updated thesis payload.
+        """
+        thesis = visible_thesis_or_404(request.user, thesis_id)
+        serializer = PublishedThesisUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        metadata = serializer.merge_into(current_metadata(thesis))
+        try:
+            thesis = update_published_thesis(request.user, thesis, metadata, serializer.validated_data["reason"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"thesis": thesis_payload(thesis, request.user)})
+
+
+class PublishedThesisFileView(APIView):
+    """
+    Replace the PDF of a published thesis with a new version.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis_upload"
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Upload a new PDF version; the previous one stays in the history.
+
+        Args:
+            request: HTTP request (multipart) with ``file`` and optional ``changeDescription``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: 201 with the new ``file`` and the thesis payload.
+        """
+        thesis = visible_thesis_or_404(request.user, thesis_id)
+        serializer = PublishedFileSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis_file = replace_published_file(request.user, thesis, serializer.validated_data["file"], serializer.validated_data["change_description"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+        thesis = get_accessible_thesis(request.user, str(thesis.pk))
+        return Response({"file": thesis_file_payload(thesis_file), "thesis": thesis_payload(thesis, request.user)}, status=status.HTTP_201_CREATED)
+
+
+class ThesisUnpublishView(APIView):
+    """
+    Remove a published thesis from the public repository.
+    """
+
+    permission_classes = [IsInstitutionalUser, IsAcademicManager]
+    throttle_scope = "thesis"
+
+    def post(self, request, thesis_id) -> Response:
+        """
+        Unpublish a thesis with a mandatory reason.
+
+        Args:
+            request: HTTP request with ``reason``.
+            thesis_id: Thesis identifier.
+
+        Returns:
+            Response: Updated thesis payload (status ``ARCHIVED``).
+        """
+        thesis = visible_thesis_or_404(request.user, thesis_id)
+        serializer = UnpublishThesisSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            thesis = unpublish_thesis(request.user, thesis, serializer.validated_data["reason"], request)
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
         thesis = get_accessible_thesis(request.user, str(thesis.pk))
         return Response({"thesis": thesis_payload(thesis, request.user)})
 
@@ -494,9 +677,7 @@ class ThesisReviewView(APIView):
         Returns:
             Response: Updated thesis and review payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = ThesisReviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -534,9 +715,7 @@ class ThesisDefenseResultView(APIView):
         Returns:
             Response: Updated thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = DefenseResultSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -596,9 +775,7 @@ class ThesisPublishView(APIView):
         Returns:
             Response: Updated thesis payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         try:
             thesis = publish_thesis(request.user, thesis, request)
         except DjangoValidationError as exc:
@@ -639,14 +816,18 @@ class ThesisFileDownloadView(APIView):
         disposition = (request.query_params.get("disposition") or "attachment").strip().lower()
         if disposition not in {"inline", "attachment"}:
             disposition = "attachment"
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DOWNLOAD,
-            entity_type="ThesisFile",
+            entity_type=EntityType.THESIS_FILE,
             entity_id=str(thesis_file.pk),
-            entity_app_label="theses",
             request=request,
-            metadata={"thesisId": str(thesis.pk), "versionNumber": thesis_file.version_number, "disposition": disposition},
-        )
+            metadata={
+                "thesisId": str(thesis.pk),
+                "versionNumber": thesis_file.version_number,
+                "disposition": disposition,
+                "fileName": thesis_file.stored_file.original_filename,
+            },
+        ))
         return _download_response(thesis_file.stored_file, thesis, disposition, thesis_file.version_number)
 
 
@@ -669,9 +850,7 @@ class ThesisDocumentUploadView(APIView):
         Returns:
             Response: Document payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         serializer = DocumentUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -702,9 +881,7 @@ class ThesisDocumentValidateView(APIView):
         Returns:
             Response: Document payload.
         """
-        thesis = theses_visible_to(request.user).filter(pk=thesis_id).first()
-        if thesis is None:
-            raise Http404("Monografia não encontrada.")
+        thesis = visible_thesis_or_404(request.user, thesis_id)
         document = ThesisDocument.objects.filter(pk=document_id, thesis=thesis).first()
         if document is None:
             raise Http404("Documento não encontrado.")
@@ -744,74 +921,141 @@ class ThesisDocumentDownloadView(APIView):
         document = ThesisDocument.objects.select_related("stored_file").filter(pk=document_id, thesis=thesis).first()
         if document is None:
             raise Http404("Documento não encontrado.")
-        record_audit(
+        record_audit(AuditEntry(
             action=AuditAction.DOWNLOAD,
-            entity_type="ThesisDocument",
+            entity_type=EntityType.THESIS_DOCUMENT,
             entity_id=str(document.pk),
-            entity_app_label="theses",
             request=request,
-            metadata={"thesisId": str(thesis.pk), "documentType": document.type},
-        )
+            metadata={
+                "thesisId": str(thesis.pk),
+                "documentType": document.type,
+                "fileName": document.stored_file.original_filename,
+            },
+        ))
         return _download_response(document.stored_file, thesis, "attachment")
 
 
-class PublicThesisListView(APIView):
+def _cached_response(payload: dict[str, Any], from_cache: bool) -> Response:
     """
-    List published theses in the public repository.
-    """
+    Wrap a public repository payload, flagging whether it came from the cache.
 
-    # TODO(auditoria): repositório público incompleto para anônimos.
-    # 1. `thesis_list_payload` aponta `currentFile.downloadUrl`/`previewUrl` para
-    #    `/api/v1/theses/<id>/files/<fileId>/download` (rota autenticada): o visitante
-    #    anônimo recebe 401. Criar `public_thesis_list_payload` mantendo o resumo
-    #    e trocando as URLs para `/api/v1/public/theses/<id>/download` — o detalhe
-    #    (`public_thesis_payload`) já faz esse ajuste.
-    # 2. Serializar também `abstract`, `type`, `typeLabel` e `journal` na listagem
-    #    se os cards do repositório forem exibir esses campos.
-    # 3. Ordenar por `-published_at` para paginação estável por publicação.
-    # 4. Cache versionado (índice girado na publicação) apenas se o volume de
-    #    tráfego anônimo justificar; se implementado, invalidar na publicação
-    #    (ver comentário em `publish_thesis`).
-    # Os pontos de contrato público estão descritos também em
-    # FUNCIONALIDADES.md, seção "Pendências identificadas na auditoria".
+    Args:
+        payload: Response body.
+        from_cache: Whether the body was read from Redis.
+
+    Returns:
+        Response: JSON response with ``X-Repository-Cache: HIT|MISS``.
+    """
+    response = Response(payload)
+    response["X-Repository-Cache"] = "HIT" if from_cache else "MISS"
+    return response
+
+
+class PublicRepositoryView(APIView):
+    """
+    Base class of the anonymous repository endpoints.
+
+    No authentication runs (session cookies are ignored), and every endpoint is
+    rate limited per client IP. The throttle uses ``accounts.network.get_client_ip``,
+    so ``X-Forwarded-For`` is only honored from peers in ``TRUSTED_PROXY_CIDRS``.
+    """
 
     permission_classes = [AllowAny]
     authentication_classes: list = []
+    throttle_scope = "public_repository"
+
+
+class PublicThesisListView(PublicRepositoryView):
+    """
+    Search published theses in the public repository.
+    """
 
     def get(self, request) -> Response:
         """
-        Return published theses with public filters.
+        Return published theses matching the search parameters.
+
+        Args:
+            request: HTTP request. Query parameters: ``q`` (free text), ``title``,
+                ``author``, ``advisor``, ``course`` (text), ``keyword`` (repeatable,
+                exact), ``courseId``, ``advisorId``, ``year`` (defense year),
+                ``ordering`` (``relevance``, ``recent``, ``title``), ``page`` and ``pageSize``.
+
+        Returns:
+            Response: Paginated public summaries; 400 for invalid parameters.
+        """
+        serializer = PublicThesisSearchSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        filters = serializer.to_filters()
+        page_param = str(request.query_params.get("page") or "1")
+        page_size_param = str(request.query_params.get("pageSize") or "")
+        cache_key = search_cache_key(filters, page_param, page_size_param)
+
+        def build_page() -> dict[str, Any]:
+            queryset = search_public_theses(filters)
+            paginator = ThesisPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            results = [public_thesis_list_payload(thesis) for thesis in page]
+            page_data = dict(paginator.get_paginated_response(results).data)
+            page_data["ordering"] = filters.effective_ordering
+            return page_data
+
+        payload, from_cache = cached_payload(cache_key, build_page)
+        return _cached_response(payload, from_cache)
+
+
+class PublicThesisFiltersView(PublicRepositoryView):
+    """
+    List the filter options present in published theses.
+    """
+
+    def get(self, request) -> Response:
+        """
+        Return courses, advisors, defense years and keywords of published theses.
 
         Args:
             request: HTTP request.
 
         Returns:
-            Response: Paginated public thesis summaries.
+            Response: ``courses``, ``advisors``, ``years`` and ``keywords`` with counts.
         """
-        queryset = public_theses_filtered(
-            query=(request.query_params.get("q") or "").strip(),
-            course_id=(request.query_params.get("courseId") or "").strip(),
-            advisor_id=(request.query_params.get("advisorId") or "").strip(),
-            year=(request.query_params.get("year") or "").strip(),
-            keyword=(request.query_params.get("keyword") or "").strip(),
-        )
-        paginator = ThesisPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        results = [thesis_list_payload(thesis, None) for thesis in page]
-        return paginator.get_paginated_response(results)
+        payload, from_cache = cached_payload(filters_cache_key(), public_repository_filters_payload)
+        return _cached_response(payload, from_cache)
 
 
-class PublicThesisDetailView(APIView):
+class PublicCourseListView(PublicRepositoryView):
+    """
+    List the institution's courses for anonymous visitors.
+    """
+
+    def get(self, request) -> Response:
+        """
+        Return every course with its number of published theses.
+
+        Args:
+            request: HTTP request. ``withPublished=true`` keeps only courses with
+                at least one published thesis.
+
+        Returns:
+            Response: ``count`` and ``results``.
+        """
+        only_with_published = (request.query_params.get("withPublished") or "").strip().lower() in TRUTHY_QUERY_VALUES
+
+        def build_courses() -> dict[str, Any]:
+            results = public_courses_payload(only_with_published=only_with_published)
+            return {"count": len(results), "results": results}
+
+        payload, from_cache = cached_payload(courses_cache_key(only_with_published), build_courses)
+        return _cached_response(payload, from_cache)
+
+
+class PublicThesisDetailView(PublicRepositoryView):
     """
     Return a published thesis from the public repository.
     """
 
-    permission_classes = [AllowAny]
-    authentication_classes: list = []
-
     def get(self, request, thesis_id) -> Response:
         """
-        Return public thesis metadata.
+        Return public thesis metadata, including the SHA-256 of the published PDF.
 
         Args:
             request: HTTP request.
@@ -820,24 +1064,44 @@ class PublicThesisDetailView(APIView):
         Returns:
             Response: Public thesis payload.
         """
-        thesis = public_theses_filtered().filter(pk=thesis_id).first()
-        if thesis is None:
+
+        def build_detail() -> dict[str, Any] | None:
+            thesis = public_theses_queryset().filter(pk=thesis_id).first()
+            if thesis is None:
+                return None
+            return {"thesis": public_thesis_detail_payload(thesis)}
+
+        payload, from_cache = cached_payload(detail_cache_key(str(thesis_id)), build_detail)
+        if payload is None:
             raise Http404("Monografia não encontrada.")
-        return Response({"thesis": public_thesis_payload(thesis)})
+        return _cached_response(payload, from_cache)
 
 
-class PublicThesisDownloadView(APIView):
+class PublicThesisDownloadView(PublicRepositoryView):
     """
     Stream the current file of a published thesis.
     """
 
-    permission_classes = [AllowAny]
-    authentication_classes: list = []
-    renderer_classes = [BinaryFileRenderer]
+    throttle_scope = "public_download"
+
+    def perform_content_negotiation(self, request, force: bool = False):
+        """
+        Negotiate leniently so errors (404, 429) are always JSON.
+
+        The PDF itself is a ``FileResponse`` and bypasses the renderers.
+
+        Args:
+            request: Incoming request.
+            force: Ignored; negotiation is always forced.
+
+        Returns:
+            tuple: Renderer and media type for error responses.
+        """
+        return super().perform_content_negotiation(request, force=True)
 
     def get(self, request, thesis_id) -> FileResponse:
         """
-        Download or preview the current public PDF.
+        Download or preview the current public PDF after rechecking its SHA-256.
 
         Args:
             request: HTTP request.
@@ -846,7 +1110,7 @@ class PublicThesisDownloadView(APIView):
         Returns:
             FileResponse: Streamed PDF.
         """
-        thesis = public_theses_filtered().filter(pk=thesis_id).first()
+        thesis = published_theses().filter(pk=thesis_id).first()
         if thesis is None:
             raise Http404("Monografia não encontrada.")
         thesis_file = thesis.files.filter(is_current=True).select_related("stored_file").first()
@@ -865,8 +1129,8 @@ class PublicThesisDownloadView(APIView):
 
 from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_invitation, remove_member, resend_external_member_invitation, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
-from theses.defense_listing import DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
-from theses.defense_scheduling import cancel_defense, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
+from theses.defense_listing import DEFENSE_LIST_PREFETCH, DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
+from theses.defense_scheduling import cancel_defense, defense_close_entries_prefetch, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
 from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
@@ -893,16 +1157,16 @@ def _scoped_thesis(user, thesis_id) -> Thesis:
     - Student: only their authored (main) thesis.
     """
     if user_is_admin(user):
-        return get_object_or_404(Thesis, pk=thesis_id)
+        return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id)
     if user_is_coordinator(user):
         managed_thesis_ids = coordinator_managed_theses(user).values("pk")
         allowed = Q(pk__in=managed_thesis_ids)
         if user_is_advisor(user):
             allowed |= Q(advisor_id=user.pk)
-        return get_object_or_404(Thesis.objects.filter(allowed), pk=thesis_id)
+        return get_object_or_404(Thesis.objects.filter(allowed, deleted_at__isnull=True), pk=thesis_id)
     if user_is_advisor(user):
-        return get_object_or_404(Thesis, pk=thesis_id, advisor_id=user.pk)
-    return get_object_or_404(Thesis, pk=thesis_id, authors__author=user, authors__is_main_author=True)
+        return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, advisor_id=user.pk)
+    return get_object_or_404(Thesis.objects.filter(deleted_at__isnull=True), pk=thesis_id, authors__author=user, authors__is_main_author=True)
 
 
 # ─── Defense views ────────────────────────────────────────────────────────────
@@ -997,7 +1261,16 @@ class DefenseListCreateView(APIView):
             Response: List of defense payloads.
         """
         thesis = _scoped_thesis(request.user, thesis_id)
-        defenses = list(Defense.objects.filter(thesis=thesis).prefetch_related("members__institutional_member", "members__external_invitation", "members__evaluation").order_by("-scheduled_datetime"))
+        defenses = list(
+            Defense.objects.filter(thesis=thesis)
+            .select_related("thesis", "thesis__course", "thesis__advisor")
+            .prefetch_related(
+                *DEFENSE_LIST_PREFETCH,
+                defense_close_entries_prefetch(),
+                google_social_accounts_prefetch("members__institutional_member__socialaccount_set"),
+            )
+            .order_by("-scheduled_datetime")
+        )
         viewer_context = defense_viewer_context_for(defenses, request.user)
         return Response({"defenses": [defense_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in defenses]})
 
@@ -1193,8 +1466,27 @@ class DefenseMemberCreateView(APIView):
             member = add_institutional_member(defense, data["role"], data["user"], conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        from theses.defense_committee import defense_member_payload
         return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+
+
+def _invitation_response(member: DefenseMember, request, status_code: int) -> Response:
+    """
+    Build the response of an external invitation action (creation, resend or new invitation).
+
+    The body never carries the access token, which only exists in the e-mail. ``no-store``
+    keeps the invitation details (e-mail and status) out of shared caches anyway.
+
+    Args:
+        member: External committee member whose invitation changed.
+        request: Request of the manager who triggered the action.
+        status_code: HTTP status of the response.
+
+    Returns:
+        Response: Member payload with ``Cache-Control: no-store``.
+    """
+    response = Response({"member": defense_member_payload(member, viewer=request.user)}, status=status_code)
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 class DefenseExternalMemberCreateView(APIView):
@@ -1229,7 +1521,7 @@ class DefenseExternalMemberCreateView(APIView):
             member = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+        return _invitation_response(member, request, status.HTTP_201_CREATED)
 
 
 class DefenseExternalMemberInvitationResendView(APIView):
@@ -1263,7 +1555,7 @@ class DefenseExternalMemberInvitationResendView(APIView):
             member = resend_external_member_invitation(defense, member, actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_202_ACCEPTED)
+        return _invitation_response(member, request, status.HTTP_202_ACCEPTED)
 
 
 class DefenseExternalMemberTokenView(APIView):
@@ -1296,7 +1588,7 @@ class DefenseExternalMemberTokenView(APIView):
             member = regenerate_external_member_invitation(defense, member, actor=request.user, request=request)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_202_ACCEPTED)
+        return _invitation_response(member, request, status.HTTP_202_ACCEPTED)
 
 
 class DefenseMemberDeleteView(APIView):

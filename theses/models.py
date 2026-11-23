@@ -47,6 +47,15 @@ class ThesisStatus(models.TextChoices):
     ARCHIVED = "ARCHIVED", "Arquivada"
 
 
+class ThesisOrigin(models.TextChoices):
+    """
+    How a thesis entered the system.
+    """
+
+    WORKFLOW = "WORKFLOW", "Fluxo do sistema"
+    LEGACY_IMPORT = "LEGACY_IMPORT", "Cadastro manual de acervo"
+
+
 class ReviewDecision(models.TextChoices):
     """
     Advisor decisions for a submitted thesis version.
@@ -164,6 +173,10 @@ PUBLISHABLE_STATUSES = (
     ThesisStatus.APPROVED_WITH_REMARKS,
 )
 
+CORRECTION_UPLOAD_STATUSES = (
+    ThesisStatus.APPROVED_WITH_REMARKS,
+)
+
 APPROVED_DEFENSE_STATUSES = (
     ThesisStatus.APPROVED,
     ThesisStatus.APPROVED_WITH_REMARKS,
@@ -178,6 +191,57 @@ ACTIVE_DEFENSE_STATUSES = (
     DefenseStatus.SCHEDULED,
     DefenseStatus.IN_PROGRESS,
 )
+
+
+PUBLISHED_DELETE_ERROR = "Monografias publicadas não podem ser excluídas; use a despublicação."
+
+
+def thesis_was_published(thesis: Thesis) -> bool:
+    """
+    Return whether a thesis is or was in the public repository.
+
+    Unpublished theses keep ``published_at``, so they stay protected as well.
+
+    Args:
+        thesis: Thesis instance.
+
+    Returns:
+        bool: ``True`` when deletion must be refused.
+    """
+    return thesis.status == ThesisStatus.PUBLISHED or thesis.is_public or thesis.published_at is not None
+
+
+def published_thesis_filter() -> Q:
+    """
+    Build the filter matching theses that are or were published.
+
+    Returns:
+        Q: Same rule as ``thesis_was_published``, usable in querysets.
+    """
+    return Q(status=ThesisStatus.PUBLISHED) | Q(is_public=True) | Q(published_at__isnull=False)
+
+
+class ThesisQuerySet(models.QuerySet):
+    """
+    QuerySet that refuses bulk deletion of published theses.
+    """
+
+    def delete(self) -> tuple[int, dict[str, int]]:
+        """
+        Delete the selected theses unless one of them is or was published.
+
+        Checked before Django starts collecting related rows, so the caller's
+        transaction is not left broken by an error raised mid-deletion.
+
+        Returns:
+            tuple[int, dict[str, int]]: Django's deletion counters.
+
+        Raises:
+            ValidationError: When the selection contains a published thesis.
+        """
+        if self.filter(published_thesis_filter()).exists():
+            raise ValidationError(PUBLISHED_DELETE_ERROR)
+        return super().delete()
 
 
 def build_reference_code() -> str:
@@ -346,12 +410,25 @@ class Thesis(models.Model):
         db_index=True,
     )
     is_public = models.BooleanField(default=False, db_index=True)
+    origin = models.CharField(
+        max_length=20,
+        choices=ThesisOrigin.choices,
+        default=ThesisOrigin.WORKFLOW,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     advisor_approved_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    # Data/ano da defesa gravados na publicação: o repositório filtra e lista os
+    # anos sem depender de joins com `defense`, e monografias antigas (sem banca
+    # no sistema) informam esses valores no cadastro manual.
+    defense_date = models.DateField(null=True, blank=True)
+    defense_year = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    objects = ThesisQuerySet.as_manager()
 
     class Meta:
         """
@@ -367,6 +444,7 @@ class Thesis(models.Model):
             models.Index(fields=["advisor", "status"], name="thesis_advisor_status_idx"),
             models.Index(fields=["course", "status"], name="thesis_course_status_idx"),
             models.Index(fields=["is_public", "published_at"], name="thesis_public_idx"),
+            models.Index(fields=["is_public", "defense_year"], name="thesis_public_year_idx"),
         ]
 
     def __str__(self) -> str:
@@ -400,10 +478,10 @@ class Thesis(models.Model):
         Prevent deletion of published theses through ordinary CRUD paths.
 
         Raises:
-            ValidationError: If the thesis is published.
+            ValidationError: If the thesis is or was published.
         """
-        if self.status == ThesisStatus.PUBLISHED or self.is_public:
-            raise ValidationError("Monografias publicadas não podem ser excluídas.")
+        if thesis_was_published(self):
+            raise ValidationError(PUBLISHED_DELETE_ERROR)
         super().delete(*args, **kwargs)
 
     @property
@@ -438,11 +516,16 @@ class ThesisAuthor(models.Model):
         on_delete=models.CASCADE,
         related_name="authors",
     )
+    # Nulo só em monografias do acervo cadastradas manualmente cujo autor não tem
+    # conta; nesse caso `name` guarda o nome exibido.
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="authored_theses",
+        null=True,
+        blank=True,
     )
+    name = models.CharField(max_length=200, blank=True, default="")
     position = models.PositiveSmallIntegerField(default=1)
     is_main_author = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -474,6 +557,10 @@ class ThesisAuthor(models.Model):
                 condition=Q(position__gte=1),
                 name="thesis_author_position_gte_1",
             ),
+            models.CheckConstraint(
+                condition=Q(author__isnull=False) | ~Q(name=""),
+                name="thesis_author_has_identity",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -483,7 +570,21 @@ class ThesisAuthor(models.Model):
         Returns:
             str: Author representation.
         """
-        return f"{self.author_id}:{self.thesis_id}"
+        return f"{self.author_id or self.name}:{self.thesis_id}"
+
+    @property
+    def display_name(self) -> str:
+        """
+        Return the name shown for this author.
+
+        Returns:
+            str: Stored name, or the linked user's name.
+        """
+        if self.name:
+            return self.name
+        if self.author is not None:
+            return self.author.name or ""
+        return ""
 
 
 class ThesisKeyword(models.Model):
@@ -545,6 +646,9 @@ class ThesisFile(models.Model):
     )
     version_number = models.PositiveSmallIntegerField()
     is_current = models.BooleanField(default=False, db_index=True)
+    # Versão corrigida enviada após "aprovada com ressalvas"; é uma das condições
+    # da publicação automática nesse resultado.
+    is_correction = models.BooleanField(default=False)
     change_description = models.TextField(blank=True, default="")
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -953,6 +1057,12 @@ class DefenseMember(models.Model):
                 fields=["defense", "role"],
                 condition=Q(role="PRESIDENT"),
                 name="uniq_president_per_defense",
+            ),
+            # Um mesmo usuário institucional não pode entrar duas vezes na banca.
+            models.UniqueConstraint(
+                fields=["defense", "institutional_member"],
+                condition=Q(institutional_member__isnull=False),
+                name="uniq_institutional_member_per_defense",
             ),
             # Exatamente uma identidade por membro: institucional XOR externo.
             models.CheckConstraint(

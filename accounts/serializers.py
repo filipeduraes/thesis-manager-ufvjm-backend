@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from rest_framework import serializers
 
+from accounts.audit_presentation import AuditPresenter, CATEGORY_LABELS
 from accounts.models import (
     AuditLog,
     ProfileRole,
@@ -290,185 +291,6 @@ class ExternalTokenSerializer(serializers.Serializer):
         return token
 
 
-ENTITY_TYPE_LABELS = {
-    "User": "usuário",
-    "Course": "curso",
-    "Department": "departamento",
-    "UserCourseAssignment": "vínculo de curso",
-    "ExternalInvitation": "convite externo",
-    "SessionAudit": "sessão",
-    "AuditLog": "auditoria",
-}
-
-ACTION_VERBS = {
-    "CREATE": "Criou",
-    "READ": "Consultou",
-    "UPDATE": "Atualizou",
-    "DELETE": "Excluiu",
-    "LOGIN": "Realizou login",
-    "LOGOUT": "Realizou logout",
-    "LOGIN_FAILED": "Falha de login",
-    "UPLOAD": "Enviou arquivo",
-    "DOWNLOAD": "Baixou arquivo",
-    "REVIEW": "Revisou",
-    "SCHEDULE": "Agendou",
-    "EVALUATE": "Avaliou",
-    "PUBLISH": "Publicou",
-    "INVITE": "Convidou",
-    "TOKEN_ACCESS": "Acessou por token",
-    "APPROVE": "Aprovou",
-    "REJECT": "Rejeitou",
-}
-
-CHANGE_LABELS = {
-    "name": "nome",
-    "email": "e-mail",
-    "userName": "usuário",
-    "userEmail": "e-mail do usuário",
-    "roles": "perfis",
-    "role": "perfil",
-    "is_active": "status",
-    "status": "status",
-    "courseId": "curso",
-    "course": "curso",
-    "code": "código",
-    "department": "departamento",
-    "departmentId": "departamento",
-    "departmentName": "departamento",
-    "coordinatorEmail": "coordenador",
-    "coordinator_email": "coordenador",
-    "coordinator": "coordenador",
-    "institution": "instituição",
-    "expiresAt": "expiração",
-}
-
-
-def _role_labels(values: object) -> list[str]:
-    if not isinstance(values, (list, tuple)):
-        return []
-    labels: list[str] = []
-    for item in values:
-        label = role_label(str(item)) or str(item)
-        if label and label not in labels:
-            labels.append(label)
-    return labels
-
-
-def _status_label(value: object) -> str | None:
-    if value in {True, "Ativo", "ativo", "active"}:
-        return "Ativo"
-    if value in {False, "Inativo", "inativo", "inactive"}:
-        return "Inativo"
-    if value in (None, ""):
-        return None
-    return str(value)
-
-
-def _describe_transition(key: str, value: dict) -> str | None:
-    before = value.get("from")
-    after = value.get("to")
-    if key in {"roles", "role"}:
-        from_labels = _role_labels(before)
-        to_labels = _role_labels(after)
-        from_text = ", ".join(from_labels) or "nenhum"
-        to_text = ", ".join(to_labels) or "nenhum"
-        if from_text == to_text:
-            return f"perfis: {to_text}"
-        return f"perfis: de {from_text} para {to_text}"
-    if key in {"is_active", "status"}:
-        from_text = _status_label(before) or "—"
-        to_text = _status_label(after) or "—"
-        if from_text == to_text:
-            return f"status: {to_text}"
-        return f"status: de {from_text} para {to_text}"
-    if key in {"course"}:
-        from_text = str(before) if before not in (None, "") else "sem curso"
-        to_text = str(after) if after not in (None, "") else "sem curso"
-        if from_text == to_text:
-            return f"curso: {to_text}"
-        return f"curso: de {from_text} para {to_text}"
-    return None
-
-
-def _describe_changes(log: AuditLog) -> str:
-    changes = log.changes if isinstance(log.changes, dict) else {}
-    metadata = log.metadata if isinstance(log.metadata, dict) else {}
-    payload = {**metadata, **changes}
-    if not payload:
-        return ""
-    parts: list[str] = []
-    if log.entity_type == "UserCourseAssignment":
-        user_name = payload.get("userName") or payload.get("userEmail")
-        if user_name:
-            parts.append(f"usuário: {user_name}")
-        course_value = payload.get("course")
-        if isinstance(course_value, dict):
-            detail = _describe_transition("course", course_value)
-            if detail:
-                parts.append(detail)
-        else:
-            course_name = course_value
-            course_id = payload.get("courseId")
-            if course_name is None and course_id in (None, "", False) and ("course" in payload or "courseId" in payload):
-                parts.append("curso removido")
-            elif isinstance(course_name, str) and course_name:
-                parts.append(f"curso: {course_name}")
-            elif course_id:
-                parts.append(f"curso: {course_id}")
-        return "; ".join(parts)
-
-    for key, value in payload.items():
-        label = CHANGE_LABELS.get(key, key)
-        if key in {"userName", "userEmail"} and log.entity_type == "User":
-            continue
-        if key in {"name", "email"} and log.entity_type == "User" and key in metadata and key not in changes:
-            continue
-        if isinstance(value, dict) and "from" in value and "to" in value:
-            detail = _describe_transition(key, value)
-            if detail and detail not in parts:
-                parts.append(detail)
-            continue
-        if key in {"roles", "role"} and isinstance(value, (list, tuple)):
-            labels = _role_labels(value)
-            parts.append(f"perfis: {', '.join(labels)}" if labels else "perfis")
-            continue
-        if key in {"is_active", "status"}:
-            status = _status_label(value)
-            if status:
-                parts.append(f"status: {status}")
-            else:
-                parts.append(f"{label}: {value}")
-            continue
-        if key in {"email", "coordinatorEmail", "coordinator_email", "userEmail"} and value:
-            parts.append(f"{label}: {value}")
-            continue
-        if key in {"name", "code", "institution", "userName"} and value:
-            parts.append(f"{label}: {value}")
-            continue
-        if key in {"courseId", "course", "departmentId", "department"} and value in (None, "", False):
-            if key in {"courseId", "course"}:
-                parts.append("curso removido")
-            else:
-                parts.append(f"{label} removido")
-            continue
-        if key in {"course", "department", "departmentName"} and isinstance(value, str) and value:
-            parts.append(f"{label}: {value}")
-            continue
-        if key == "courseId" and value:
-            continue
-        if label not in {"perfis"} and label not in parts:
-            parts.append(label)
-    # Remove duplicatas preservando ordem.
-    seen: set[str] = set()
-    unique: list[str] = []
-    for part in parts:
-        if part in seen:
-            continue
-        seen.add(part)
-        unique.append(part)
-    return "; ".join(unique[:6])
-
-
 ORIGIN_LABELS = {
     "INSTITUTIONAL_NETWORK": "Rede institucional",
     "VPN": "VPN",
@@ -476,20 +298,55 @@ ORIGIN_LABELS = {
 }
 
 
+def _audit_presenter(context: dict) -> AuditPresenter:
+    """
+    Return the audit presenter shared by the serializer context.
+
+    Args:
+        context: Serializer context mapping.
+
+    Returns:
+        AuditPresenter: Presenter primed by the view or an empty fallback.
+    """
+    presenter = context.get("audit_presenter")
+    if presenter is None:
+        presenter = AuditPresenter()
+        context["audit_presenter"] = presenter
+    return presenter
+
+
 class AuditLogSerializer(serializers.ModelSerializer):
     """
     Read serializer for the administrative audit log.
+
+    Stable codes stored in the table remain available (``actionCode``,
+    ``entityType``, ``entityId``, ``changes`` and ``metadata``) for
+    compatibility, while the readable fields (``summary``, ``details`` and
+    ``entityName``) are produced by :class:`AuditPresenter`.
     """
     timestamp = serializers.SerializerMethodField()
     actor = serializers.SerializerMethodField()
+    actorEmail = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
+    roles = serializers.SerializerMethodField()
+    roleCodes = serializers.SerializerMethodField()
     action = serializers.SerializerMethodField()
+    event = serializers.SerializerMethodField()
     actionCode = serializers.SerializerMethodField()
     actionLabel = serializers.SerializerMethodField()
     summary = serializers.SerializerMethodField()
+    category = serializers.SerializerMethodField()
+    categoryLabel = serializers.SerializerMethodField()
+    verbosity = serializers.SerializerMethodField()
+    verbosityLabel = serializers.SerializerMethodField()
     entityId = serializers.SerializerMethodField()
     entityType = serializers.CharField(source="entity_type", read_only=True)
+    entityTypeLabel = serializers.SerializerMethodField()
     entityAppLabel = serializers.CharField(source="entity_app_label", read_only=True)
+    entityName = serializers.SerializerMethodField()
+    entityNameShort = serializers.SerializerMethodField()
+    entityReference = serializers.SerializerMethodField()
+    details = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
     originCode = serializers.CharField(source="origin", read_only=True)
     ipAddress = serializers.SerializerMethodField()
@@ -504,14 +361,27 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "id",
             "timestamp",
             "actor",
+            "actorEmail",
             "role",
+            "roles",
+            "roleCodes",
             "action",
+            "event",
             "actionCode",
             "actionLabel",
             "summary",
+            "category",
+            "categoryLabel",
+            "verbosity",
+            "verbosityLabel",
             "entityType",
+            "entityTypeLabel",
             "entityAppLabel",
             "entityId",
+            "entityName",
+            "entityNameShort",
+            "entityReference",
+            "details",
             "origin",
             "originCode",
             "ipAddress",
@@ -526,14 +396,22 @@ class AuditLogSerializer(serializers.ModelSerializer):
         return log.occurred_at.isoformat()
 
     def get_actor(self, log: AuditLog) -> str:
-        if log.actor_user_id:
-            return log.actor_user.name or log.actor_user.email
-        if log.actor_external_invitation_id:
-            return log.actor_external_invitation.name
-        return "Sistema"
+        return _audit_presenter(self.context).actor_name(log)
+
+    def get_actorEmail(self, log: AuditLog) -> str | None:
+        return _audit_presenter(self.context).actor_email(log)
 
     def get_role(self, log: AuditLog) -> str:
-        return role_label(log.actor_role) or "Sistema"
+        return _audit_presenter(self.context).role_text(log)
+
+    def get_roles(self, log: AuditLog) -> list[dict[str, str]]:
+        return _audit_presenter(self.context).roles(log)
+
+    def get_roleCodes(self, log: AuditLog) -> list[str]:
+        return _audit_presenter(self.context).role_codes(log)
+
+    def get_event(self, log: AuditLog) -> dict[str, object]:
+        return _audit_presenter(self.context).structured(log).as_dict()
 
     def get_actionCode(self, log: AuditLog) -> str:
         return log.action
@@ -542,41 +420,34 @@ class AuditLogSerializer(serializers.ModelSerializer):
         return log.get_action_display()
 
     def get_summary(self, log: AuditLog) -> str:
-        changes = log.changes if isinstance(log.changes, dict) else {}
-        metadata = log.metadata if isinstance(log.metadata, dict) else {}
-        if log.entity_type == "User" and log.action == "UPDATE":
-            name = metadata.get("name") or metadata.get("email") or f"ID {log.entity_id}"
-            role_change = changes.get("roles")
-            if isinstance(role_change, dict):
-                from_labels = _role_labels(role_change.get("from"))
-                to_labels = _role_labels(role_change.get("to"))
-                from_text = ", ".join(from_labels) or "nenhum"
-                to_text = ", ".join(to_labels) or "nenhum"
-                noun = "perfil" if len(to_labels) <= 1 and len(from_labels) <= 1 else "perfis"
-                base = f"Atualizou {noun} do usuário {name} de {from_text} para {to_text}"
-                extra_parts = []
-                course_change = changes.get("course")
-                if isinstance(course_change, dict):
-                    detail = _describe_transition("course", course_change)
-                    if detail:
-                        extra_parts.append(detail)
-                status_change = changes.get("is_active") or changes.get("status")
-                if isinstance(status_change, dict):
-                    detail = _describe_transition("is_active", status_change)
-                    if detail:
-                        extra_parts.append(detail)
-                if extra_parts:
-                    return f"{base} ({'; '.join(extra_parts)})"
-                return base
-        entity = ENTITY_TYPE_LABELS.get(log.entity_type, log.entity_type.lower())
-        details = _describe_changes(log)
-        verb = ACTION_VERBS.get(log.action, log.get_action_display())
-        base = f"{verb} {entity}"
-        if not details and log.entity_type == "UserCourseAssignment":
-            details = f"usuário ID: {log.entity_id}"
-        if details:
-            return f"{base} ({details})"
-        return base
+        return _audit_presenter(self.context).summary(log)
+
+    def get_category(self, log: AuditLog) -> str:
+        return log.category or ""
+
+    def get_categoryLabel(self, log: AuditLog) -> str:
+        return CATEGORY_LABELS.get(log.category, log.category or "—")
+
+    def get_verbosity(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).verbosity(log)
+
+    def get_verbosityLabel(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).verbosity_label(log)
+
+    def get_entityTypeLabel(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).entity_type_label(log)
+
+    def get_entityName(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).entity_name(log)
+
+    def get_entityNameShort(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).entity_name_short(log)
+
+    def get_entityReference(self, log: AuditLog) -> str:
+        return _audit_presenter(self.context).entity_reference(log)
+
+    def get_details(self, log: AuditLog) -> list[dict[str, object]]:
+        return _audit_presenter(self.context).details(log)
 
     def get_action(self, log: AuditLog) -> str:
         return self.get_summary(log)

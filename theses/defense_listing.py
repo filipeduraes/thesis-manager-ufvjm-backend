@@ -18,13 +18,13 @@ from accounts.models import User
 from accounts.services import google_social_accounts_prefetch
 from theses.defense_committee import DefenseViewerContext, build_defense_viewer_context, coordinator_managed_theses
 from theses.defense_scheduling import defense_close_entries_prefetch, defense_payload, sync_defense_status
+from thesismanagerbackend.query_params import TRUTHY_QUERY_VALUES
 from theses.models import ACTIVE_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import user_brief, user_is_admin, user_is_advisor, user_is_coordinator
 
 logger = logging.getLogger(__name__)
 
 DEFENSE_LIST_PREFETCH: tuple[str, ...] = ("members__institutional_member", "members__external_invitation", "members__evaluation", "thesis__authors__author", "thesis__keyword_links__keyword", "thesis__files__stored_file")
-TRUTHY_QUERY_VALUES: frozenset[str] = frozenset({"1", "true", "yes"})
 
 
 @dataclass(frozen=True)

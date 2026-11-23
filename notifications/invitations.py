@@ -20,6 +20,9 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from accounts.audit_entry import AuditEntry
+from accounts.audit_events import event_payload
+from accounts.audit_identifiers import AuditEvent, EntityType
 from accounts.models import AuditAction, ExternalInvitation
 from accounts.services import issue_external_token, mark_external_token_sent, record_audit
 from events.catalog import ExternalInvitationTrigger
@@ -34,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 MASKED_ACCESS_TOKEN = "UFVJM-****"
 DISPLAY_TIMEZONE = ZoneInfo("America/Sao_Paulo")
-AUDIT_EVENT_BY_TRIGGER: dict[str, str] = {
-    ExternalInvitationTrigger.CREATED: "INVITATION_EMAIL_SENT",
-    ExternalInvitationTrigger.REGENERATED: "INVITATION_EMAIL_SENT",
-    ExternalInvitationTrigger.RESENT: "INVITATION_EMAIL_RESENT",
+AUDIT_EVENT_BY_TRIGGER: dict[str, AuditEvent] = {
+    ExternalInvitationTrigger.CREATED: AuditEvent.INVITATION_EMAIL_SENT,
+    ExternalInvitationTrigger.REGENERATED: AuditEvent.INVITATION_EMAIL_SENT,
+    ExternalInvitationTrigger.RESENT: AuditEvent.INVITATION_EMAIL_RESENT,
 }
 
 
@@ -131,16 +134,16 @@ def record_invitation_delivery(notification: Notification, event_id: UUID, trigg
     if not mark_external_token_sent(invitation_id, event_id):
         logger.info("Invitation %s was reissued after notification %s was sent", invitation_id, notification.pk)
     member = DefenseMember.objects.filter(external_invitation_id=invitation_id).only("pk", "defense_id").first()
-    metadata = {
-        "event": AUDIT_EVENT_BY_TRIGGER.get(trigger, "INVITATION_EMAIL_SENT"),
-        "trigger": trigger,
-        "notificationId": str(notification.pk),
-        "attempts": notification.attempts,
-        "eventId": str(event_id),
-        "defenseId": str(member.defense_id) if member else None,
-        "memberId": str(member.pk) if member else None,
-    }
-    record_audit(action=AuditAction.INVITE, entity_type="ExternalInvitation", entity_id=str(invitation_id), entity_app_label="accounts", metadata=metadata)
+    metadata = event_payload(
+        AUDIT_EVENT_BY_TRIGGER.get(trigger, AuditEvent.INVITATION_EMAIL_SENT),
+        trigger=trigger,
+        notificationId=str(notification.pk),
+        attempts=notification.attempts,
+        eventId=str(event_id),
+        defenseId=str(member.defense_id) if member else None,
+        memberId=str(member.pk) if member else None,
+    )
+    record_audit(AuditEntry(action=AuditAction.INVITE, entity_type=EntityType.EXTERNAL_INVITATION, entity_id=str(invitation_id), metadata=metadata))
 
 
 def plan_external_member_invited(event_id: UUID, payload: EventPayload) -> NotificationPlan:
