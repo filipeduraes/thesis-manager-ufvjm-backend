@@ -81,6 +81,10 @@ def create_thesis(spec: ThesisSpec) -> Thesis:
     thesis = Thesis.objects.create(
         course=spec.course,
         advisor=spec.advisor,
+        advisor_name=spec.advisor.name or spec.advisor.email,
+        course_name=spec.course.name,
+        course_code=spec.course.code,
+        main_author_name=spec.authors[0].name or spec.authors[0].email,
         title=spec.title,
         abstract=spec.abstract,
         status=spec.status,
@@ -90,7 +94,7 @@ def create_thesis(spec: ThesisSpec) -> Thesis:
         defense_year=defense_date.year if is_published else None,
     )
     for position, author in enumerate(spec.authors, start=1):
-        ThesisAuthor.objects.create(thesis=thesis, author=author, position=position, is_main_author=position == 1)
+        ThesisAuthor.objects.create(thesis=thesis, author=author, name=author.name or author.email, position=position, is_main_author=position == 1)
     for keyword_name in spec.keywords:
         keyword, _ = Keyword.objects.get_or_create(normalized_name=keyword_name.casefold(), defaults={"name": keyword_name})
         ThesisKeyword.objects.create(thesis=thesis, keyword=keyword)

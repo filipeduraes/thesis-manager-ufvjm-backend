@@ -17,15 +17,16 @@ from .settings import *  # noqa: F401,F403
 
 DEBUG = True
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "e2e.sqlite3",  # noqa: F405
-        # Requisições concorrentes (ex.: visualizador de PDF) disputam a escrita
-        # do log de auditoria; o timeout evita "database is locked" no E2E.
-        "OPTIONS": {"timeout": 30, "init_command": "PRAGMA journal_mode=WAL;"},
-    }
+_E2E_SQLITE = {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": BASE_DIR / "e2e.sqlite3",  # noqa: F405
+    # Requisições concorrentes (ex.: visualizador de PDF) disputam a escrita
+    # do log de auditoria; o timeout evita "database is locked" no E2E.
+    "OPTIONS": {"timeout": 30, "init_command": "PRAGMA journal_mode=WAL;"},
 }
+DATABASES = {"default": _E2E_SQLITE}
+for _e2e_alias in SERVICE_DATABASE_ALIASES:  # noqa: F405
+    DATABASES[_e2e_alias] = dict(_E2E_SQLITE)
 
 CACHES = {
     "default": {

@@ -163,6 +163,41 @@ class SessionView(APIView):
         return response
 
 
+class ServiceIntrospectionView(APIView):
+    """
+    Resolve the identity and active roles of a user for other services.
+
+    The request is authenticated by a shared service token in ``X-Service-Token``
+    and never trusts client-supplied role data.
+    """
+
+    permission_classes: list = []
+    throttle_scope = "session"
+
+    def get(self, request) -> Response:
+        """
+        Return the caller's identity resolved by the auth service.
+
+        Args:
+            request: HTTP request with ``user_id`` and the service token header.
+
+        Returns:
+            Response: Identity, roles and active flag, or 401/404.
+        """
+        from django.conf import settings
+
+        if request.headers.get("X-Service-Token") != settings.SERVICE_TOKEN:
+            return Response({"detail": "Serviço não autenticado."}, status=401)
+        user_id = request.query_params.get("user_id")
+        if not user_id:
+            return Response({"detail": "user_id é obrigatório."}, status=400)
+        user = User.objects.filter(pk=user_id).first()
+        if user is None:
+            return Response({"detail": "Usuário não encontrado."}, status=404)
+        roles = list(user.active_profile_roles().values_list("role", flat=True))
+        return Response({"id": str(user.pk), "name": user.name, "email": user.email, "isActive": user.is_active, "roles": roles})
+
+
 class GoogleStartView(APIView):
     """
     Initiate Google OAuth using django-allauth's headless/redirect flow.
@@ -457,6 +492,7 @@ class AdminUserDetailView(APIView):
                         course,
                         assigned_by=actor_from_request(request),
                         request=request,
+                        audit=False,
                     )
                     audit_changes["course"] = {
                         "from": previous_course.name if previous_course else None,

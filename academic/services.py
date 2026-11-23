@@ -17,7 +17,7 @@ from django.utils import timezone
 from academic.models import Course, Department, UserCourseAssignment
 from accounts.audit_identifiers import EntityType
 from accounts.audit_entry import AuditEntry
-from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock
+from accounts.concurrency import COURSE_ASSIGNMENT_LOCK_KEY, acquire_transaction_lock, database_for_model
 from accounts.models import AuditAction, ProfileRole, User, UserProfileRole
 from accounts.services import actor_from_request, record_audit
 
@@ -99,9 +99,10 @@ def resolve_pending_coordinators_for_user(
     if not email:
         return []
 
-    with transaction.atomic():
+    academic_db = database_for_model(Course)
+    with transaction.atomic(using=academic_db):
         courses = list(
-            Course.objects.select_for_update().filter(
+            Course.objects.using(academic_db).select_for_update().filter(
                 coordinator_email__iexact=email
             )
         )
@@ -362,6 +363,7 @@ def create_course(
     if user:
         ensure_coordinator_role(user)
         resolve_pending_coordinators_for_user(user, request=request)
+        set_user_course_assignment(user, course, assigned_by=actor_from_request(request), request=request)
 
     record_audit(AuditEntry(
         action=AuditAction.CREATE,
@@ -456,6 +458,7 @@ def update_course(
     course.save()
     if coordinator_email is not None and course.coordinator_id:
         resolve_pending_coordinators_for_user(course.coordinator, request=request)
+        set_user_course_assignment(course.coordinator, course, assigned_by=actor_from_request(request), request=request)
     if old_department_id != course.department_id:
         prune_orphan_departments()
 
@@ -511,6 +514,7 @@ def set_user_course_assignment(
     *,
     assigned_by: User | None = None,
     request: HttpRequest | None = None,
+    audit: bool = True,
 ) -> None:
     """
     Set the active course assignment for a user.
@@ -520,14 +524,17 @@ def set_user_course_assignment(
         course: Course to assign, or ``None`` to remove the active assignment.
         assigned_by: Administrator responsible for the change.
         request: HTTP request used for audit context.
+        audit: Whether to record a dedicated course-assignment entry. Callers
+            that already log the full user update pass False to avoid duplicates.
     """
-    with transaction.atomic():
+    academic_db = database_for_model(User)
+    with transaction.atomic(using=academic_db):
         # Bloqueia o usuário (a linha "pai") para serializar atribuições
         # concorrentes, inclusive quando ainda não existe nenhuma atribuição.
-        acquire_transaction_lock(COURSE_ASSIGNMENT_LOCK_KEY + (user.pk.int % 100000))
-        User.objects.select_for_update().get(pk=user.pk)
+        acquire_transaction_lock(COURSE_ASSIGNMENT_LOCK_KEY + (user.pk.int % 100000), using=academic_db)
+        User.objects.using(academic_db).select_for_update().get(pk=user.pk)
         now = timezone.now()
-        active = UserCourseAssignment.objects.select_for_update().filter(
+        active = UserCourseAssignment.objects.using(academic_db).select_for_update().filter(
             user=user,
             is_active=True,
         )
@@ -535,18 +542,19 @@ def set_user_course_assignment(
             changed = active.exists()
             active.update(is_active=False, revoked_at=now)
             if changed:
-                record_audit(AuditEntry(
-                    action=AuditAction.UPDATE,
-                    entity_type=EntityType.USER_COURSE_ASSIGNMENT,
-                    entity_id=str(user.pk),
-                    request=request,
-                    actor_user=assigned_by,
-                    changes={"course": None},
-                    metadata={
-                        "userName": user.name,
-                        "userEmail": user.email,
-                    },
-                ))
+                if audit:
+                    record_audit(AuditEntry(
+                        action=AuditAction.UPDATE,
+                        entity_type=EntityType.USER_COURSE_ASSIGNMENT,
+                        entity_id=str(user.pk),
+                        request=request,
+                        actor_user=assigned_by,
+                        changes={"course": None},
+                        metadata={
+                            "userName": user.name,
+                            "userEmail": user.email,
+                        },
+                    ))
             return
 
         current = active.filter(course=course).first()
@@ -568,21 +576,22 @@ def set_user_course_assignment(
                 ).first()
                 if current is None:
                     raise
-        record_audit(AuditEntry(
-            action=AuditAction.UPDATE,
-            entity_type=EntityType.USER_COURSE_ASSIGNMENT,
-            entity_id=str(user.pk),
-            request=request,
-            actor_user=assigned_by,
-            changes={
-                "courseId": str(course.pk),
-                "course": course.name,
-            },
-            metadata={
-                "userName": user.name,
-                "userEmail": user.email,
-            },
-        ))
+        if audit:
+            record_audit(AuditEntry(
+                action=AuditAction.UPDATE,
+                entity_type=EntityType.USER_COURSE_ASSIGNMENT,
+                entity_id=str(user.pk),
+                request=request,
+                actor_user=assigned_by,
+                changes={
+                    "courseId": str(course.pk),
+                    "course": course.name,
+                },
+                metadata={
+                    "userName": user.name,
+                    "userEmail": user.email,
+                },
+            ))
 
 
 def active_course_assignment(user: User) -> UserCourseAssignment | None:

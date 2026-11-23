@@ -58,6 +58,8 @@ INSTALLED_APPS = [
     "notifications",
     "indexing",
     "adjudication",
+    "repository_readmodel",
+    "reports_readmodel",
 ]
 
 MIDDLEWARE = [
@@ -102,9 +104,21 @@ WSGI_APPLICATION = "thesismanagerbackend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
+DATABASE_URL = env("DATABASE_URL")
 DATABASES = {
     "default": env.db("DATABASE_URL"),
 }
+
+# Cada serviço possui seu próprio banco em produção. O fallback mantém um
+# único banco em desenvolvimento/teste, onde não há dados reais a preservar.
+SERVICE_DATABASE_ALIASES = ("auth", "committee", "repository", "reports", "notifications")
+for _alias in SERVICE_DATABASE_ALIASES:
+    _url = env(f"{_alias.upper()}_DATABASE_URL", default=DATABASE_URL)
+    DATABASES[_alias] = env.db_url_config(_url)
+
+DATABASE_ROUTERS = ["thesismanagerbackend.routers.ServiceDatabaseRouter"]
+SERVICE_DATABASES_SHARED = env.bool("SERVICE_DATABASES_SHARED", default=True)
+SERVICE_TOKEN = env("SERVICE_TOKEN", default="local-service-token-change-before-deploy")
 
 
 # Password validation
@@ -259,6 +273,7 @@ CACHES = {
     }
 }
 
+SESSION_DB_ALIAS = "auth" if env("SERVICE_DATABASES_SHARED", default="True").lower() in {"0", "false", "no"} else "default"
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 SESSION_CACHE_ALIAS = "default"
 SESSION_COOKIE_AGE = env.int("SESSION_COOKIE_AGE", default=8 * 60 * 60)
@@ -321,6 +336,10 @@ INDEXING_QUEUE = env("INDEXING_QUEUE", default="indexing.thesis-events")
 INDEXING_PREFETCH = env.int("INDEXING_PREFETCH", default=5)
 ADJUDICATION_QUEUE = env("ADJUDICATION_QUEUE", default="adjudication.thesis-events")
 ADJUDICATION_PREFETCH = env.int("ADJUDICATION_PREFETCH", default=5)
+REPOSITORY_QUEUE = env("REPOSITORY_QUEUE", default="repository.thesis-events")
+REPOSITORY_PREFETCH = env.int("REPOSITORY_PREFETCH", default=5)
+REPORTS_QUEUE = env("REPORTS_QUEUE", default="reports.thesis-events")
+REPORTS_PREFETCH = env.int("REPORTS_PREFETCH", default=5)
 
 
 # Logging

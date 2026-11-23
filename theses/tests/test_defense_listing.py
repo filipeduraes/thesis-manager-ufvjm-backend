@@ -43,9 +43,9 @@ class DefenseListingFixtureMixin:
         self.member_professor = create_user("member@ufvjm.edu.br", "Membro", ProfileRole.ADVISOR)
         self.student = create_user("student@ufvjm.edu.br", "Aluno", ProfileRole.STUDENT)
 
-        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
-        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, is_main_author=True)
-        self.second_thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, title="Tese B", status=ThesisStatus.READY_FOR_DEFENSE)
+        self.thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese A", status=ThesisStatus.ADVISOR_APPROVED)
+        ThesisAuthor.objects.create(thesis=self.thesis, author=self.student, name=self.student.name, is_main_author=True)
+        self.second_thesis = Thesis.objects.create(course=self.course, advisor=self.advisor, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese B", status=ThesisStatus.READY_FOR_DEFENSE)
 
         start = timezone.now() + timedelta(days=7)
         self.defense = schedule_defense(self.thesis, scheduled_datetime=start, location="Sala 1", actor=self.admin)
@@ -289,8 +289,8 @@ class SchedulableThesisListApiTests(DefenseListingFixtureMixin, TestCase):
     def setUp(self) -> None:
         super().setUp()
         # Tese B teve a banca cancelada → volta a ser agendável. Tese A tem banca ativa.
-        self.other_thesis = Thesis.objects.create(course=self.course, advisor=self.other_advisor, title="Tese C", status=ThesisStatus.ADVISOR_APPROVED)
-        Thesis.objects.create(course=self.course, advisor=self.advisor, title="Rascunho", status=ThesisStatus.DRAFT)
+        self.other_thesis = Thesis.objects.create(course=self.course, advisor=self.other_advisor, advisor_name=self.other_advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Tese C", status=ThesisStatus.ADVISOR_APPROVED)
+        Thesis.objects.create(course=self.course, advisor=self.advisor, advisor_name=self.advisor.name, course_name=self.course.name, course_code=self.course.code, main_author_name=self.student.name, title="Rascunho", status=ThesisStatus.DRAFT)
 
     def test_unauthenticated_returns_401(self) -> None:
         response = self.client.get(SCHEDULABLE_URL)

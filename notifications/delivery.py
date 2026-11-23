@@ -36,9 +36,18 @@ def notification_address(notification: Notification) -> str:
     """
     if notification.external_email:
         return notification.external_email
-    if notification.user is not None:
-        return notification.user.email
-    return notification.external_invitation.email
+    resolved = getattr(notification, "_resolved_email", None)
+    if resolved:
+        return resolved
+    if notification.user_id:
+        from accounts.models import User
+
+        return User.objects.filter(pk=notification.user_id).values_list("email", flat=True).first() or ""
+    if notification.external_invitation_id:
+        from accounts.models import ExternalInvitation
+
+        return ExternalInvitation.objects.filter(pk=notification.external_invitation_id).values_list("email", flat=True).first() or ""
+    return ""
 
 
 def sanitize_delivery_error(error: BaseException) -> str:
@@ -127,8 +136,15 @@ def retry_pending_notifications(limit: int) -> RetrySummary:
     stale_pending = Q(status=NotificationStatus.PENDING, scheduled_at__lte=now - PENDING_RETRY_GRACE)
     failed = Q(status=NotificationStatus.FAILED, scheduled_at__lte=now)
     with transaction.atomic():
-        candidates = Notification.objects.select_for_update(skip_locked=True, of=("self",)).select_related("user", "external_invitation").filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit]
+        candidates = list(Notification.objects.select_for_update(skip_locked=True, of=("self",)).filter(stale_pending | failed, channel=NotificationChannel.EMAIL).order_by("scheduled_at")[:limit])
+        from accounts.models import ExternalInvitation, User
+
+        user_ids = [n.user_id for n in candidates if n.user_id]
+        emails = {u.pk: u.email for u in User.objects.filter(pk__in=user_ids)}
+        invitation_ids = [n.external_invitation_id for n in candidates if n.external_invitation_id]
+        external_emails = {i.pk: i.email for i in ExternalInvitation.objects.filter(pk__in=invitation_ids)}
         for notification in candidates:
+            notification._resolved_email = emails.get(notification.user_id) or external_emails.get(notification.external_invitation_id) or ""
             if send_notification(notification):
                 summary.sent += 1
             else:

@@ -14,7 +14,8 @@ from django.core.files.storage import default_storage
 from django.utils import timezone
 from pypdf import PdfReader
 
-from theses.models import ProcessingStatus, StoredFile, ThesisFile
+from theses.events import record_thesis_text_extracted
+from theses.models import ProcessingStatus, StoredFile, Thesis, ThesisFile
 from theses.search_index import refresh_search_text_for_files
 from theses.uploads import clear_upload_in_progress
 
@@ -47,6 +48,9 @@ def extract_stored_file_text(stored_file: StoredFile) -> str:
     stored_file.save(update_fields=["extracted_text_path", "extracted_text", "extracted_at", "processing_status"])
     ThesisFile.objects.filter(stored_file=stored_file).update(text_extracted_at=stored_file.extracted_at)
     refresh_search_text_for_files([stored_file.pk])
+    with transaction.atomic():
+        for thesis in Thesis.objects.filter(files__stored_file=stored_file).distinct():
+            record_thesis_text_extracted(thesis, stored_file)
     clear_upload_in_progress(stored_file.sha256_hex)
     return text
 

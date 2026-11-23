@@ -262,7 +262,8 @@ def _public_authors(thesis: Thesis) -> list[dict[str, Any]]:
     """
     authors: list[dict[str, Any]] = []
     for link in thesis.authors.all():
-        person = public_person_payload(link.author)
+        # Identidade local: `name` e `author_id` vivem no banco de monografias.
+        person = {"id": str(link.author_id), "name": link.name} if link.author_id else None
         authors.append(
             {
                 "id": str(link.pk),
@@ -348,8 +349,8 @@ def _public_common_payload(thesis: Thesis) -> dict[str, Any]:
         "isPublic": thesis.is_public,
         "origin": thesis.origin,
         "originLabel": ThesisOrigin(thesis.origin).label,
-        "course": course_brief(thesis.course),
-        "advisor": public_person_payload(thesis.advisor),
+        "course": {"id": str(thesis.course_id), "name": thesis.course_name, "code": thesis.course_code},
+        "advisor": {"id": str(thesis.advisor_id), "name": thesis.advisor_name} if thesis.advisor_id else None,
         "student": _public_main_author(authors),
         "authors": authors,
         "authorNames": [author["name"] for author in authors if author["name"]],
@@ -451,14 +452,14 @@ def public_repository_filters_payload() -> dict[str, list[dict[str, Any]]]:
         dict[str, list[dict[str, Any]]]: ``courses``, ``advisors``, ``years`` and ``keywords``.
     """
     base = published_theses()
-    course_rows = base.values("course_id", "course__name", "course__code").annotate(total=Count("id")).order_by("course__name")
-    advisor_rows = base.values("advisor_id", "advisor__name").annotate(total=Count("id")).order_by("advisor__name")
+    course_rows = base.values("course_id", "course_name", "course_code").annotate(total=Count("id")).order_by("course_name")
+    advisor_rows = base.values("advisor_id", "advisor_name").annotate(total=Count("id")).order_by("advisor_name")
     year_rows = base.annotate(repository_year=defense_year_expression()).values("repository_year").annotate(total=Count("id")).order_by("-repository_year")
     keyword_links = ThesisKeyword.objects.filter(thesis__in=base.values("pk"))
     keyword_rows = keyword_links.values("keyword__name", "keyword__normalized_name").annotate(total=Count("thesis_id", distinct=True)).order_by("-total", "keyword__name")[:PUBLIC_KEYWORDS_LIMIT]
     return {
-        "courses": [{"id": str(row["course_id"]), "name": row["course__name"], "code": row["course__code"], "count": row["total"]} for row in course_rows],
-        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor__name"] or "", "count": row["total"]} for row in advisor_rows],
+        "courses": [{"id": str(row["course_id"]), "name": row["course_name"], "code": row["course_code"], "count": row["total"]} for row in course_rows],
+        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor_name"] or "", "count": row["total"]} for row in advisor_rows],
         "years": [{"year": row["repository_year"], "count": row["total"]} for row in year_rows if row["repository_year"] is not None],
         "keywords": [{"name": row["keyword__name"], "value": row["keyword__normalized_name"], "count": row["total"]} for row in keyword_rows],
     }
@@ -474,17 +475,23 @@ def public_courses_payload(only_with_published: bool = False) -> list[dict[str, 
     Returns:
         list[dict[str, Any]]: Courses ordered by name.
     """
-    published_filter = Q(theses__in=published_theses().values("pk"))
-    courses = Course.objects.select_related("department").annotate(published_count=Count("theses", filter=published_filter)).order_by("name")
+    # A contagem vem dos snapshots da tese (banco do repositório/monografias).
+    # O catálogo de cursos fica no serviço acadêmico; os dois são combinados em Python.
+    rows = published_theses().values("course_id", "course_name", "course_code").annotate(total=Count("id")).order_by("course_name")
+    counts_by_course = {row["course_id"]: (row["course_name"], row["course_code"], row["total"]) for row in rows}
     if only_with_published:
-        courses = courses.filter(published_count__gt=0)
-    return [
-        {
+        course_ids = list(counts_by_course)
+    else:
+        course_ids = list(Course.objects.values_list("pk", flat=True))
+    courses = Course.objects.select_related("department").filter(pk__in=course_ids).order_by("name")
+    results: list[dict[str, Any]] = []
+    for course in courses:
+        name, code, total = counts_by_course.get(course.pk, (course.name, course.code, 0))
+        results.append({
             "id": str(course.pk),
-            "name": course.name,
-            "code": course.code,
-            "department": {"id": str(course.department_id), "name": course.department.name},
-            "publishedThesesCount": course.published_count,
-        }
-        for course in courses
-    ]
+            "name": name,
+            "code": code,
+            "department": {"id": str(course.department_id), "name": course.department.name} if course.department_id else None,
+            "publishedThesesCount": total,
+        })
+    return results

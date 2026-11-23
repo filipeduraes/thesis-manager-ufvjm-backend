@@ -41,10 +41,12 @@ class DeclareEventTopologyCommandTests(SimpleTestCase):
                 "notifications.thesis-events.dlq", "notifications.thesis-events",
                 "indexing.thesis-events.dlq", "indexing.thesis-events",
                 "adjudication.thesis-events.dlq", "adjudication.thesis-events",
+                "repository.thesis-events.dlq", "repository.thesis-events",
+                "reports.thesis-events.dlq", "reports.thesis-events",
             ],
         )
         self.connection.close.assert_called_once()
-        self.assertIn("Topologia declarada: exchange thesis.events, filas notifications.thesis-events, indexing.thesis-events, adjudication.thesis-events.", output.getvalue())
+        self.assertIn("Topologia declarada: exchange thesis.events, filas notifications.thesis-events, indexing.thesis-events, adjudication.thesis-events, repository.thesis-events, reports.thesis-events.", output.getvalue())
         self.sleep.assert_not_called()
 
     def test_retries_until_broker_accepts_connections(self) -> None:

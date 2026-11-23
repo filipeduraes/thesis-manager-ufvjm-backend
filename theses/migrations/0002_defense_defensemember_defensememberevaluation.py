@@ -26,7 +26,7 @@ class Migration(migrations.Migration):
                 ('status', models.CharField(choices=[('SCHEDULED', 'Agendada'), ('IN_PROGRESS', 'Em andamento'), ('COMPLETED', 'Realizada'), ('CANCELLED', 'Cancelada')], db_index=True, default='SCHEDULED', max_length=20)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='scheduled_defenses', to=settings.AUTH_USER_MODEL)),
+                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='scheduled_defenses', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='defenses', to='theses.thesis')),
             ],
             options={
@@ -48,8 +48,8 @@ class Migration(migrations.Migration):
                 ('conflict_reason', models.TextField(blank=True, default='')),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('defense', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='members', to='theses.defense')),
-                ('external_invitation', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='defense_membership', to='accounts.externalinvitation')),
-                ('institutional_member', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='committee_memberships', to=settings.AUTH_USER_MODEL)),
+                ('external_invitation', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='defense_membership', to='accounts.externalinvitation', db_constraint=False)),
+                ('institutional_member', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='committee_memberships', to=settings.AUTH_USER_MODEL, db_constraint=False)),
             ],
             options={
                 'verbose_name': 'Membro da banca',

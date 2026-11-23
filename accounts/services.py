@@ -25,7 +25,7 @@ from django.utils.dateparse import parse_datetime
 from accounts.audit_entry import AuditEntry
 from accounts.audit_identifiers import EntityType
 from accounts.audit_payload import AuditPayload
-from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock
+from accounts.concurrency import ADMIN_ROLE_LOCK_KEY, AUDIT_CHAIN_LOCK_KEY, acquire_transaction_lock, database_for_model
 from accounts.models import (
     AuditAction,
     AuditLog,
@@ -163,6 +163,26 @@ def google_social_accounts_prefetch(lookup: str = "socialaccount_set") -> Prefet
     """
     google_accounts = SocialAccount.objects.filter(provider="google")
     return Prefetch(lookup, queryset=google_accounts, to_attr=GOOGLE_SOCIAL_ACCOUNTS_ATTR)
+
+
+def avatar_urls_for(user_ids) -> dict:
+    """
+    Resolve Google avatar URLs for many users in one query.
+
+    Args:
+        user_ids: Iterable of user identifiers.
+
+    Returns:
+        dict: Mapping of user id to a safe https URL or None.
+    """
+    identifiers = {uid for uid in user_ids if uid is not None}
+    if not identifiers:
+        return {}
+    accounts = SocialAccount.objects.filter(provider="google", user_id__in=identifiers).only("user_id", "extra_data")
+    by_user: dict[UUID, SocialAccount] = {}
+    for account in accounts:
+        by_user.setdefault(account.user_id, account)
+    return {uid: _avatar_url(by_user.get(uid)) for uid in identifiers}
 
 
 def user_avatar_url(user: User) -> str | None:
@@ -341,10 +361,11 @@ def record_audit(entry: AuditEntry) -> AuditLog:
     user_agent = (user_agent or "")[:512]
     origin = str(origin)
 
-    with transaction.atomic():
-        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY)
+    audit_db = database_for_model(AuditLog)
+    with transaction.atomic(using=audit_db):
+        acquire_transaction_lock(AUDIT_CHAIN_LOCK_KEY, using=audit_db)
         previous = (
-            AuditLog.objects.select_for_update()
+            AuditLog.objects.using(audit_db).select_for_update()
             .order_by("-occurred_at", "-id")
             .first()
         )
@@ -378,7 +399,7 @@ def record_audit(entry: AuditEntry) -> AuditLog:
             json.dumps(payload.as_dict(), sort_keys=True, default=str).encode("utf-8")
         ).digest()
 
-        return AuditLog.objects.create(
+        return AuditLog.objects.using(audit_db).create(
             actor_user=actor_user,
             actor_external_invitation=actor_external_invitation,
             actor_role=actor_role,
@@ -440,11 +461,12 @@ def set_user_roles(user: User, roles: Iterable[str], assigned_by: User | None = 
     if ProfileRole.STUDENT in normalized_roles and len(normalized_roles) > 1:
         raise ValidationError("O perfil Aluno não pode ser combinado com outros perfis.")
 
-    with transaction.atomic():
+    auth_db = database_for_model(User)
+    with transaction.atomic(using=auth_db):
         # A contagem de administradores e a revogação do papel precisam ser uma
         # única seção crítica, senão dois administradores podem remover um ao
         # outro e deixar o sistema sem acesso administrativo.
-        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY, using=auth_db)
         if (
             _is_admin_user(user)
             and ProfileRole.ADMIN not in normalized_roles
@@ -529,8 +551,9 @@ def deactivate_user(user: User, *, actor: User | None = None, request: HttpReque
     """
     Soft-delete a user, protecting the last administrative account.
     """
-    with transaction.atomic():
-        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY)
+    auth_db = database_for_model(User)
+    with transaction.atomic(using=auth_db):
+        acquire_transaction_lock(ADMIN_ROLE_LOCK_KEY, using=auth_db)
         if _is_admin_user(user) and count_active_admins(exclude_user=user) == 0:
             raise LastAdminError("Não é possível desativar o último administrador.")
         if actor is not None and actor.pk == user.pk:

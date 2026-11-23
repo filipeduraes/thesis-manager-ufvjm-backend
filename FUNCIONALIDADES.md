@@ -19,7 +19,7 @@ Este arquivo resume o que já está implementado e o que ainda falta no sistema,
 | Matrícula, departamento e área de pesquisa | **Implementado** | migration `accounts/0004`, campos no admin de usuários |
 | N+1 em `GET /theses` | **Corrigido** | `viewer_context` resolvido uma vez por página |
 | Verificador da cadeia de auditoria | **Implementado** | `accounts/audit_integrity.py` e `manage.py verify_audit_chain` |
-| APIs de serviço independentes | **Implementado (parcial)** | seis URLconfs por serviço e processos no Compose; banco ainda compartilhado |
+| APIs de serviço independentes | **Implementado (parcial)** | seis URLconfs, gateway nginx, read models com bancos próprios e introspecção de serviço; `SERVICE_DATABASES_SHARED=True` ainda mantém os aliases no mesmo banco até as leituras entre domínios serem convertidas em snapshots/APIs |
 | Bug visual das palavras-chave no card público | **Corrigido** | `.tags` com `flex-wrap` e badges com quebra de linha |
 | E2E de avaliação e gestão de acervo | **Parcial** | nova spec `committee-evaluation.spec.ts`; gestão de acervo segue em checklist manual |
 

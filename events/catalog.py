@@ -19,6 +19,8 @@ class EventType(models.TextChoices):
 
     THESIS_SUBMITTED = "thesis.submitted", "Monografia submetida"
     THESIS_TEXT_EXTRACTION_REQUESTED = "thesis.text_extraction_requested", "Extração de texto solicitada"
+    THESIS_TEXT_EXTRACTED = "thesis.text_extracted", "Texto extraído"
+    THESIS_REPOSITORY_UPDATED = "thesis.repository_updated", "Publicação atualizada"
     DEFENSE_SCHEDULED = "defense.scheduled", "Banca agendada"
     DEFENSE_MEMBER_INVITED = "defense.member_invited", "Membro da banca convidado"
     DEFENSE_EVALUATION_RECORDED = "defense.evaluation_recorded", "Avaliação registrada"
@@ -32,6 +34,8 @@ class EventType(models.TextChoices):
 PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     EventType.THESIS_SUBMITTED: frozenset({"thesisId", "versionNumber", "submittedAt"}),
     EventType.THESIS_TEXT_EXTRACTION_REQUESTED: frozenset({"thesisId", "storedFileId", "trigger"}),
+    EventType.THESIS_TEXT_EXTRACTED: frozenset({"thesisId", "storedFileId"}),
+    EventType.THESIS_REPOSITORY_UPDATED: frozenset({"thesisId", "trigger"}),
     EventType.DEFENSE_SCHEDULED: frozenset({"defenseId", "thesisId", "scheduledDatetime", "durationMinutes", "modality"}),
     EventType.DEFENSE_MEMBER_INVITED: frozenset({"defenseId", "thesisId", "memberId", "invitationId"}),
     EventType.DEFENSE_EVALUATION_RECORDED: frozenset({"defenseId", "thesisId", "memberId", "isUpdate"}),

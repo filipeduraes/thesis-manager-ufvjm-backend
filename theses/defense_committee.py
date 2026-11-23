@@ -237,7 +237,10 @@ def resolve_committee_member(defense: Defense, principal: User | ExternalInvitat
     return None
 
 
-def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None, viewer_can_manage: bool | None = None) -> dict[str, Any]:
+AVATAR_UNSET = object()
+
+
+def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitationPrincipal | None = None, viewer_is_admin: bool | None = None, viewer_can_manage: bool | None = None, avatar_url: object = AVATAR_UNSET) -> dict[str, Any]:
     """
     Serialize a committee member.
 
@@ -278,7 +281,7 @@ def defense_member_payload(member: DefenseMember, viewer: User | ExternalInvitat
         "hasConflict": member.has_conflict,
         "conflictReason": member.conflict_reason if member.has_conflict else "",
         "isInstitutional": member.institutional_member_id is not None,
-        "avatarUrl": user_avatar_url(member.institutional_member) if member.institutional_member_id else None,
+        "avatarUrl": (user_avatar_url(member.institutional_member) if avatar_url is AVATAR_UNSET else avatar_url) if member.institutional_member_id else None,
         "createdAt": member.created_at.isoformat(),
         "evaluation": None,
     }

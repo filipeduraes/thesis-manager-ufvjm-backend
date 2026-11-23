@@ -85,6 +85,36 @@ def record_thesis_text_extraction_requested(thesis: Thesis, stored_file: StoredF
     return record_event(EventType.THESIS_TEXT_EXTRACTION_REQUESTED, _thesis_aggregate(thesis), payload)
 
 
+def record_thesis_text_extracted(thesis: Thesis, stored_file: StoredFile) -> OutboxEvent:
+    """
+    Record ``thesis.text_extracted`` after a PDF has been indexed.
+
+    Args:
+        thesis: Thesis that owns the file.
+        stored_file: Processed stored PDF.
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {"thesisId": str(thesis.pk), "storedFileId": str(stored_file.pk)}
+    return record_event(EventType.THESIS_TEXT_EXTRACTED, _thesis_aggregate(thesis), payload)
+
+
+def record_thesis_repository_updated(thesis: Thesis, reason: str) -> OutboxEvent:
+    """
+    Record ``thesis.repository_updated`` when published data changes.
+
+    Args:
+        thesis: Published thesis whose projection must be refreshed.
+        reason: Code of the change (identifier only).
+
+    Returns:
+        OutboxEvent: Recorded event.
+    """
+    payload = {"thesisId": str(thesis.pk), "trigger": reason}
+    return record_event(EventType.THESIS_REPOSITORY_UPDATED, _thesis_aggregate(thesis), payload)
+
+
 def record_defense_scheduled(defense: Defense) -> OutboxEvent:
     """
     Record ``defense.scheduled`` after a defense is created for a thesis.

@@ -140,6 +140,8 @@ python manage.py publish_outbox_events --requeue-failed all   # devolve eventos 
 python manage.py consume_notifications --retry-pending        # reenvia e-mails FAILED ou presos em PENDING
 python manage.py consume_indexing_events                      # extrai texto do PDF e atualiza o índice de busca
 python manage.py consume_adjudication_events                  # calcula o resultado da banca após a última avaliação
+python manage.py consume_repository_events                    # projeta publicações no banco do repositório
+python manage.py consume_reports_events                       # projeta fatos no banco de relatórios
 python manage.py verify_audit_chain                           # verifica a integridade do log de auditoria
 ```
 
@@ -160,4 +162,15 @@ Além do gateway `backend` (URLconf completa), cada fronteira tem sua própria A
 
 ```bash
 docker compose --profile microservices up --build
+```
+
+Cada serviço tem seu próprio banco (`AUTH_DATABASE_URL`, `REPOSITORY_DATABASE_URL`, etc.). O Compose define `SERVICE_DATABASES_SHARED=False`, ativando a separação física. Fora do Compose (desenvolvimento/E2E) o padrão é `True`, com todos os aliases no mesmo SQLite/Postgres.
+
+As leituras entre serviços foram convertidas para **snapshots locais** (`Thesis.advisor_name/course_name/course_code/main_author_name`, `Defense.thesis_snapshot`) e para consultas de tabela única roteadas ao banco dono; não há mais JOINs SQL entre bancos de serviços diferentes. `ServiceDatabaseRouter` está coberto por testes de separação.
+
+**Solução de problemas:** se você subiu o Compose com versões anteriores do roteador, os bancos `thesis_*` podem conter registros em `django_migrations` sem as tabelas correspondentes (o erro `relation "auth_group" does not exist`). Como o ambiente é de desenvolvimento sem dados reais, recrie os volumes:
+
+```bash
+sudo docker compose down -v
+sudo docker compose --profile frontend up --build
 ```

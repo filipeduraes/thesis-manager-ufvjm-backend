@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
                 ('processing_status', models.CharField(choices=[('PENDING', 'Pendente'), ('PROCESSING', 'Processando'), ('COMPLETED', 'Concluído'), ('FAILED', 'Falhou'), ('RETRYING', 'Reprocessando')], db_index=True, default='PENDING', max_length=20)),
                 ('extracted_text_path', models.CharField(blank=True, default='', max_length=512)),
                 ('extracted_at', models.DateTimeField(blank=True, null=True)),
-                ('uploaded_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='stored_files', to=settings.AUTH_USER_MODEL)),
+                ('uploaded_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='stored_files', to=settings.AUTH_USER_MODEL, db_constraint=False)),
             ],
             options={
                 'verbose_name': 'Arquivo armazenado',
@@ -73,8 +73,8 @@ class Migration(migrations.Migration):
                 ('advisor_approved_at', models.DateTimeField(blank=True, null=True)),
                 ('published_at', models.DateTimeField(blank=True, null=True)),
                 ('deleted_at', models.DateTimeField(blank=True, null=True)),
-                ('advisor', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='advised_theses', to=settings.AUTH_USER_MODEL)),
-                ('course', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='theses', to='academic.course')),
+                ('advisor', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='advised_theses', to=settings.AUTH_USER_MODEL, db_constraint=False)),
+                ('course', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='theses', to='academic.course', db_constraint=False)),
             ],
             options={
                 'verbose_name': 'Monografia',
@@ -90,7 +90,7 @@ class Migration(migrations.Migration):
                 ('position', models.PositiveSmallIntegerField(default=1)),
                 ('is_main_author', models.BooleanField(default=False)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('author', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='authored_theses', to=settings.AUTH_USER_MODEL)),
+                ('author', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='authored_theses', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='authors', to='theses.thesis')),
             ],
             options={
@@ -112,7 +112,7 @@ class Migration(migrations.Migration):
                 ('text_extracted_at', models.DateTimeField(blank=True, null=True)),
                 ('stored_file', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='thesis_files', to='theses.storedfile')),
                 ('thesis', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='files', to='theses.thesis')),
-                ('uploaded_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='uploaded_thesis_files', to=settings.AUTH_USER_MODEL)),
+                ('uploaded_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='uploaded_thesis_files', to=settings.AUTH_USER_MODEL, db_constraint=False)),
             ],
             options={
                 'verbose_name': 'Versão da monografia',
@@ -131,9 +131,9 @@ class Migration(migrations.Migration):
                 ('validated_at', models.DateTimeField(blank=True, null=True)),
                 ('rejection_reason', models.TextField(blank=True, default='')),
                 ('stored_file', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='thesis_documents', to='theses.storedfile')),
-                ('submitted_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='submitted_thesis_documents', to=settings.AUTH_USER_MODEL)),
+                ('submitted_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='submitted_thesis_documents', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='documents', to='theses.thesis')),
-                ('validated_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='validated_thesis_documents', to=settings.AUTH_USER_MODEL)),
+                ('validated_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='validated_thesis_documents', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis_file', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='documents', to='theses.thesisfile')),
             ],
             options={
@@ -165,7 +165,7 @@ class Migration(migrations.Migration):
                 ('recommendations', models.TextField(blank=True, default='')),
                 ('reviewed_at', models.DateTimeField(default=django.utils.timezone.now)),
                 ('ip_address', models.GenericIPAddressField(blank=True, null=True)),
-                ('reviewer', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='thesis_reviews', to=settings.AUTH_USER_MODEL)),
+                ('reviewer', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='thesis_reviews', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis_file', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='reviews', to='theses.thesisfile')),
             ],
             options={
@@ -184,7 +184,7 @@ class Migration(migrations.Migration):
                 ('reason', models.TextField(blank=True, default='')),
                 ('metadata', models.JSONField(blank=True, default=dict)),
                 ('changed_at', models.DateTimeField(default=django.utils.timezone.now)),
-                ('changed_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='thesis_status_changes', to=settings.AUTH_USER_MODEL)),
+                ('changed_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='thesis_status_changes', to=settings.AUTH_USER_MODEL, db_constraint=False)),
                 ('thesis', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='status_history', to='theses.thesis')),
             ],
             options={

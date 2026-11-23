@@ -100,9 +100,9 @@ class Notification(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     template = models.ForeignKey(NotificationTemplate, on_delete=models.PROTECT, related_name="notifications")
     # SET_NULL para que uma futura limpeza da outbox não apague o histórico de envios.
-    event = models.ForeignKey(OutboxEvent, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications")
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications")
-    external_invitation = models.ForeignKey(ExternalInvitation, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications")
+    event = models.ForeignKey(OutboxEvent, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications", db_constraint=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications", db_constraint=False)
+    external_invitation = models.ForeignKey(ExternalInvitation, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications", db_constraint=False)
     external_email = models.EmailField(max_length=254, blank=True, default="")
     channel = models.CharField(max_length=10, choices=NotificationChannel.choices, default=NotificationChannel.EMAIL)
     subject = models.CharField(max_length=200)

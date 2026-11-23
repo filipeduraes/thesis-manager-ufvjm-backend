@@ -31,4 +31,5 @@ class ThesisListQueryCountTests(RepositoryTestCase):
         with CaptureQueriesContext(connection) as large:
             response = self.client.get("/api/v1/theses")
         self.assertEqual(response.status_code, 200)
+        print("SQL_LARGE", [q["sql"][:90] for q in large.captured_queries])
         self.assertLessEqual(len(large) - len(small), 2, f"2 theses: {len(small)} queries; 6 theses: {len(large)}")

@@ -86,10 +86,10 @@ def build_search_text(thesis: Thesis) -> str:
     values.extend(("author", link.display_name) for link in thesis.authors.all())
     values.extend(("keyword", link.keyword.name) for link in thesis.keyword_links.all())
     if thesis.advisor_id:
-        values.append(("advisor", thesis.advisor.name))
+        values.append(("advisor", thesis.advisor_name))
     if thesis.course_id:
-        values.append(("course", thesis.course.name))
-        values.append(("course", thesis.course.code))
+        values.append(("course", thesis.course_name))
+        values.append(("course", thesis.course_code))
     current = thesis.files.select_related("stored_file").filter(is_current=True).first()
     if current is not None and current.stored_file.extracted_text:
         values.append(("full_text", current.stored_file.extracted_text))

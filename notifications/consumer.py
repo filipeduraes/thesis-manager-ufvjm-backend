@@ -81,7 +81,7 @@ def _get_thesis(thesis_id: str) -> Thesis:
     Raises:
         EntityNotFoundError: When the thesis does not exist.
     """
-    thesis = Thesis.objects.select_related("advisor").filter(pk=thesis_id).first()
+    thesis = Thesis.objects.filter(pk=thesis_id).first()
     if thesis is None:
         raise EntityNotFoundError("Thesis referenced by the event was not found")
     return thesis
@@ -168,7 +168,7 @@ def _plan_defense_member_invited(payload: EventPayload) -> NotificationPlan:
     Raises:
         EntityNotFoundError: When the member no longer exists.
     """
-    member = DefenseMember.objects.select_related("institutional_member", "external_invitation").filter(pk=payload["memberId"]).first()
+    member = DefenseMember.objects.filter(pk=payload["memberId"]).first()
     if member is None:
         raise EntityNotFoundError("Defense member referenced by the event was not found")
     defense = _get_defense(payload["defenseId"])

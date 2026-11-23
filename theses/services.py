@@ -287,16 +287,18 @@ def coordinated_courses_filter(user: User, prefix: str = "") -> Q:
     Returns:
         Q: Filter combining the three course-link rules.
     """
-    by_coordinator = Q(**{f"{prefix}coordinator_id": user.pk})
-    by_email = Q(**{f"{prefix}coordinator_email__iexact": user.email})
-    by_assignment = Q(
-        **{
-            f"{prefix}user_assignments__user_id": user.pk,
-            f"{prefix}user_assignments__is_active": True,
-            f"{prefix}user_assignments__revoked_at__isnull": True,
-        }
-    )
-    return by_coordinator | by_email | by_assignment
+    # Nunca gerar subquery em `academic_course`: os cursos ficam no serviço
+    # acadêmico. Resolve os ids em consultas separadas e filtra a coluna local.
+    from academic.models import UserCourseAssignment as _Assignment
+
+    ids = set(Course.objects.filter(coordinator_id=user.pk).values_list("pk", flat=True))
+    ids.update(Course.objects.filter(coordinator_email__iexact=user.email).values_list("pk", flat=True))
+    ids.update(_Assignment.objects.filter(user_id=user.pk, is_active=True, revoked_at__isnull=True).values_list("course_id", flat=True))
+    if not prefix:
+        return Q(pk__in=ids)
+    if prefix.endswith("__"):
+        return Q(**{f"{prefix[:-2]}_id__in": ids})
+    return Q(**{f"{prefix}pk__in": ids})
 
 
 def thesis_list_queryset() -> QuerySet[Thesis]:
@@ -310,12 +312,8 @@ def thesis_list_queryset() -> QuerySet[Thesis]:
     Returns:
         QuerySet[Thesis]: Query with list dependencies prefetched.
     """
-    return Thesis.objects.filter(deleted_at__isnull=True).select_related(
-        "course",
-        "course__department",
-        "advisor",
-    ).prefetch_related(
-        "authors__author",
+    return Thesis.objects.filter(deleted_at__isnull=True).prefetch_related(
+        "authors",
         "keyword_links__keyword",
         "files__stored_file",
     )
@@ -328,13 +326,7 @@ def thesis_queryset() -> QuerySet[Thesis]:
     Returns:
         QuerySet[Thesis]: Query with related objects prefetched for serialization.
     """
-    return thesis_list_queryset().prefetch_related(
-        "files__reviews__reviewer",
-        "status_history__changed_by",
-        "documents__stored_file",
-        "documents__submitted_by",
-        "documents__validated_by",
-    )
+    return thesis_list_queryset().prefetch_related("documents__stored_file")
 
 
 def get_accessible_thesis(user: User, thesis_id: str) -> Thesis:
@@ -351,11 +343,11 @@ def get_accessible_thesis(user: User, thesis_id: str) -> Thesis:
     Raises:
         ValidationError: When the thesis does not exist or is not visible.
     """
-    thesis = theses_visible_to(user).select_related("course", "advisor").filter(pk=thesis_id).first()
+    thesis = theses_visible_to(user).filter(pk=thesis_id).first()
     if thesis is None:
         is_committee_member = DefenseMember.objects.filter(defense__thesis_id=thesis_id, institutional_member=user).exists()
         if is_committee_member:
-            thesis = Thesis.objects.select_related("course", "advisor").filter(pk=thesis_id, deleted_at__isnull=True).first()
+            thesis = Thesis.objects.filter(pk=thesis_id, deleted_at__isnull=True).first()
     if thesis is None:
         raise ValidationError("Monografia não encontrada.")
     return thesis
@@ -539,7 +531,7 @@ def _audit_thesis(action: str, thesis: Thesis, request: HttpRequest | None, acto
     }
     author_names = [
         link.display_name or (link.author.email if link.author else "")
-        for link in thesis.authors.select_related("author").order_by("position")
+        for link in thesis.authors.order_by("position")
     ]
     if author_names:
         enriched_metadata["thesisAuthorNames"] = author_names
@@ -605,7 +597,7 @@ def _sync_coauthors(thesis: Thesis, coauthors: list[User]) -> None:
         if coauthor.pk in current:
             ThesisAuthor.objects.filter(thesis=thesis, author=coauthor).update(position=next_position)
         else:
-            ThesisAuthor.objects.create(thesis=thesis, author=coauthor, position=next_position)
+            ThesisAuthor.objects.create(thesis=thesis, author=coauthor, name=coauthor.name or coauthor.email, position=next_position)
         next_position += 1
 
 
@@ -649,6 +641,12 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
     if not clean_abstract:
         raise ValidationError("Informe o resumo da monografia.")
 
+    identity = {
+        "advisor_name": advisor.name or advisor.email,
+        "course_name": course.name,
+        "course_code": course.code,
+        "main_author_name": user.name or user.email,
+    }
     thesis = Thesis.objects.select_for_update().filter(origin=ThesisOrigin.WORKFLOW, authors__author=user).first()
     created = thesis is None
     if thesis is not None:
@@ -656,6 +654,8 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         _ensure_editable(thesis)
         thesis.course = course
         thesis.advisor = advisor
+        for field, value in identity.items():
+            setattr(thesis, field, value)
         thesis.title = clean_title
         thesis.abstract = clean_abstract
         thesis.type = thesis_type
@@ -665,6 +665,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         thesis = Thesis.objects.create(
             course=course,
             advisor=advisor,
+            **identity,
             title=clean_title,
             abstract=clean_abstract,
             type=thesis_type,
@@ -674,6 +675,7 @@ def save_thesis_metadata(user: User, course: Course, advisor: User, title: str, 
         ThesisAuthor.objects.create(
             thesis=thesis,
             author=user,
+            name=user.name or user.email,
             position=1,
             is_main_author=True,
         )
@@ -947,7 +949,7 @@ def submit_thesis(user: User, thesis: Thesis, request: HttpRequest | None = None
     Raises:
         ValidationError: When required data or the current file is missing.
     """
-    thesis = Thesis.objects.select_for_update().select_related("advisor", "course").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     _ensure_student_owner(user, thesis)
     _ensure_editable(thesis)
     if not thesis.title.strip() or not thesis.abstract.strip():
@@ -992,7 +994,7 @@ def withdraw_submission(user: User, thesis: Thesis, request: HttpRequest | None 
     Raises:
         ValidationError: Quando o usuário não pode descartar ou o envio já foi avaliado.
     """
-    thesis = Thesis.objects.select_for_update().select_related("advisor", "course").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     _ensure_student_owner(user, thesis)
     if thesis.status != ThesisStatus.SUBMITTED:
         raise ValidationError("Apenas envios ainda não avaliados pelo orientador podem ser descartados.")
@@ -1045,7 +1047,7 @@ def review_thesis(user: User, thesis: Thesis, decision: str, comments: str = "",
     Raises:
         ValidationError: When the user cannot review or the transition is invalid.
     """
-    thesis = Thesis.objects.select_for_update().select_related("advisor", "course").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     if thesis.advisor_id != user.pk:
         raise ValidationError("Apenas o orientador da monografia pode registrar um parecer.")
     if thesis.status not in REVIEWABLE_STATUSES:
@@ -1190,7 +1192,7 @@ def record_defense_result(user: User, thesis: Thesis, result: str, reason: str =
     """
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem registrar o resultado da banca.")
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     if thesis.status not in DEFENSE_RESULT_STATUSES:
         raise ValidationError("Esta monografia não está em etapa de resultado da banca.")
     if result not in DefenseResult.values:
@@ -1406,7 +1408,7 @@ def publish_if_ready(thesis: Thesis, trigger: str, request: HttpRequest | None =
     Returns:
         bool: Whether the thesis was published.
     """
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     if thesis.status == ThesisStatus.PUBLISHED or thesis.deleted_at is not None:
         return False
     if not publication_requirements(thesis).ready:
@@ -1442,7 +1444,7 @@ def publish_thesis(user: User, thesis: Thesis, request: HttpRequest | None = Non
     """
     if not (user_is_admin(user) or user_is_coordinator(user)):
         raise ValidationError("Apenas coordenadores ou administradores podem publicar monografias.")
-    thesis = Thesis.objects.select_for_update().select_related("course", "advisor").get(pk=thesis.pk)
+    thesis = Thesis.objects.select_for_update().get(pk=thesis.pk)
     if thesis.status == ThesisStatus.PUBLISHED and thesis.is_public:
         return thesis
     requirements = publication_requirements(thesis)
@@ -1761,7 +1763,6 @@ def thesis_summary_payload(thesis: Thesis, include_file_urls: bool = True) -> di
     Returns:
         dict[str, Any]: Thesis summary including student, advisor, course and current file.
     """
-    main_author = _prefetched_main_author(thesis)
     current_file = _prefetched_current_file(thesis)
     file_payload: dict[str, Any] | None = None
     if current_file is not None:
@@ -1786,14 +1787,34 @@ def thesis_summary_payload(thesis: Thesis, include_file_urls: bool = True) -> di
         "isPublic": thesis.is_public,
         "origin": thesis.origin,
         "originLabel": ThesisOrigin(thesis.origin).label,
-        "course": course_brief(thesis.course),
-        "advisor": user_brief(thesis.advisor),
-        "student": user_brief(main_author),
+        "course": thesis_course_brief(thesis),
+        "advisor": thesis_advisor_brief(thesis),
+        "student": thesis_student_brief(thesis),
         "keywords": _prefetched_keywords(thesis),
         "submittedAt": thesis.submitted_at.isoformat() if thesis.submitted_at else None,
         "publishedAt": thesis.published_at.isoformat() if thesis.published_at else None,
         "currentFile": file_payload,
     }
+
+
+def thesis_course_brief(thesis: Thesis) -> dict[str, Any]:
+    """Return the course summary stored locally on the thesis."""
+    return {"id": str(thesis.course_id), "name": thesis.course_name, "code": thesis.course_code}
+
+
+def thesis_advisor_brief(thesis: Thesis) -> dict[str, Any] | None:
+    """Return the advisor summary stored locally on the thesis."""
+    if not thesis.advisor_id:
+        return None
+    return {"id": str(thesis.advisor_id), "name": thesis.advisor_name}
+
+
+def thesis_student_brief(thesis: Thesis) -> dict[str, Any] | None:
+    """Return the main author summary without loading the auth database."""
+    link = next((item for item in thesis.authors.all() if item.is_main_author), None)
+    if link is None:
+        return None
+    return {"id": str(link.author_id), "name": link.name or thesis.main_author_name, "email": ""}
 
 
 def thesis_permissions(thesis: Thesis, viewer: User | None, viewer_context: dict[str, object] | None = None) -> dict[str, bool]:
@@ -1831,8 +1852,7 @@ def thesis_permissions(thesis: Thesis, viewer: User | None, viewer_context: dict
     has_advisor_role = ProfileRole.ADVISOR in roles
     is_assigned_advisor = thesis.advisor_id == viewer.pk
     is_advisor = has_advisor_role and is_assigned_advisor
-    main_author = _prefetched_main_author(thesis)
-    is_author = main_author is not None and main_author.pk == viewer.pk
+    is_author = any(link.author_id == viewer.pk for link in thesis.authors.all())
     editable = thesis.status in EDITABLE_STATUSES
     accepts_correction = thesis.status in CORRECTION_UPLOAD_STATUSES
     return {
@@ -1864,7 +1884,6 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
     Returns:
         dict[str, Any]: Full thesis payload.
     """
-    main_author = _prefetched_main_author(thesis)
     keywords = _prefetched_keywords(thesis)
     files = list(thesis.files.all())
     current_file = next((item for item in files if item.is_current), None)
@@ -1883,16 +1902,16 @@ def thesis_payload(thesis: Thesis, viewer: User | None = None, include_history: 
         "isPublic": thesis.is_public,
         "origin": thesis.origin,
         "originLabel": ThesisOrigin(thesis.origin).label,
-        "course": course_brief(thesis.course),
-        "advisor": user_brief(thesis.advisor),
-        "student": user_brief(main_author),
+        "course": thesis_course_brief(thesis),
+        "advisor": thesis_advisor_brief(thesis),
+        "student": thesis_student_brief(thesis),
         "authors": [
             {
                 "id": str(author.pk),
                 "position": author.position,
                 "isMainAuthor": author.is_main_author,
                 "name": author.display_name,
-                "user": user_brief(author.author),
+                "user": {"id": str(author.author_id), "name": author.name} if author.author_id else None,
             }
             for author in thesis.authors.all()
         ],
@@ -1933,7 +1952,6 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None, viewer_conte
     Returns:
         dict[str, Any]: Compact thesis payload.
     """
-    main_author = _prefetched_main_author(thesis)
     current_file = _prefetched_current_file(thesis)
     keywords = _prefetched_keywords(thesis)
     return {
@@ -1947,9 +1965,9 @@ def thesis_list_payload(thesis: Thesis, viewer: User | None = None, viewer_conte
         "isPublic": thesis.is_public,
         "origin": thesis.origin,
         "originLabel": ThesisOrigin(thesis.origin).label,
-        "course": course_brief(thesis.course),
-        "advisor": user_brief(thesis.advisor),
-        "student": user_brief(main_author),
+        "course": thesis_course_brief(thesis),
+        "advisor": thesis_advisor_brief(thesis),
+        "student": thesis_student_brief(thesis),
         "keywords": keywords,
         "currentVersion": current_file.version_number if current_file else None,
         "currentFile": {

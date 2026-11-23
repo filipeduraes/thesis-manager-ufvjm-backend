@@ -65,10 +65,16 @@ def thesis_authors(thesis: Thesis) -> list[Recipient]:
     Returns:
         list[Recipient]: Author recipients.
     """
-    author_links = ThesisAuthor.objects.filter(thesis=thesis).select_related("author").order_by("position")
+    from accounts.models import User
+
+    author_links = list(ThesisAuthor.objects.filter(thesis=thesis).order_by("position"))
+    user_ids = [link.author_id for link in author_links if link.author_id]
+    users = {user.pk: user for user in User.objects.filter(pk__in=user_ids, is_active=True)}
     recipients: list[Recipient] = []
     for link in author_links:
-        recipients.extend(_user_recipient(link.author))
+        user = users.get(link.author_id)
+        if user is not None:
+            recipients.append(Recipient(name=user.name or link.name, user=user))
     return recipients
 
 
@@ -95,13 +101,21 @@ def evaluating_committee_members(defense: Defense) -> list[Recipient]:
     Returns:
         list[Recipient]: Committee recipients.
     """
-    members = defense.members.exclude(role=CommitteeRole.ALTERNATE).select_related("institutional_member", "external_invitation").order_by("created_at")
+    from accounts.models import ExternalInvitation, User
+
+    members = list(defense.members.exclude(role=CommitteeRole.ALTERNATE).order_by("created_at"))
+    user_ids = [m.institutional_member_id for m in members if m.institutional_member_id]
+    users = {u.pk: u for u in User.objects.filter(pk__in=user_ids, is_active=True)}
+    invitation_ids = [m.external_invitation_id for m in members if m.external_invitation_id]
+    invitations = {i.pk: i for i in ExternalInvitation.objects.filter(pk__in=invitation_ids)}
     recipients: list[Recipient] = []
     for member in members:
         if member.institutional_member_id is not None:
-            recipients.extend(_user_recipient(member.institutional_member))
+            user = users.get(member.institutional_member_id)
+            if user is not None:
+                recipients.append(Recipient(name=user.name, user=user))
         elif member.email:
-            recipients.append(Recipient(name=member.name, external_invitation=member.external_invitation, external_email=member.email))
+            recipients.append(Recipient(name=member.name, external_invitation=invitations.get(member.external_invitation_id), external_email=member.email))
     return recipients
 
 

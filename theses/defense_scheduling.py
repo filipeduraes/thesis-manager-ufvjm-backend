@@ -19,7 +19,7 @@ from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
-from accounts.services import record_audit
+from accounts.services import avatar_urls_for, record_audit
 from theses.audit import audit_defense
 from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
 from theses.events import record_defense_completed, record_defense_scheduled
@@ -87,7 +87,7 @@ def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
     Returns:
         list[dict[str, Any]]: History entries, oldest first.
     """
-    entries = defense.status_history.select_related("changed_by").order_by("created_at")
+    entries = defense.status_history.order_by("created_at")
     history: list[dict[str, Any]] = []
     for entry in entries:
         previous_label = DefenseStatus(entry.previous_status).label if entry.previous_status else None
@@ -140,8 +140,19 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
     clean_location = location.strip()
     validate_defense_location(modality, clean_location)
 
+    main_author = thesis.authors.filter(is_main_author=True).first()
+    snapshot = {
+        "thesisId": str(thesis.pk),
+        "title": thesis.title,
+        "referenceCode": thesis.reference_code,
+        "courseName": thesis.course.name if thesis.course_id else "",
+        "courseCode": thesis.course.code if thesis.course_id else "",
+        "advisorName": thesis.advisor.name if thesis.advisor_id else "",
+        "studentName": main_author.display_name if main_author else "",
+    }
     defense = Defense.objects.create(
         thesis=thesis,
+        thesis_snapshot=snapshot,
         scheduled_datetime=scheduled_datetime,
         duration_minutes=duration_minutes,
         modality=modality,
@@ -690,7 +701,7 @@ def defense_result_code(defense: Defense) -> str | None:
     return None
 
 
-def defense_payload(defense: Defense, viewer: Any = None, viewer_context: DefenseViewerContext | None = None) -> dict[str, Any]:
+def defense_payload(defense: Defense, viewer: Any = None, viewer_context: DefenseViewerContext | None = None, avatar_urls: dict | None = None) -> dict[str, Any]:
     """
     Serialize a defense session with its committee members.
 
@@ -711,6 +722,9 @@ def defense_payload(defense: Defense, viewer: Any = None, viewer_context: Defens
         viewer_context = build_defense_viewer_context(viewer, [defense.thesis_id])
     viewer_is_admin = viewer_context.is_admin
     viewer_can_manage = viewer_context.can_manage(defense.thesis_id)
+    members = list(defense.members.all())
+    if avatar_urls is None:
+        avatar_urls = avatar_urls_for(m.institutional_member_id for m in members)
     return {
         "id": str(defense.pk),
         "thesis": str(defense.thesis_id),
@@ -728,5 +742,8 @@ def defense_payload(defense: Defense, viewer: Any = None, viewer_context: Defens
         "resultLabel": DefenseResult(result_code).label if result_code else None,
         "createdAt": defense.created_at.isoformat(),
         "updatedAt": defense.updated_at.isoformat(),
-        "members": [defense_member_payload(m, viewer=viewer, viewer_is_admin=viewer_is_admin, viewer_can_manage=viewer_can_manage) for m in defense.members.all()],
+        "members": [
+            defense_member_payload(m, viewer=viewer, viewer_is_admin=viewer_is_admin, viewer_can_manage=viewer_can_manage, avatar_url=avatar_urls.get(m.institutional_member_id))
+            for m in members
+        ],
     }

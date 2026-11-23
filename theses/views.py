@@ -247,8 +247,8 @@ def _scoped_theses(request, base_queryset: QuerySet[Thesis] | None = None) -> Qu
             Q(title__icontains=query)
             | Q(abstract__icontains=query)
             | Q(reference_code__icontains=query)
-            | Q(authors__author__name__icontains=query)
-            | Q(advisor__name__icontains=query)
+            | Q(authors__name__icontains=query)
+            | Q(advisor_name__icontains=query)
             | Q(keyword_links__keyword__name__icontains=query)
         )
     status_filter = (request.query_params.get("status") or "").strip()
@@ -285,7 +285,7 @@ def _student_thesis(user) -> Thesis | None:
         Thesis | None: Main-authored thesis when present.
     """
     return (
-        Thesis.objects.select_related("course", "advisor")
+        Thesis.objects
         .filter(origin=ThesisOrigin.WORKFLOW, authors__author=user)
         .order_by("-created_at")
         .first()
@@ -490,7 +490,7 @@ class ThesisListView(APIView):
         Returns:
             Response: Paginated thesis summaries.
         """
-        queryset = _scoped_theses(request).select_related("course", "advisor")
+        queryset = _scoped_theses(request)
         paginator = ThesisPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         viewer_context = {
@@ -1236,7 +1236,9 @@ class DefenseListView(APIView):
         paginator = ThesisPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         viewer_context = defense_viewer_context_for(page, request.user)
-        results = [defense_list_payload(defense, viewer=request.user, viewer_context=viewer_context) for defense in page]
+        from accounts.services import avatar_urls_for
+        avatar_urls = avatar_urls_for(m.institutional_member_id for defense in page for m in defense.members.all())
+        results = [defense_list_payload(defense, viewer=request.user, viewer_context=viewer_context, avatar_urls=avatar_urls) for defense in page]
         return paginator.get_paginated_response(results)
 
 
@@ -1299,11 +1301,10 @@ class DefenseListCreateView(APIView):
         thesis = _scoped_thesis(request.user, thesis_id)
         defenses = list(
             Defense.objects.filter(thesis=thesis)
-            .select_related("thesis", "thesis__course", "thesis__advisor")
+            .select_related("thesis")
             .prefetch_related(
                 *DEFENSE_LIST_PREFETCH,
                 defense_close_entries_prefetch(),
-                google_social_accounts_prefetch("members__institutional_member__socialaccount_set"),
             )
             .order_by("-scheduled_datetime")
         )

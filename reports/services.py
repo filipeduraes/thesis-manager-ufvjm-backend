@@ -318,7 +318,7 @@ def _by_course(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[di
     Returns:
         list[dict[str, Any]]: One row per course with data, ordered by name.
     """
-    thesis_rows = theses.values("course_id", "course__code", "course__name").annotate(**_thesis_aggregates()).order_by("course__name")
+    thesis_rows = theses.values("course_id", "course_code", "course_name").annotate(**_thesis_aggregates()).order_by("course_name")
     defense_rows = defenses.values("thesis__course_id").annotate(**_defense_aggregates()).order_by()
     defenses_by_course = {row["thesis__course_id"]: row for row in defense_rows}
     rows: list[dict[str, Any]] = []
@@ -327,8 +327,8 @@ def _by_course(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[di
         rows.append(
             {
                 "courseId": str(course_id),
-                "courseCode": thesis_row["course__code"],
-                "courseName": thesis_row["course__name"],
+                "courseCode": thesis_row["course_code"],
+                "courseName": thesis_row["course_name"],
                 **_thesis_counters(thesis_row),
                 **_defense_counters(defenses_by_course.get(course_id)),
             }
@@ -347,7 +347,7 @@ def _by_advisor(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[d
     Returns:
         list[dict[str, Any]]: One row per advisor, most theses first, then by name.
     """
-    thesis_rows = theses.values("advisor_id", "advisor__name").annotate(**_thesis_aggregates()).order_by("-thesis_count", "advisor__name")
+    thesis_rows = theses.values("advisor_id", "advisor_name").annotate(**_thesis_aggregates()).order_by("-thesis_count", "advisor_name")
     defense_rows = defenses.values("thesis__advisor_id").annotate(**_defense_aggregates()).order_by()
     defenses_by_advisor = {row["thesis__advisor_id"]: row for row in defense_rows}
     rows: list[dict[str, Any]] = []
@@ -356,7 +356,7 @@ def _by_advisor(theses: QuerySet[Thesis], defenses: QuerySet[Defense]) -> list[d
         rows.append(
             {
                 "advisorId": str(advisor_id),
-                "advisorName": thesis_row["advisor__name"],
+                "advisorName": thesis_row["advisor_name"],
                 **_thesis_counters(thesis_row),
                 **_defense_counters(defenses_by_advisor.get(advisor_id)),
             }
@@ -393,11 +393,11 @@ def _options(scope: ReportScope) -> dict[str, list[Any]]:
         courses = courses.filter(pk__in=scope.course_ids)
     course_rows = courses.order_by("name").values("id", "code", "name")
     scoped_theses = _scoped_theses(scope, ReportFilters())
-    advisor_rows = scoped_theses.order_by("advisor__name").values("advisor_id", "advisor__name").distinct()
+    advisor_rows = scoped_theses.order_by("advisor_name").values("advisor_id", "advisor_name").distinct()
     year_rows = _completed_defenses(scoped_theses, ReportFilters()).values_list("defense_year", flat=True).distinct().order_by("defense_year")
     return {
         "courses": [{"id": str(row["id"]), "code": row["code"], "name": row["name"]} for row in course_rows],
-        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor__name"]} for row in advisor_rows],
+        "advisors": [{"id": str(row["advisor_id"]), "name": row["advisor_name"]} for row in advisor_rows],
         "years": list(year_rows),
     }
 

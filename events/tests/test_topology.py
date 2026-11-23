@@ -16,6 +16,8 @@ from events.topology import declare_topology, event_topology
     NOTIFICATIONS_QUEUE="notifications.thesis-events",
     INDEXING_QUEUE="indexing.thesis-events",
     ADJUDICATION_QUEUE="adjudication.thesis-events",
+    REPOSITORY_QUEUE="repository.thesis-events",
+    REPORTS_QUEUE="reports.thesis-events",
 )
 class EventTopologyTests(SimpleTestCase):
     """The topology declares durable exchanges and one queue plus DLQ per consumer."""
@@ -25,7 +27,7 @@ class EventTopologyTests(SimpleTestCase):
         self.assertEqual(topology.exchange, "thesis.events")
         self.assertEqual(topology.dead_letter_exchange, "thesis.events.dlx")
         queues = {spec.queue: spec for spec in topology.consumer_queues}
-        self.assertEqual(set(queues), {"notifications.thesis-events", "indexing.thesis-events", "adjudication.thesis-events"})
+        self.assertEqual(set(queues), {"notifications.thesis-events", "indexing.thesis-events", "adjudication.thesis-events", "repository.thesis-events", "reports.thesis-events"})
         self.assertEqual(queues["notifications.thesis-events"].routing_keys, ("thesis.*", "defense.*"))
         self.assertEqual(queues["indexing.thesis-events"].routing_keys, ("thesis.text_extraction_requested",))
         self.assertEqual(queues["adjudication.thesis-events"].routing_keys, ("defense.evaluation_recorded",))
