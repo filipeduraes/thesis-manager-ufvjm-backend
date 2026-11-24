@@ -424,6 +424,8 @@ THESIS_MAX_PDF_SIZE_MB = env.int("THESIS_MAX_PDF_SIZE_MB", default=50)
 THESIS_MAX_DOCUMENT_SIZE_MB = env.int("THESIS_MAX_DOCUMENT_SIZE_MB", default=20)
 THESIS_MAX_KEYWORDS = env.int("THESIS_MAX_KEYWORDS", default=10)
 THESIS_MAX_AUTHORS = env.int("THESIS_MAX_AUTHORS", default=5)
+# Margem da zona amarela de conflito de agenda, em minutos.
+DEFENSE_SCHEDULE_BUFFER_MINUTES = env.int("DEFENSE_SCHEDULE_BUFFER_MINUTES", default=60)
 UPLOAD_TRACKING_TTL_SECONDS = env.int("UPLOAD_TRACKING_TTL_SECONDS", default=3600)
 UPLOAD_GLOBAL_DAILY_LIMIT = env.int("UPLOAD_GLOBAL_DAILY_LIMIT", default=50)
 # Cache Redis do repositório público; a invalidação é explícita (publicação,

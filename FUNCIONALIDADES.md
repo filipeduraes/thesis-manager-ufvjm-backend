@@ -25,7 +25,7 @@ Legenda: **Implementado** = código e teste/validação existentes; **Parcial** 
 | Submissão e acompanhamento de monografia | Implementado | `/theses/me`, `/theses/me/files`, `/theses/me/submit`, `/theses/<id>` | Status, versões, pareceres e linha do tempo. |
 | Upload PDF: formato, tamanho e SHA-256 | Atendido | `theses/services.py::_validate_pdf_upload` | Valida assinatura `%PDF-`, marcador final `%%EOF`, tamanho (padrão 50 MB) e hash; não há sandbox para extração de PDFs maliciosos. |
 | Aprovação do orientador antes da banca | Implementado | `SCHEDULABLE_STATUSES` em `theses/models.py`, `defense_scheduling.py` | Nenhuma rota produz `READY_FOR_DEFENSE` sem parecer de aprovação. |
-| Agendamento: disponibilidade e conflito | Parcial | `theses/defense_committee.py`, `start_defense`, `sync_defense_status` | Conflito de horário é bloqueado; confirmação é exigida para **iniciar** a banca, não para agendá-la (o enunciado pede validação no agendamento). |
+| Agendamento: disponibilidade e conflito | Atendido | `theses/defense_committee.py`, `theses/defense_scheduling.py`, frontend | Conflito real bloqueia a operação. A margem amarela configurável permite a operação com confirmação no frontend e aviso no detalhe. A confirmação explícita dos membros continua sendo exigida para iniciar a banca. |
 | Membro externo por token temporário | Implementado | `ExternalInvitation`, evento `defense.external_member_invited`, consumidor de convites | Token apenas no e-mail; hash no banco; uso único; escopo à própria banca. |
 | Notificação automática da banca | Implementado | planejadores em `notifications/consumer.py` | E-mail para autores, orientador e avaliadores; coordenação não é destinatária. |
 | Avaliação individual e resultado final | Implementado | `theses/defense_evaluation.py`, `adjudication/consumer.py`, `_finalize_defense` | Resultado calculado após todas as avaliações não suplentes; suplentes não avaliam. |
@@ -59,8 +59,8 @@ Legenda: **Implementado** = código e teste/validação existentes; **Parcial** 
 
 ### Bancas, avaliação e defesa
 
-- Agendamento exige `ADVISOR_APPROVED`/`READY_FOR_DEFENSE`; admin, coordenador do curso ou orientador da própria tese podem agendar.
-- Local obrigatório e URL válida quando `modality=REMOTE`; conflito de horário verificado ao adicionar membro e ao reagendar.
+- Agendamento exige `ADVISOR_APPROVED`/`READY_FOR_DEFENSE`; admin, coordenador do curso ou orientador da própria tese podem agendar. Banca e comissão são enviadas no mesmo payload e gravadas na mesma transação. Sem membro, ou com conflito real de horário, nada é gravado.
+- Local obrigatório e URL válida quando `modality=REMOTE`. Conflito real de horário bloqueia ao adicionar membro e ao reagendar. A margem de 60 minutos, configurável por `DEFENSE_SCHEDULE_BUFFER_MINUTES`, gera uma zona amarela: a operação é permitida depois de confirmação no frontend e o aviso fica no detalhe da banca.
 - Disponibilidade (`PENDING`/`CONFIRMED`/`DECLINED`) com endpoints do próprio membro; `start_defense` e abertura automática exigem confirmação dos não suplentes.
 - Avaliação individual com nota 0–10, parecer e recomendação; edição permitida somente antes do encerramento e apenas pelo próprio avaliador.
 - Encerramento manual e automático usam `_finalize_defense`; histórico de status e evento `defense.completed` com `result`/`automatic`. Resultado exposto em `ThesisStatusHistory.metadata` (`defenseId`, `defenseResult`).
@@ -105,6 +105,8 @@ Legenda: **Implementado** = código e teste/validação existentes; **Parcial** 
 | Logs de apps fora do runserver sem formato/nível | `settings.py` | `thesismanagerbackend.tests.test_logging` |
 | `GET /api/v1/public/courses` retornava 500 no serviço de repositório (chamada sem argumento obrigatório) | `repository_readmodel/views.py` | `repository_readmodel.tests.test_projections` + smoke no gateway/serviço |
 | PDF com apenas `%PDF-` no início era aceito (polyglot/arquivo truncado) | `theses/services.py` | `theses.tests.test_pdf_validation` — TDD: 2 testes falharam antes da implementação; um terceiro caso (comentário após `%%EOF`, usado no E2E) falhou e levou à checagem do marcador no trecho final |
+| Disponibilidade de membro não era validada no agendamento | `theses/defense_committee.py`, `theses/defense_scheduling.py`, frontend | `theses.tests.test_schedule_warnings` e testes de componente/E2E — TDD: conflito real bloqueia, zona amarela configurável pede confirmação no frontend e mostra aviso no detalhe |
+| Agendamento criava a banca antes dos membros e aceitava falha parcial | `theses/serializers.py`, `theses/defense_scheduling.py`, `theses/views.py`, frontend | `theses.tests.test_atomic_scheduling` e testes do formulário — TDD: banca e comissão entram no mesmo payload e na mesma transação; sem membro ou com conflito real nada é gravado |
 | Documentação desatualizada, referência a arquivo inexistente e endpoint de depuração sem relação com o domínio | `README.md`, este arquivo, `AGENTS.md`, `thesismanagerbackend/urls.py` | revisão final |
 
 ## 4. Limitações e riscos remanescentes
@@ -121,9 +123,9 @@ Legenda: **Implementado** = código e teste/validação existentes; **Parcial** 
 
 | Suíte | Situação |
 |---|---|
-| `python manage.py test_fast` | 210 testes, OK (41 módulos curados), após a auditoria. |
-| `python manage.py test` | 704 testes, 6 falhas conhecidas do SQLite (detalhes no README). |
-| `./scripts/test-postgres.sh` | 704 testes, **OK** nos 6 bancos PostgreSQL separados (`SERVICE_DATABASES_SHARED=False`). |
+| `python manage.py test_fast` | 219 testes, OK (42 módulos curados). |
+| `python manage.py test` | 713 testes, 6 falhas conhecidas do SQLite (detalhes no README). |
+| `./scripts/test-postgres.sh` | 713 testes, **OK** nos 6 bancos PostgreSQL separados (`SERVICE_DATABASES_SHARED=False`). |
 | E2E Playwright | 25 especificações ativas no repositório frontend; `npm run test:e2e`. |
 
 ## 6. Endpoints principais

@@ -13,7 +13,7 @@ from rest_framework.test import APIClient
 from academic.models import Course, Department
 from accounts.models import ProfileRole, User, UserProfileRole
 from theses.defense_scheduling import REMOTE_LOCATION_ERROR, schedule_defense
-from theses.models import Defense, DefenseModality, Thesis, ThesisStatus
+from theses.models import CommitteeRole, Defense, DefenseModality, Thesis, ThesisStatus
 
 TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -39,7 +39,7 @@ class RemoteDefenseLocationTests(TestCase):
         self.when = (timezone.now() + timedelta(days=7)).isoformat()
 
     def _schedule(self, payload: dict[str, str]):
-        body = {"scheduledDatetime": self.when, **payload}
+        body = {"scheduledDatetime": self.when, "members": [{"role": CommitteeRole.PRESIDENT, "userId": str(self.advisor.pk)}], **payload}
         return self.client.post(f"/api/v1/theses/{self.thesis.pk}/defenses", body, format="json")
 
     def _patch(self, defense: Defense, payload: dict[str, str]):

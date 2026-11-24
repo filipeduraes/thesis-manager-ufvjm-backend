@@ -19,6 +19,7 @@ from theses.views import (
     DefenseMemberCreateView,
     DefenseMemberDeleteView,
     DefenseRevertStatusView,
+    DefenseScheduleCheckView,
     DefenseStartView,
     SchedulableThesisListView,
 )
@@ -106,6 +107,7 @@ urlpatterns = [
     path("api/v1/theses/<uuid:thesis_id>/defenses", DefenseListCreateView.as_view(), name="api_thesis_defenses"),
     path("api/v1/defenses", DefenseListView.as_view(), name="api_defenses"),
     path("api/v1/defenses/schedulable-theses", SchedulableThesisListView.as_view(), name="api_defense_schedulable_theses"),
+    path("api/v1/defenses/check-schedule", DefenseScheduleCheckView.as_view(), name="api_defense_check_schedule"),
     path("api/v1/defenses/<uuid:defense_id>", DefenseDetailView.as_view(), name="api_defense_detail"),
     path("api/v1/defenses/<uuid:defense_id>/cancel", DefenseCancelView.as_view(), name="api_defense_cancel"),
     path("api/v1/defenses/<uuid:defense_id>/start", DefenseStartView.as_view(), name="api_defense_start"),

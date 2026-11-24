@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from academic.models import Course, Department
 from accounts.models import AuditLog, ProfileRole, User, UserProfileRole
-from theses.defense_committee import _can_manage_defense, add_institutional_member, remove_member
+from theses.defense_committee import ScheduleWarningError, _can_manage_defense, add_institutional_member, remove_member
 from theses.defense_evaluation import submit_committee_evaluation
 from theses.defense_scheduling import cancel_defense, close_defense, schedule_defense, start_defense
 from theses.models import CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, Thesis, ThesisStatus, ThesisStatusHistory
@@ -174,16 +174,19 @@ class CommitteeMemberServiceTests(TestCase):
         with self.assertRaises(ValidationError):
             add_institutional_member(defense2, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
 
-    def test_adjacent_session_does_not_raise(self) -> None:
-        # Banca 1: T a T+120. Banca 2: T+120 a T+240. Adjacentes, não sobrepõem.
+    def test_adjacent_session_needs_warning_acknowledgement(self) -> None:
+        # Banca 1: T a T+120. Banca 2: T+120 a T+240. Não sobrepõem, mas ficam na zona amarela.
         t1 = timezone.now() + timedelta(days=7)
         add_institutional_member(self.defense, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
 
         thesis2 = Thesis.objects.create(course_id=self.course.pk, advisor_id=self.advisor.pk, title="Tese 2", status=ThesisStatus.ADVISOR_APPROVED)
         defense2 = schedule_defense(thesis2, scheduled_datetime=t1 + timedelta(minutes=120), actor=self.admin)
 
-        # Não deve levantar ValidationError
-        add_institutional_member(defense2, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
+        with self.assertRaises(ScheduleWarningError):
+            add_institutional_member(defense2, CommitteeRole.MEMBER, self.member_user, actor=self.admin)
+
+        member = add_institutional_member(defense2, CommitteeRole.MEMBER, self.member_user, acknowledge_schedule_warning=True, actor=self.admin)
+        self.assertIsNotNone(member.pk)
 
     # --- remove_member ---
 

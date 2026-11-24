@@ -19,11 +19,11 @@ from accounts.audit_events import event_payload
 from accounts.audit_identifiers import AuditEvent
 from accounts.authentication import ExternalInvitationPrincipal
 from accounts.models import AuditAction, AuditLog, User
-from accounts.services import avatar_urls_for, record_audit
+from accounts.services import avatar_urls_for, create_external_invitation, record_audit
 from theses.audit import audit_defense
-from theses.defense_committee import DefenseViewerContext, _can_manage_defense, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, pending_availability_members, reset_committee_availability
-from theses.events import record_defense_cancelled, record_defense_completed, record_defense_rescheduled, record_defense_scheduled
-from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
+from theses.defense_committee import DefenseViewerContext, ScheduleWarningError, _can_manage_defense, _check_schedule_overlap, _external_warnings, _has_external_schedule_overlap, _institutional_warnings, build_defense_viewer_context, check_committee_schedule_conflicts, defense_member_payload, defense_schedule_warnings, pending_availability_members, reset_committee_availability
+from theses.events import record_defense_cancelled, record_defense_completed, record_defense_member_invited, record_defense_rescheduled, record_defense_scheduled
+from theses.models import ACTIVE_DEFENSE_STATUSES, APPROVED_DEFENSE_STATUSES, SCHEDULABLE_STATUSES, CommitteeRole, Defense, DefenseMember, DefenseMemberEvaluation, DefenseModality, DefenseResult, DefenseStatus, DefenseStatusHistory, Thesis, ThesisStatus, ThesisStatusHistory
 from theses.services import PublicationTrigger, publish_if_ready, purge_thesis_versions, thesis_summary_payload, user_is_admin
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ def defense_status_history_payload(defense: Defense) -> list[dict[str, Any]]:
 
 
 @transaction.atomic
-def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_minutes: int = 120, modality: str = DefenseModality.IN_PERSON, location: str = "", notes: str = "", actor: User, request: HttpRequest | None = None) -> Defense:
+def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_minutes: int = 120, modality: str = DefenseModality.IN_PERSON, location: str = "", notes: str = "", members: list[dict[str, Any]] | None = None, acknowledge_schedule_warning: bool = False, actor: User, request: HttpRequest | None = None) -> Defense:
     """
     Schedule a defense session for an advisor-approved thesis.
 
@@ -140,6 +140,34 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
     clean_location = location.strip()
     validate_defense_location(modality, clean_location)
 
+    # Valida a comissão antes de gravar qualquer coisa. O rascunho em memória permite
+    # usar as mesmas funções de conflito aplicadas quando um membro entra depois.
+    draft = Defense(scheduled_datetime=scheduled_datetime, duration_minutes=duration_minutes, thesis=thesis)
+    prepared_members: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
+    for item in members or []:
+        role = item["role"]
+        if role == CommitteeRole.PRESIDENT and any(prepared["role"] == CommitteeRole.PRESIDENT for prepared in prepared_members):
+            raise ValidationError("Esta banca já possui um presidente.")
+        if item.get("userId"):
+            user = User.objects.filter(pk=item["userId"], is_active=True).first()
+            if user is None:
+                raise ValidationError("Usuário informado para a banca não existe.")
+            _check_schedule_overlap(draft, user)
+            warnings.extend(_institutional_warnings(draft, user.pk, user.name or user.email))
+            prepared_members.append({"role": role, "kind": "institutional", "user": user, "name": user.name or user.email, "email": user.email, "institution": ""})
+            continue
+        email = str(item.get("email") or "").strip().lower()
+        name = str(item.get("name") or "").strip() or email
+        if not email:
+            raise ValidationError("Informe o e-mail do membro externo.")
+        if _has_external_schedule_overlap(draft, email):
+            raise ValidationError("Este membro já participa de outra banca no mesmo período.")
+        warnings.extend(_external_warnings(draft, email, name))
+        prepared_members.append({"role": role, "kind": "external", "name": name, "email": email, "institution": str(item.get("institution") or "").strip()})
+    if warnings and not acknowledge_schedule_warning:
+        raise ScheduleWarningError(warnings)
+
     main_author = thesis.authors.filter(is_main_author=True).first()
     snapshot = {
         "thesisId": str(thesis.pk),
@@ -162,6 +190,27 @@ def schedule_defense(thesis: Thesis, *, scheduled_datetime: datetime, duration_m
         created_by_id=actor.pk,
     )
     record_defense_status_change(defense, "", actor, "Banca agendada.")
+
+    for prepared in prepared_members:
+        if prepared["kind"] == "institutional":
+            member = DefenseMember.objects.create(
+                defense=defense,
+                role=prepared["role"],
+                institutional_member_id=prepared["user"].pk,
+                name=prepared["name"],
+                email=prepared["email"],
+            )
+        else:
+            invitation = create_external_invitation(name=prepared["name"], email=prepared["email"], institution=prepared["institution"], invited_by=actor, request=request)
+            member = DefenseMember.objects.create(
+                defense=defense,
+                role=prepared["role"],
+                external_invitation_id=invitation.pk,
+                name=prepared["name"],
+                email=prepared["email"],
+                institution=prepared["institution"],
+            )
+        record_defense_member_invited(defense, member)
 
     previous_status = thesis.status
     thesis.status = ThesisStatus.DEFENSE_SCHEDULED
@@ -261,7 +310,7 @@ def sync_defense_status(defense: Defense, *, request: HttpRequest | None = None)
 
 
 @transaction.atomic
-def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = None, duration_minutes: int | None = None, modality: str | None = None, location: str | None = None, notes: str | None = None, actor: User, request: HttpRequest | None = None) -> Defense:
+def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = None, duration_minutes: int | None = None, modality: str | None = None, location: str | None = None, notes: str | None = None, acknowledge_schedule_warning: bool = False, actor: User, request: HttpRequest | None = None) -> Defense:
     """
     Update scheduling details for a not-yet-started defense.
 
@@ -321,6 +370,9 @@ def update_defense(defense: Defense, *, scheduled_datetime: datetime | None = No
         validate_defense_location(defense.modality, defense.location)
     if scheduled_datetime is not None or duration_minutes is not None:
         check_committee_schedule_conflicts(defense)
+        warnings = defense_schedule_warnings(defense)
+        if warnings and not acknowledge_schedule_warning:
+            raise ScheduleWarningError(warnings)
     defense.save(update_fields=["scheduled_datetime", "duration_minutes", "modality", "location", "notes", "updated_at"] + extra_fields)
     availability_reset = datetime_changed or duration_changed
     if availability_reset:

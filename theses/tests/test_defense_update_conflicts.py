@@ -62,8 +62,13 @@ class DefenseUpdateConflictApiTests(TestCase):
         self.defense_b.refresh_from_db()
         self.assertEqual(self.defense_b.scheduled_datetime, new_start)
 
-    def test_adjacent_reschedule_succeeds(self) -> None:
-        response = self._patch(self.defense_b, {"scheduledDatetime": (self.start + timedelta(minutes=120)).isoformat()})
+    def test_adjacent_reschedule_needs_warning_acknowledgement(self) -> None:
+        new_start = (self.start + timedelta(minutes=120)).isoformat()
+        response = self._patch(self.defense_b, {"scheduledDatetime": new_start})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "SCHEDULE_WARNING")
+
+        response = self._patch(self.defense_b, {"scheduledDatetime": new_start, "acknowledgeScheduleWarning": True})
         self.assertEqual(response.status_code, 200)
 
     def test_reschedule_into_member_conflict_returns_400(self) -> None:

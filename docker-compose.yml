@@ -38,6 +38,7 @@ x-backend-environment: &backend-environment
   SERVICE_TOKEN: ${SERVICE_TOKEN:-}
   MEDIA_ROOT: /app/media
   SERVICE_DATABASES_SHARED: "False"
+  DEFENSE_SCHEDULE_BUFFER_MINUTES: ${DEFENSE_SCHEDULE_BUFFER_MINUTES:-60}
   INDEXING_QUEUE: ${INDEXING_QUEUE:-indexing.thesis-events}
   ADJUDICATION_QUEUE: ${ADJUDICATION_QUEUE:-adjudication.thesis-events}
   # E-mail de desenvolvimento: tudo vai para o Mailpit (serviço mailpit), nunca para o

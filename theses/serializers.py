@@ -183,6 +183,16 @@ class DocumentUploadSerializer(serializers.Serializer):
         return value
 
 
+class ScheduledMemberSerializer(serializers.Serializer):
+    """One committee member supplied together with the defense schedule."""
+
+    role = serializers.ChoiceField(choices=CommitteeRole.choices)
+    userId = serializers.UUIDField(required=False)
+    name = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    email = serializers.EmailField(required=False, allow_blank=True, default="")
+    institution = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class ScheduleDefenseSerializer(serializers.Serializer):
     """
     Validate a defense scheduling request.
@@ -193,6 +203,24 @@ class ScheduleDefenseSerializer(serializers.Serializer):
     modality = serializers.ChoiceField(choices=DefenseModality.choices, required=False, default=DefenseModality.IN_PERSON)
     location = serializers.CharField(required=False, allow_blank=True, default="")
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+    members = ScheduledMemberSerializer(many=True)
+    acknowledgeScheduleWarning = serializers.BooleanField(source="acknowledge_schedule_warning", required=False, default=False)
+
+    def validate_members(self, value: list[dict[str, object]]) -> list[dict[str, object]]:
+        if not value:
+            raise serializers.ValidationError("Informe ao menos um membro para a banca.")
+        for member in value:
+            if member["role"] != CommitteeRole.ALTERNATE and not (member.get("userId") or member.get("email")):
+                raise serializers.ValidationError("Cada membro precisa de um usuário ou e-mail.")
+        return value
+
+
+class ScheduleCheckSerializer(serializers.Serializer):
+    """Validate a draft schedule before the defense is created."""
+
+    scheduledDatetime = serializers.DateTimeField(source="scheduled_datetime")
+    durationMinutes = serializers.IntegerField(source="duration_minutes", required=False, min_value=1, max_value=720, default=120)
+    members = ScheduledMemberSerializer(many=True)
 
 
 class UpdateDefenseSerializer(serializers.Serializer):
@@ -205,6 +233,7 @@ class UpdateDefenseSerializer(serializers.Serializer):
     modality = serializers.ChoiceField(choices=DefenseModality.choices, required=False)
     location = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+    acknowledgeScheduleWarning = serializers.BooleanField(source="acknowledge_schedule_warning", required=False, default=False)
 
 
 class AvailabilityResponseSerializer(serializers.Serializer):
@@ -224,6 +253,7 @@ class AddInstitutionalMemberSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=CommitteeRole.choices)
     userId = serializers.PrimaryKeyRelatedField(source="user", queryset=User.objects.filter(is_active=True))
     conflictReason = serializers.CharField(source="conflict_reason", required=False, allow_blank=True, default="")
+    acknowledgeScheduleWarning = serializers.BooleanField(source="acknowledge_schedule_warning", required=False, default=False)
 
 
 class AddExternalMemberSerializer(serializers.Serializer):
@@ -236,6 +266,7 @@ class AddExternalMemberSerializer(serializers.Serializer):
     email = serializers.EmailField()
     institution = serializers.CharField(required=False, allow_blank=True, default="")
     conflictReason = serializers.CharField(source="conflict_reason", required=False, allow_blank=True, default="")
+    acknowledgeScheduleWarning = serializers.BooleanField(source="acknowledge_schedule_warning", required=False, default=False)
 
 
 class SubmitEvaluationSerializer(serializers.Serializer):

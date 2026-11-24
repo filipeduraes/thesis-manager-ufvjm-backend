@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
+from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
@@ -27,6 +28,19 @@ from theses.audit import audit_defense
 from theses.events import record_defense_member_invited, record_external_member_invited
 from theses.models import ACTIVE_DEFENSE_STATUSES, AvailabilityStatus, CommitteeRole, Defense, DefenseMember, DefenseStatus, Thesis
 from theses.services import theses_visible_to, user_is_admin, user_is_advisor, user_is_coordinator
+
+
+SCHEDULE_WARNING_CODE = "SCHEDULE_WARNING"
+DEFAULT_SCHEDULE_BUFFER_MINUTES = 60
+
+
+class ScheduleWarningError(Exception):
+    """Yellow schedule conflict: the operation needs explicit acknowledgement."""
+
+    def __init__(self, warnings: list[dict[str, Any]]) -> None:
+        self.code = SCHEDULE_WARNING_CODE
+        self.warnings = warnings
+        super().__init__("A banca está próxima de outra defesa do mesmo membro.")
 
 
 # TODO(auditoria): se a leitura de banca para membros institucionais for
@@ -407,6 +421,132 @@ def _member_availability_payload(member: DefenseMember, visible: bool) -> dict[s
     }
 
 
+def _schedule_buffer_minutes() -> int:
+    """Return the configured yellow-zone margin, falling back to one hour."""
+    try:
+        value = int(getattr(settings, "DEFENSE_SCHEDULE_BUFFER_MINUTES", DEFAULT_SCHEDULE_BUFFER_MINUTES))
+    except (TypeError, ValueError):
+        return DEFAULT_SCHEDULE_BUFFER_MINUTES
+    return max(0, value)
+
+
+def _buffered_interval(start: Any, duration_minutes: int, buffer_minutes: int) -> tuple[Any, Any]:
+    """Return the interval of a defense expanded by the yellow-zone margin."""
+    return (
+        start - timedelta(minutes=buffer_minutes),
+        start + timedelta(minutes=duration_minutes + buffer_minutes),
+    )
+
+
+def _overlaps(this_start: Any, this_end: Any, other_start: Any, other_end: Any) -> bool:
+    """Return whether two half-open intervals intersect."""
+    return this_start < other_end and other_start < this_end
+
+
+def _warning(member_name: str, other: dict[str, Any]) -> dict[str, str]:
+    """Build a public warning entry without e-mail addresses."""
+    other_start = other["scheduled_datetime"]
+    other_end = other_start + timedelta(minutes=other["duration_minutes"])
+    return {
+        "memberName": member_name,
+        "defenseId": str(other["pk"]),
+        "scheduledDatetime": other_start.isoformat(),
+        "scheduledEndDatetime": other_end.isoformat(),
+    }
+
+
+def _institutional_warnings(defense: Defense, user_id: Any, member_name: str) -> list[dict[str, str]]:
+    """Return yellow conflicts of one institutional member."""
+    buffer_minutes = _schedule_buffer_minutes()
+    if not buffer_minutes:
+        return []
+    this_start = defense.scheduled_datetime
+    this_end = this_start + timedelta(minutes=defense.duration_minutes)
+    candidates = (
+        Defense.objects.filter(members__institutional_member_id=user_id, status__in=ACTIVE_DEFENSE_STATUSES)
+        .exclude(pk=defense.pk)
+        .values("pk", "scheduled_datetime", "duration_minutes")
+    )
+    warnings: list[dict[str, str]] = []
+    for other in candidates:
+        other_start, other_end = _buffered_interval(other["scheduled_datetime"], other["duration_minutes"], buffer_minutes)
+        if _overlaps(this_start, this_end, other_start, other_end):
+            warnings.append(_warning(member_name, other))
+    return warnings
+
+
+def _external_warnings(defense: Defense, email: str, member_name: str) -> list[dict[str, str]]:
+    """Return yellow conflicts of one external member, identified by e-mail."""
+    buffer_minutes = _schedule_buffer_minutes()
+    if not buffer_minutes:
+        return []
+    this_start = defense.scheduled_datetime
+    this_end = this_start + timedelta(minutes=defense.duration_minutes)
+    candidates = (
+        Defense.objects.filter(
+            members__email__iexact=email,
+            members__external_invitation__isnull=False,
+            status__in=ACTIVE_DEFENSE_STATUSES,
+        )
+        .exclude(pk=defense.pk)
+        .values("pk", "scheduled_datetime", "duration_minutes")
+    )
+    warnings: list[dict[str, str]] = []
+    for other in candidates:
+        other_start, other_end = _buffered_interval(other["scheduled_datetime"], other["duration_minutes"], buffer_minutes)
+        if _overlaps(this_start, this_end, other_start, other_end):
+            warnings.append(_warning(member_name, other))
+    return warnings
+
+
+def defense_schedule_warnings(defense: Defense) -> list[dict[str, str]]:
+    """Return yellow conflicts for every non-alternate member of a defense."""
+    warnings: list[dict[str, str]] = []
+    members = defense.members.exclude(role=CommitteeRole.ALTERNATE).order_by("created_at")
+    for member in members:
+        if member.institutional_member_id is not None:
+            warnings.extend(_institutional_warnings(defense, member.institutional_member_id, member.name))
+        elif member.external_invitation_id is not None and member.email:
+            warnings.extend(_external_warnings(defense, member.email.strip().lower(), member.name))
+    return warnings
+
+
+def inspect_schedule_conflicts(*, scheduled_datetime: Any, duration_minutes: int, members: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Inspect a draft schedule without writing anything; used by the frontend form."""
+    draft = Defense(scheduled_datetime=scheduled_datetime, duration_minutes=duration_minutes)
+    conflicts: list[dict[str, str]] = []
+    for item in members:
+        name = ""
+        if item.get("userId"):
+            user = User.objects.filter(pk=item["userId"], is_active=True).first()
+            if user is None:
+                continue
+            name = user.name or user.email
+            if _has_schedule_overlap(draft, user.pk):
+                level = "RED"
+                message = f"O membro {name} já participa de outra banca no mesmo período."
+            elif _institutional_warnings(draft, user.pk, name):
+                level = "YELLOW"
+                message = f"O membro {name} participa de outra banca próxima a esse horário."
+            else:
+                continue
+        else:
+            name = str(item.get("name") or "")
+            email = str(item.get("email") or "").strip().lower()
+            if not email:
+                continue
+            if _has_external_schedule_overlap(draft, email):
+                level = "RED"
+                message = f"O membro {name} já participa de outra banca no mesmo período."
+            elif _external_warnings(draft, email, name):
+                level = "YELLOW"
+                message = f"O membro {name} participa de outra banca próxima a esse horário."
+            else:
+                continue
+        conflicts.append({"memberName": name, "level": level, "message": message})
+    return conflicts
+
+
 def _has_schedule_overlap(defense: Defense, user_id: Any) -> bool:
     """
     Return whether the user belongs to another active defense overlapping this one.
@@ -480,7 +620,7 @@ def _check_schedule_overlap(defense: Defense, user: User) -> None:
         ValidationError: When an overlapping active defense is found.
     """
     if _has_schedule_overlap(defense, user.pk):
-        raise ValidationError("Este membro já participa de outra banca no mesmo período.")
+        raise ValidationError(f"O membro {user.name or user.email} já participa de outra banca no mesmo período.")
 
 
 def check_committee_schedule_conflicts(defense: Defense) -> None:
@@ -507,7 +647,7 @@ def check_committee_schedule_conflicts(defense: Defense) -> None:
 
 
 @transaction.atomic
-def add_institutional_member(defense: Defense, role: str, user: User, *, conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> DefenseMember:
+def add_institutional_member(defense: Defense, role: str, user: User, *, conflict_reason: str = "", acknowledge_schedule_warning: bool = False, actor: User, request: HttpRequest | None = None) -> DefenseMember:
     """
     Add an institutional user as a committee member.
 
@@ -535,6 +675,9 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
     if role == CommitteeRole.PRESIDENT and defense.members.filter(role=CommitteeRole.PRESIDENT).exists():
         raise ValidationError("Esta banca já possui um presidente.")
     _check_schedule_overlap(defense, user)
+    warnings = _institutional_warnings(defense, user.pk, user.name or user.email)
+    if warnings and not acknowledge_schedule_warning:
+        raise ScheduleWarningError(warnings)
 
     has_conflict = bool(conflict_reason.strip())
     try:
@@ -565,7 +708,7 @@ def add_institutional_member(defense: Defense, role: str, user: User, *, conflic
 
 
 @transaction.atomic
-def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", actor: User, request: HttpRequest | None = None) -> DefenseMember:
+def add_external_member(defense: Defense, role: str, *, name: str, email: str, institution: str = "", conflict_reason: str = "", acknowledge_schedule_warning: bool = False, actor: User, request: HttpRequest | None = None) -> DefenseMember:
     """
     Add an external member via the ExternalInvitation flow.
 
@@ -606,7 +749,10 @@ def add_external_member(defense: Defense, role: str, *, name: str, email: str, i
     if not clean_email:
         raise ValidationError("Informe o e-mail do membro externo.")
     if _has_external_schedule_overlap(defense, clean_email):
-        raise ValidationError("Este membro já participa de outra banca no mesmo período.")
+        raise ValidationError(f"O membro {clean_name} já participa de outra banca no mesmo período.")
+    warnings = _external_warnings(defense, clean_email, clean_name)
+    if warnings and not acknowledge_schedule_warning:
+        raise ScheduleWarningError(warnings)
 
     invitation = create_external_invitation(
         name=clean_name,

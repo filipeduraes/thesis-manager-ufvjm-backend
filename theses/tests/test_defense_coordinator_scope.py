@@ -57,7 +57,14 @@ class CoordinatorDefenseScopeTests(TestCase):
         self.assertEqual({item["id"] for item in schedulable.data["results"]}, {str(self.schedulable_a.pk)})
         self.assertEqual(client.get(f"/api/v1/defenses/{self.defense_a.pk}").status_code, 200)
         self.assertEqual(client.patch(f"/api/v1/defenses/{self.defense_a.pk}", {"notes": "ok"}, format="json").status_code, 200)
-        schedule = client.post(f"/api/v1/theses/{self.schedulable_a.pk}/defenses", {"scheduledDatetime": (timezone.now() + timedelta(days=9)).isoformat()}, format="json")
+        schedule = client.post(
+            f"/api/v1/theses/{self.schedulable_a.pk}/defenses",
+            {
+                "scheduledDatetime": (timezone.now() + timedelta(days=9)).isoformat(),
+                "members": [{"role": CommitteeRole.PRESIDENT, "userId": str(self.advisor.pk)}],
+            },
+            format="json",
+        )
         self.assertEqual(schedule.status_code, 201)
 
     def test_coordinator_via_coordinator_email(self) -> None:

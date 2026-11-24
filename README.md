@@ -132,6 +132,7 @@ O `.env` que você recebeu já traz as credenciais do Google. Se precisar revisa
 | `REDIS_URL`, `RABBITMQ_URL` | Usadas quando os processos rodam fora do Compose. |
 | `ADMIN_ALLOWED_CIDRS`, `TRUSTED_PROXY_COUNT`, `TRUSTED_PROXY_CIDRS` | Origem de rede da área administrativa. |
 | `BACKEND_PORT`, `FRONTEND_PORT`, `GATEWAY_PORT` | Portas publicadas. Os padrões são 8000, 3000 e 8080. |
+| `DEFENSE_SCHEDULE_BUFFER_MINUTES` | Margem da zona amarela de conflito de banca, em minutos. Padrão 60. O conflito real sempre bloqueia. |
 
 O Compose também publica PostgreSQL na 5433, RabbitMQ na 5672, o painel do RabbitMQ em `http://localhost:15672` e o Mailpit em `http://localhost:8025`. Todas as portas ficam em `127.0.0.1`.
 

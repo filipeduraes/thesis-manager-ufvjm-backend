@@ -103,7 +103,7 @@ class DefenseSchedulingApiTests(TestCase):
 
     def test_advisor_schedules_own_thesis(self) -> None:
         self.client.force_authenticate(user=self.advisor)
-        payload = {"scheduledDatetime": (timezone.now() + timedelta(days=7)).isoformat(), "modality": "IN_PERSON", "location": "Sala 101"}
+        payload = {"scheduledDatetime": (timezone.now() + timedelta(days=7)).isoformat(), "modality": "IN_PERSON", "location": "Sala 101", "members": [{"role": "PRESIDENT", "userId": str(self.advisor.pk)}]}
         response = self.client.post(f"/api/v1/theses/{self.thesis.pk}/defenses", payload, format="json")
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["defense"]["status"], DefenseStatus.SCHEDULED)
@@ -112,7 +112,7 @@ class DefenseSchedulingApiTests(TestCase):
 
     def test_admin_schedules_any_thesis(self) -> None:
         self.client.force_authenticate(user=self.admin)
-        payload = {"scheduledDatetime": (timezone.now() + timedelta(days=7)).isoformat()}
+        payload = {"scheduledDatetime": (timezone.now() + timedelta(days=7)).isoformat(), "members": [{"role": "PRESIDENT", "userId": str(self.advisor.pk)}]}
         response = self.client.post(f"/api/v1/theses/{self.thesis.pk}/defenses", payload, format="json")
         self.assertEqual(response.status_code, 201)
 

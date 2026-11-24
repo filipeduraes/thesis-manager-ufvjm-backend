@@ -155,6 +155,14 @@ def _validation_response(exc: DjangoValidationError) -> Response:
     return Response({"detail": detail, "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _schedule_warning_response(exc: ScheduleWarningError) -> Response:
+    """Return the yellow-zone confirmation request to the client."""
+    return Response(
+        {"detail": str(exc), "code": exc.code, "warnings": exc.warnings},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 def visible_thesis_or_404(user: User, thesis_id: str) -> Thesis:
     """
     Return a thesis visible to ``user`` or raise 404.
@@ -1148,13 +1156,13 @@ class PublicThesisDownloadView(PublicRepositoryView):
 
 # ─── Defense API helpers ──────────────────────────────────────────────────────
 
-from theses.defense_committee import add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, regenerate_external_member_invitation, remove_member, resend_external_member_invitation, resolve_committee_member, respond_availability  # noqa: E402
+from theses.defense_committee import SCHEDULE_WARNING_CODE, ScheduleWarningError, add_external_member, add_institutional_member, coordinator_managed_theses, defense_availability_summary, defense_member_payload, defense_schedule_warnings, inspect_schedule_conflicts, regenerate_external_member_invitation, remove_member, resend_external_member_invitation, resolve_committee_member, respond_availability  # noqa: E402
 from theses.defense_evaluation import defense_evaluation_payload, record_committee_evaluation  # noqa: E402
 from theses.defense_listing import DEFENSE_LIST_PREFETCH, DefenseListFilters, defense_list_payload, defense_viewer_context_for, defenses_visible_to, list_visible_defenses, schedulable_theses_for, viewer_membership_payload  # noqa: E402
 from theses.defense_scheduling import cancel_defense, defense_close_entries_prefetch, close_defense, defense_payload, defense_status_history_payload, revert_defense_status, schedule_defense, start_defense, sync_defense_status, update_defense  # noqa: E402
 from theses.models import Defense, DefenseMember, DefenseStatus  # noqa: E402
 from theses.permissions import IsDefenseCommitteeMember  # noqa: E402
-from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
+from theses.serializers import AddExternalMemberSerializer, AddInstitutionalMemberSerializer, AvailabilityResponseSerializer, ScheduleCheckSerializer, ScheduleDefenseSerializer, SubmitEvaluationSerializer, UpdateDefenseSerializer  # noqa: E402
 from theses.services import user_is_admin, user_is_advisor, user_is_coordinator  # noqa: E402
 
 
@@ -1312,9 +1320,27 @@ class DefenseListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             defense = schedule_defense(thesis, actor=request.user, request=request, **serializer.validated_data)
+        except ScheduleWarningError as exc:
+            return _schedule_warning_response(exc)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"defense": defense_payload(defense, viewer=request.user)}, status=status.HTTP_201_CREATED)
+        payload = defense_payload(defense, viewer=request.user)
+        payload["scheduleWarnings"] = defense_schedule_warnings(defense)
+        return Response({"defense": payload}, status=status.HTTP_201_CREATED)
+
+
+class DefenseScheduleCheckView(APIView):
+    """Inspect a draft schedule for conflicts without creating anything."""
+
+    throttle_scope = "thesis"
+    permission_classes = [IsInstitutionalUser]
+
+    def post(self, request) -> Response:
+        """Return one entry per conflicting member, classified as RED or YELLOW."""
+        serializer = ScheduleCheckSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        conflicts = inspect_schedule_conflicts(**serializer.validated_data)
+        return Response({"conflicts": conflicts})
 
 
 class DefenseDetailView(APIView):
@@ -1344,6 +1370,7 @@ class DefenseDetailView(APIView):
         detail_payload["statusHistory"] = defense_status_history_payload(defense)
         viewer_permissions = viewer_context.permissions_for(defense)
         detail_payload.update(defense_availability_summary(defense, include_pending_confirmations=viewer_permissions.can_manage))
+        detail_payload["scheduleWarnings"] = defense_schedule_warnings(defense) if viewer_permissions.can_manage else []
         detail_payload["viewerMembership"] = viewer_membership_payload(defense, request.user)
         detail_payload["viewerPermissions"] = viewer_permissions.to_payload()
         return Response({"defense": detail_payload})
@@ -1365,9 +1392,13 @@ class DefenseDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             defense = update_defense(defense, actor=request.user, request=request, **serializer.validated_data)
+        except ScheduleWarningError as exc:
+            return _schedule_warning_response(exc)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"defense": defense_payload(defense, viewer=request.user)})
+        payload = defense_payload(defense, viewer=request.user)
+        payload["scheduleWarnings"] = defense_schedule_warnings(defense)
+        return Response({"defense": payload})
 
 
 class DefenseCancelView(APIView):
@@ -1485,10 +1516,23 @@ class DefenseMemberCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            member = add_institutional_member(defense, data["role"], data["user"], conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+            member = add_institutional_member(
+                defense,
+                data["role"],
+                data["user"],
+                conflict_reason=data.get("conflict_reason", ""),
+                acknowledge_schedule_warning=data.get("acknowledge_schedule_warning", False),
+                actor=request.user,
+                request=request,
+            )
+        except ScheduleWarningError as exc:
+            return _schedule_warning_response(exc)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return Response({"member": defense_member_payload(member, viewer=request.user)}, status=status.HTTP_201_CREATED)
+        return Response(
+            {"member": defense_member_payload(member, viewer=request.user), "warnings": defense_schedule_warnings(defense)},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 def _invitation_response(member: DefenseMember, request, status_code: int) -> Response:
@@ -1540,10 +1584,24 @@ class DefenseExternalMemberCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            member = add_external_member(defense, data["role"], name=data["name"], email=data["email"], institution=data.get("institution", ""), conflict_reason=data.get("conflict_reason", ""), actor=request.user, request=request)
+            member = add_external_member(
+                defense,
+                data["role"],
+                name=data["name"],
+                email=data["email"],
+                institution=data.get("institution", ""),
+                conflict_reason=data.get("conflict_reason", ""),
+                acknowledge_schedule_warning=data.get("acknowledge_schedule_warning", False),
+                actor=request.user,
+                request=request,
+            )
+        except ScheduleWarningError as exc:
+            return _schedule_warning_response(exc)
         except DjangoValidationError as exc:
             return _validation_response(exc)
-        return _invitation_response(member, request, status.HTTP_201_CREATED)
+        response = _invitation_response(member, request, status.HTTP_201_CREATED)
+        response.data["warnings"] = defense_schedule_warnings(defense)
+        return response
 
 
 class DefenseExternalMemberInvitationResendView(APIView):

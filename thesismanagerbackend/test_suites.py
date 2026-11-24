@@ -32,6 +32,7 @@ FAST_TEST_LABELS: tuple[str, ...] = (
     "theses.tests.test_public_repository_cache",
     "theses.tests.test_upload_tracking",
     "theses.tests.test_pdf_validation",
+    "theses.tests.test_schedule_warnings",
     "theses.tests.test_author_groups",
     "theses.tests.test_thesis_course_scope",
     "theses.tests.test_coordinator_scope_publication",
